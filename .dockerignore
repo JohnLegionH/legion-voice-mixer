@@ -1,5 +1,5 @@
 # Keep the build context small and reproducible.
-# The Dockerfile only needs: vendor/janus-gateway, Makefile, src/, and
+# The Dockerfile only needs: vendor/janus-gateway, Makefile, src/, tests/, and
 # etc/janus/janus.plugin.slvoice.jcfg.
 
 .git

@@ -33,10 +33,11 @@ PKGCONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config
 
 # janus-gateway pulls in glib-2.0 and jansson via its Requires:; we name them
 # explicitly too so a build still works if only their .pc files are present.
-PKGS := janus-gateway glib-2.0 jansson
+# opus is needed by the Phase-1 echo path (decode/encode) and is linked in.
+PKGS := janus-gateway glib-2.0 jansson opus
 
 PKG_CFLAGS := $(shell $(PKGCONFIG) --cflags $(PKGS) 2>/dev/null)
-PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson 2>/dev/null)
+PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson opus 2>/dev/null)
 
 CFLAGS  ?= -O2 -g
 # -I$(JANUS_PREFIX)/include is an explicit fallback so <janus/plugins/plugin.h>
@@ -45,10 +46,16 @@ CFLAGS  += -std=gnu11 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(JANUS_PREFIX
 LDFLAGS += -shared
 LDLIBS  += $(PKG_LIBS)
 
-SRCS := src/janus_slvoice.c
+SRCS := src/janus_slvoice.c src/sldata.c
 OBJS := $(SRCS:.c=.o)
 
-.PHONY: all install clean
+# Unit test for the standalone SLData parser (jansson only; no Janus link).
+TEST_BIN   := tests/test_sldata
+TEST_SRCS  := tests/test_sldata.c src/sldata.c
+TEST_CFLAGS := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
+TEST_LIBS   := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
+
+.PHONY: all install clean test
 
 all: $(TARGET)
 
@@ -58,9 +65,17 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Build and run the SLData parser unit tests. `make test` is a required gate:
+# it is also run during the Docker image build (see Dockerfile).
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+$(TEST_BIN): $(TEST_SRCS)
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS) $(TEST_LIBS)
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PLUGINDIR)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) $(TEST_BIN)

@@ -1,8 +1,8 @@
 # Configuration for the janus.plugin.slvoice spatial voice mixer.
 #
-# Phase 0 (scaffold): the plugin reads this file at init and logs that it was
-# found, but acts on nothing here yet. Keys below are reserved for Phase 1 and
-# documented so the config surface is stable from the start.
+# Phase 1 (echo test): rooms are primarily DYNAMIC — the OpenSim C# side
+# creates them at runtime with the audiobridge-compatible `create`/`join`
+# requests. This file is optional; the plugin runs with no config at all.
 #
 # The file uses the same libconfig/jcfg format as the stock Janus plugins.
 
@@ -10,15 +10,35 @@ general: {
 	# Human-readable label surfaced in logs/admin (optional).
 	#name = "Legion SLVoice mixer"
 
-	# Reserved for Phase 1 (the per-region 20ms mixer, see src/mixer/mixer.h):
-	#sampling_rate = 48000        # internal mix rate (Hz)
-	#tick_ms = 20                 # mixer tick period (ms)
-	#max_participants_per_region = 100
+	# Phase-1 bring-up: auto-enable echo mode as soon as a participant's
+	# PeerConnection is up, so a stock viewer hears itself (500ms delayed)
+	# WITHOUT sending an {"echo":true} data-channel message. Default false.
+	# Under the Docker model, the SLV_ECHO_AUTOSTART env var (add it to .env)
+	# is the easier knob and overrides this. See docs/phase1-bringup.md.
+	#echo_autostart = false
 
-	# Set to true for very verbose per-tick logging once the mixer exists.
+	# Set to true for very verbose per-tick logging once the mixer exists (Phase 2).
 	#events = true
 }
 
-# Phase 1 will grow per-region defaults here (spatial rolloff, max distance,
-# stereo width, denoise). Nothing is read from those yet. Extensions to the
-# message protocol are added as NEW fields only — see docs/protocol-compat.md.
+# ---- Optional static rooms -------------------------------------------------
+# Rooms are normally created dynamically, but you may pre-declare a room here.
+# Any category (other than `general`) that has a `room` key is loaded as a
+# permanent room at startup. Example:
+#
+#room-100: {
+#	room = 100                     # numeric room id (matches the C# CalcRoomNumber)
+#	description = "Test Region"
+#	sampling_rate = 48000          # advertised in `list`; internal mix is always 48k
+#	is_private = false             # if true, hidden from `list`
+#	spatial_audio = true           # advertised only; spatial mixing is Phase 2
+#}
+
+# ---- Notes -----------------------------------------------------------------
+# Echo mode (Phase 1) is toggled per-participant over the WebRTC data channel
+# via an {"echo": true} / {"echo": false} SLData message, NOT from this file.
+# See docs/sldata-extensions.md.
+#
+# Phase 2 will grow per-region defaults here (spatial rolloff, max distance,
+# stereo width, denoise). Extensions to the message protocol are added as NEW
+# fields only — see docs/protocol-compat.md.

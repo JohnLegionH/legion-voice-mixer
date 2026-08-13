@@ -47,9 +47,13 @@ RUN cd /root/janus-gateway \
     && make configs
 
 # --- Build and install the slvoice plugin out-of-tree against installed Janus ---
+# The SLData parser unit tests (`make test`) run here too, so a test failure
+# fails the image build.
 COPY Makefile /root/slvoice/Makefile
 COPY src /root/slvoice/src
+COPY tests /root/slvoice/tests
 RUN cd /root/slvoice \
+    && make test JANUS_PREFIX=/opt/janus \
     && make JANUS_PREFIX=/opt/janus \
     && make install JANUS_PREFIX=/opt/janus \
     && ls -l /opt/janus/lib/janus/plugins/janus_slvoice.so

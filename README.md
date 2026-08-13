@@ -6,9 +6,11 @@ WebRTC voice protocol**. It is the server-side counterpart to the OpenSim
 `os-webrtc-janus` addon, intended as a drop-in alternative to the stock
 `janus.plugin.audiobridge`.
 
-> **Status: Phase 0 — scaffold only.** The plugin loads and registers cleanly
-> but contains no audio logic yet (the mixer is Phase 1). It is, however,
-> already deployable as a running Janus voice server.
+> **Status: Phase 1 — echo test.** The plugin negotiates Opus + data channel,
+> speaks the audiobridge-compatible request protocol, and proves the full
+> single-participant media path with a 500 ms echo (decode → delay → re-encode →
+> relay). No mixing or spatial logic yet — that is Phase 2 (`src/mixer/mixer.h`).
+> See `docs/phase1-bringup.md` for the in-world bring-up runbook (GATE 0 → GATE 1).
 
 The published container image bundles Janus **v1.4.1** and this plugin, so
 operators deploy it **without cloning, submodules, or build tools**.
@@ -131,8 +133,10 @@ image and pushes `ghcr.io/johnlegionh/legion-voice-mixer:{version}` and
 ### Layout
 
 ```
-src/janus_slvoice.c      the plugin (full vtable; scaffold stubs)
-src/mixer/mixer.h         Phase-1 per-region tick model (declarations only)
+src/janus_slvoice.c      the plugin (Phase 1: rooms, JSEP, echo, diagnostics)
+src/sldata.{c,h}          SLData data-channel parser (jansson-only; unit-tested)
+src/mixer/mixer.h         Phase-2 per-region tick model (declarations only)
+tests/test_sldata.c       SLData parser unit tests (`make test`)
 Makefile                  out-of-tree plugin build (pkg-config against Janus)
 Dockerfile                Janus (from the pinned submodule) + plugin + entrypoint
 docker-entrypoint.sh      generates Janus *.jcfg from env at container start
@@ -156,9 +160,16 @@ vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
   and its expiry.
 - `docs/docker-notes.md` — image/config-precedence details and divergences from
   `Misterblue/os-webrtc-janus-docker`.
+- `docs/sldata-extensions.md` — the data-channel SLData field set and the
+  slvoice `echo` extension (Phase 1).
+- `docs/phase1-bringup.md` — the in-world Phase-1 bring-up runbook (GATE 0 →
+  GATE 1), incl. the exact regionserver INI keys.
 
-> The first three are surveys of the OpenSim C# side, dropped into `docs/`
-> separately; the last two are maintained in this repo.
+> The first three surveys of the OpenSim C# side (`webrtc-voice-spec.md`,
+> `parcel-voice-semantics.md`, `current-architecture.md`) are **not yet vendored
+> into this repo**; where Phase 1 needed them, the relevant field/message
+> contracts were reproduced from `protocol-compat.md` and the task brief and
+> flagged as provisional in the docs above. The remaining docs are maintained here.
 
 ## License
 
