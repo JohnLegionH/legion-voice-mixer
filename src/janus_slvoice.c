@@ -45,8 +45,8 @@
 #include "sldata.h"
 
 /* Plugin information */
-#define JANUS_SLVOICE_VERSION         2
-#define JANUS_SLVOICE_VERSION_STRING  "0.2.0"
+#define JANUS_SLVOICE_VERSION         3
+#define JANUS_SLVOICE_VERSION_STRING  "0.3.0"
 #define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 1: single-participant echo test; no mixing yet)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
