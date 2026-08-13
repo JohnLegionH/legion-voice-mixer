@@ -1,0 +1,27 @@
+# --- C / plugin build artifacts ---
+*.o
+*.lo
+*.a
+*.la
+*.so
+*.so.*
+*.d
+src/*.o
+janus_slvoice.so
+
+# --- Secrets (NEVER commit; use secrets.sample as the template) ---
+secrets
+
+# --- Editor / OS cruft ---
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# --- Local build output dirs ---
+/build/
+/out/
+
+# Note: vendor/janus-gateway is a git submodule (a tracked gitlink), not
+# ignored. Its own working-tree build artifacts are covered by its .gitignore.

@@ -1,0 +1,20 @@
+# Matches the expectations of Misterblue/os-webrtc-janus-docker:
+#   - single "janus" service
+#   - image name taken from $JS_IMAGE (see ./env)
+#   - host networking (WebRTC needs the real host ports / ICE candidates)
+#   - the local ./etc/janus is mounted over the container's config dir
+#   - restarts unless explicitly stopped
+#
+# Start with ./run-janus.sh (which applies ./env + ./secrets to ./etc/janus first).
+version: '3'
+
+services:
+    janus:
+        image: $JS_IMAGE
+
+        network_mode: host
+
+        volumes:
+            - ./etc/janus:/opt/janus/etc/janus
+
+        restart: unless-stopped

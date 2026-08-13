@@ -1,0 +1,24 @@
+# Configuration for the janus.plugin.slvoice spatial voice mixer.
+#
+# Phase 0 (scaffold): the plugin reads this file at init and logs that it was
+# found, but acts on nothing here yet. Keys below are reserved for Phase 1 and
+# documented so the config surface is stable from the start.
+#
+# The file uses the same libconfig/jcfg format as the stock Janus plugins.
+
+general: {
+	# Human-readable label surfaced in logs/admin (optional).
+	#name = "Legion SLVoice mixer"
+
+	# Reserved for Phase 1 (the per-region 20ms mixer, see src/mixer/mixer.h):
+	#sampling_rate = 48000        # internal mix rate (Hz)
+	#tick_ms = 20                 # mixer tick period (ms)
+	#max_participants_per_region = 100
+
+	# Set to true for very verbose per-tick logging once the mixer exists.
+	#events = true
+}
+
+# Phase 1 will grow per-region defaults here (spatial rolloff, max distance,
+# stereo width, denoise). Nothing is read from those yet. Extensions to the
+# message protocol are added as NEW fields only — see docs/protocol-compat.md.

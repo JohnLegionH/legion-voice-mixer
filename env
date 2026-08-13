@@ -1,0 +1,30 @@
+# Parameters for running the Legion SLVoice mixer container.
+# These variables update values in ./etc/janus/*.jcfg (via updateConfiguration.sh)
+# and are also added to the container's environment.
+# NOTE: any secrets (access tokens, ...) go into the file "secrets" (git-ignored).
+#
+# This mirrors os-webrtc-janus-docker's env surface so the container is a
+# drop-in replacement. Only JS_IMAGE differs by default.
+
+# The Docker image to run
+JS_IMAGE=legion-voice-mixer:latest
+
+# Server name that is returned in Janus info requests
+JS_SERVER_NAME=GridVoice
+
+# The enabled transports and their parameters
+JS_TRANSPORT_HTTP_ENABLE=true
+JS_TRANSPORT_HTTP_PORT=14223
+JS_TRANSPORT_HTTP_BASEPATH=\\/voice
+JS_TRANSPORT_HTTPS_ENABLE=false
+JS_TRANSPORT_HTTPS_PORT=14224
+JS_TRANSPORT_HTTP_ADMIN=true
+JS_TRANSPORT_HTTP_ADMIN_PORT=14225
+JS_TRANSPORT_HTTP_ADMIN_BASEPATH=\\/voiceAdmin
+
+JS_TRANSPORT_NANOMSG_ENABLE=false
+
+JS_TRANSPORT_WEBSOCKETS_WS=false
+JS_TRANSPORT_WEBSOCKETS_WS_PORT=14228
+JS_TRANSPORT_WEBSOCKETS_WSS=false
+JS_TRANSPORT_WEBSOCKETS_WSS_PORT=14229
