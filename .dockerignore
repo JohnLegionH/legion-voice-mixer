@@ -1,0 +1,25 @@
+# Keep the build context small and reproducible.
+# The Dockerfile only needs: vendor/janus-gateway, Makefile, src/, and
+# etc/janus/janus.plugin.slvoice.jcfg.
+
+.git
+**/.git
+.gitignore
+.gitmodules
+
+# Secrets never belong in an image layer
+secrets
+
+# Local build artifacts
+*.o
+*.lo
+*.so
+*.a
+/build/
+/out/
+
+# Not needed at build time
+docs/
+*.md
+.vscode/
+.idea/
