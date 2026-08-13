@@ -40,9 +40,14 @@ PKG_CFLAGS := $(shell $(PKGCONFIG) --cflags $(PKGS) 2>/dev/null)
 PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson opus 2>/dev/null)
 
 CFLAGS  ?= -O2 -g
+# EXTRA_CFLAGS is an append-only hook for extra defines passed from the caller,
+# e.g. `make EXTRA_CFLAGS=-DSLV_DEBUG_MEDIA` for the packet-level media logging
+# build (the :debug image). It is appended (not overriding CFLAGS) so the base
+# flags below always apply.
+EXTRA_CFLAGS ?=
 # -I$(JANUS_PREFIX)/include is an explicit fallback so <janus/plugins/plugin.h>
 # resolves even if janus-gateway.pc is not on the pkg-config path.
-CFLAGS  += -std=gnu11 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(JANUS_PREFIX)/include $(PKG_CFLAGS)
+CFLAGS  += -std=gnu11 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(JANUS_PREFIX)/include $(PKG_CFLAGS) $(EXTRA_CFLAGS)
 LDFLAGS += -shared
 LDLIBS  += $(PKG_LIBS)
 

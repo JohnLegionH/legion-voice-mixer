@@ -131,10 +131,16 @@ restart:
 1. Add to `[JanusWebRtcVoice]`: `PluginName = janus.plugin.slvoice`
    (GATE 0 is the same branch with `PluginName = janus.plugin.audiobridge`, or
    the key absent).
-2. Add `SLV_ECHO_AUTOSTART=true` to the container `.env` and
-   `docker compose up -d` the container (so a stock viewer hears itself without
-   sending an `{"echo":true}` data-channel message). Alternatively leave it off
-   and drive the toggle from your test client — see `docs/sldata-extensions.md`.
+2. Set **`SLV_ECHO_AUTOSTART=true`** in the container `.env` (it ships `=false`)
+   and `docker compose up -d` the container. This is the **actual Gate 1
+   trigger**: nothing in a stock viewer (Firestorm and the other SL WebRTC
+   viewers) sends the `{"echo":true}` SLData toggle, so without this the viewer
+   would connect but never hear itself. With it set, echo auto-starts the moment
+   the PeerConnection is up and the viewer hears itself ~500 ms delayed.
+   **Remove it (back to `false`) after the acceptance run** — it is a bring-up
+   knob, not normal operation. (If you have a client that can send the SLData
+   toggle, you can instead drive `{"echo":true}` at runtime — see
+   `docs/sldata-extensions.md` — but that is not the stock-viewer path.)
 
 ---
 

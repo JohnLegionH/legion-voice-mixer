@@ -21,7 +21,17 @@ jobs:
     strategy:
       matrix:
         include:
+          # The normal image: :{version} and :latest.
           - platform: linux/amd64
+            variant: release
+            extra_cflags: ""
+            moving_tag: latest
+          # The packet-level media-logging image (-DSLV_DEBUG_MEDIA):
+          # :{version}-debug and :debug. Same Dockerfile; only EXTRA_CFLAGS differs.
+          - platform: linux/amd64
+            variant: debug
+            extra_cflags: "-DSLV_DEBUG_MEDIA"
+            moving_tag: debug
           # linux/arm64 is intentionally disabled for now. Enabling it needs an
           # arm64 tag of the base image (shivanshtalwar0/januscoredeps), and —
           # because this is a matrix of single-platform builds pushing shared
@@ -50,16 +60,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Uses the repo Dockerfile unchanged (it builds Janus v1.4.1 from the
-      # submodule and already handles the CRLF + libtool fixes).
-      - name: Build and push
+      # submodule and already handles the CRLF + libtool fixes). The debug
+      # variant only differs by --build-arg SLV_EXTRA_CFLAGS=-DSLV_DEBUG_MEDIA.
+      - name: Build and push (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
+          build-args: |
+            SLV_EXTRA_CFLAGS=${{ matrix.extra_cflags }}
           tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}${{ matrix.variant == 'debug' && '-debug' || '' }}
+            ${{ env.IMAGE }}:${{ matrix.moving_tag }}
+          # Separate cache scope per variant so the two parallel builds don't
+          # race writing the shared gha cache.
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

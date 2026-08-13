@@ -49,12 +49,18 @@ RUN cd /root/janus-gateway \
 # --- Build and install the slvoice plugin out-of-tree against installed Janus ---
 # The SLData parser unit tests (`make test`) run here too, so a test failure
 # fails the image build.
+#
+# SLV_EXTRA_CFLAGS is empty for the normal image and "-DSLV_DEBUG_MEDIA" for the
+# :debug image (which logs packet-level media detail). The release workflow sets
+# it via --build-arg; nothing else in the build depends on it, so the expensive
+# Janus layer above is shared/cached across both variants.
+ARG SLV_EXTRA_CFLAGS=""
 COPY Makefile /root/slvoice/Makefile
 COPY src /root/slvoice/src
 COPY tests /root/slvoice/tests
 RUN cd /root/slvoice \
     && make test JANUS_PREFIX=/opt/janus \
-    && make JANUS_PREFIX=/opt/janus \
+    && make JANUS_PREFIX=/opt/janus EXTRA_CFLAGS="${SLV_EXTRA_CFLAGS}" \
     && make install JANUS_PREFIX=/opt/janus \
     && ls -l /opt/janus/lib/janus/plugins/janus_slvoice.so
 
