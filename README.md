@@ -60,17 +60,17 @@ edit files inside the container.
 **4. Verify** — one request to the Janus info endpoint should list the plugin:
 
 ```sh
-curl http://localhost:14223/janus/info
+curl http://localhost:14223/voice/info
 ```
 
 You should see `"janus.plugin.slvoice":{"name":"Legion SLVoice mixer"...}` in the
 `plugins` object. That's a working voice server.
 
-> **Connecting OpenSim:** point `os-webrtc-janus.ini` at
-> `http://THIS_HOST:14223/janus` (and admin `:14225/admin`) with the same
-> secrets. The `os-webrtc-janus` project conventionally uses the base paths
-> `/voice` and `/voiceAdmin`; to match it, set `JS_HTTP_BASEPATH=/voice` and
-> `JS_ADMIN_BASEPATH=/voiceAdmin` in `.env`.
+> **Connecting OpenSim:** the defaults match the `os-webrtc-janus` convention,
+> so a stock OpenSim `[JanusWebRtcVoice]` config connects with zero edits — point
+> `os-webrtc-janus.ini` at `http://THIS_HOST:14223/voice` (and admin
+> `:14225/voiceAdmin`) with the same secrets. For a generic Janus setup instead,
+> set `JS_HTTP_BASEPATH=/janus` and `JS_ADMIN_BASEPATH=/admin` in `.env`.
 
 To stop / update:
 

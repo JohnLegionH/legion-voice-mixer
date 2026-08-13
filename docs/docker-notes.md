@@ -52,9 +52,9 @@ over the whole config dir by default (that was the old model).
 | `JS_RTP_PORT_RANGE` | `janus.jcfg` → `rtp_port_range` | `10000-10200` |
 | `JS_SERVER_NAME` | `janus.jcfg` → `server_name` | `GridVoice` |
 | `JS_HTTP_PORT` | `janus.transport.http.jcfg` → `port` | `14223` |
-| `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/janus` |
+| `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/voice` |
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
-| `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/admin` |
+| `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
 
 The entrypoint also forces `http = true` and `admin_http = true`. `sed`
 substitutions are anchored to line start so `http`/`port`/`base_path` never
@@ -81,10 +81,11 @@ collide with `admin_http`/`admin_port`/`admin_base_path`.
    `JS_API_SECRET` / `JS_ADMIN_SECRET` (mapping to OpenSim `APIToken` /
    `AdminAPIToken`). `.env` is git-ignored; `env.sample` is the template.
 
-5. **Default base paths are Janus stock `/janus` and `/admin`** (so the verify
-   step `curl .../janus/info` works out of the box), whereas os-webrtc-janus-docker
-   defaults to `/voice` and `/voiceAdmin`. Set `JS_HTTP_BASEPATH=/voice` and
-   `JS_ADMIN_BASEPATH=/voiceAdmin` to match the OpenSim convention.
+5. **Default base paths are the OpenSim-native `/voice` and `/voiceAdmin`**
+   (matching os-webrtc-janus-docker), so a stock OpenSim `[JanusWebRtcVoice]`
+   config connects with zero edits and the verify step is `curl .../voice/info`.
+   For a generic Janus setup, set `JS_HTTP_BASEPATH=/janus` and
+   `JS_ADMIN_BASEPATH=/admin` to restore the Janus stock paths.
 
 6. **Build-time source normalization + autotools fix** (Dockerfile, before
    `autogen.sh`): strip CR from autotools/shell inputs (a Windows checkout of the
@@ -107,7 +108,7 @@ Built and smoke-tested with Docker on this tree:
 - `janus_slvoice.so` installs to `/opt/janus/lib/janus/plugins/`;
 - with only `docker-compose.yml` + `.env`, `docker compose up -d` starts Janus,
   the entrypoint generates config from `.env`, and
-  `GET http://localhost:14223/janus/info` lists
+  `GET http://localhost:14223/voice/info` lists
   `"janus.plugin.slvoice":{"name":"Legion SLVoice mixer"}`.
 
 ## OpenSim side
@@ -115,7 +116,7 @@ Built and smoke-tested with Docker on this tree:
 Point `os-webrtc-janus.ini` at this server: `JanusGatewayURI` =
 `http://THIS_HOST:14223/<JS_HTTP_BASEPATH>`, `JanusGatewayAdminURI` =
 `http://THIS_HOST:14225/<JS_ADMIN_BASEPATH>`, with `APIToken` / `AdminAPIToken`
-equal to `JS_API_SECRET` / `JS_ADMIN_SECRET`. For the os-webrtc-janus default
-paths, set `JS_HTTP_BASEPATH=/voice` and `JS_ADMIN_BASEPATH=/voiceAdmin`. A/B
-against audiobridge needs no container change — the C# side chooses the plugin
-package it attaches to.
+equal to `JS_API_SECRET` / `JS_ADMIN_SECRET`. The defaults (`/voice`,
+`/voiceAdmin`) already match the os-webrtc-janus convention, so a stock OpenSim
+`[JanusWebRtcVoice]` config connects with zero edits. A/B against audiobridge
+needs no container change — the C# side chooses the plugin package it attaches to.

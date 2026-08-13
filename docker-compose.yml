@@ -4,7 +4,7 @@
 #   1. cp env.sample .env
 #   2. edit the three required values in .env
 #   3. docker compose up -d
-#   4. curl http://localhost:14223/janus/info   # lists janus.plugin.slvoice
+#   4. curl http://localhost:14223/voice/info   # lists janus.plugin.slvoice
 #
 # Config is generated inside the container from .env at start; you never edit
 # files in the container. See the README "Install" section.
