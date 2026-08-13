@@ -28,7 +28,14 @@ LABEL janus.version="v1.4.1"
 # --- Build Janus from the pinned submodule source (NOT a git clone of master) ---
 # The build context must include vendor/janus-gateway (the pinned submodule).
 COPY vendor/janus-gateway /root/janus-gateway
+# Normalise line endings: if the submodule was checked out on Windows the
+# autotools/shell inputs arrive as CRLF, which breaks autogen.sh (e.g. it would
+# `mkdir -p m4\r`) and any sed matching. Strip CR from the build inputs first.
+# Then drop the redundant `ACLOCAL_AMFLAGS = -I m4` (it conflicts with
+# AC_CONFIG_MACRO_DIR under libtool >= 2.4.7, which is what the base image ships).
 RUN cd /root/janus-gateway \
+    && find . -type f \( -name '*.sh' -o -name '*.ac' -o -name '*.am' -o -name '*.m4' -o -name '*.in' \) -exec sed -i 's/\r$//' {} + \
+    && sed -i '/^ACLOCAL_AMFLAGS = -I m4$/d' Makefile.am \
     && sh autogen.sh \
     && ./configure \
         --prefix=/opt/janus \
@@ -59,4 +66,5 @@ EXPOSE 14220-14229
 # The WebRTC media streams created
 EXPOSE 10000-10200/udp
 
-CMD /opt/janus/bin/janus
+# Exec form so Janus is PID 1 and receives SIGTERM directly (clean `docker stop`).
+CMD ["/opt/janus/bin/janus"]

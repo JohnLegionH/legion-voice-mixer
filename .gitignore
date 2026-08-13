@@ -19,9 +19,11 @@ secrets
 .vscode/
 .idea/
 
-# --- Local build output dirs ---
+# --- Local build output dirs / logs ---
 /build/
 /out/
+*.log
+.build.log
 
 # Note: vendor/janus-gateway is a git submodule (a tracked gitlink), not
 # ignored. Its own working-tree build artifacts are covered by its .gitignore.

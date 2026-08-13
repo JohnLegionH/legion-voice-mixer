@@ -72,6 +72,39 @@ Reference snapshot mirrored: os-webrtc-janus-docker `VERSION` 1.0.6.
 6. **`build-janus.sh` drops the `JANUS_GIT_*` build args** (they no longer apply,
    since Janus comes from the submodule) and keeps only `ARCH` and image naming.
 
+7. **Build-time source normalization + autotools fix** (in the Dockerfile, before
+   `autogen.sh`). Needed because the submodule may be checked out on Windows and
+   because the base image ships a newer libtool than Janus v1.4.1's build files
+   assume:
+   - Strip CR from the autotools/shell inputs (`*.sh *.ac *.am *.m4 *.in`). A
+     CRLF `autogen.sh` otherwise runs `mkdir -p m4\r` (wrong dir) and every line
+     fails as `: not found`.
+   - Delete the redundant `ACLOCAL_AMFLAGS = -I m4` from `Makefile.am`; under
+     libtool ≥ 2.4.7 it conflicts with `AC_CONFIG_MACRO_DIR([m4])` and aborts
+     `autoreconf`. Keeping `AC_CONFIG_MACRO_DIR` alone is sufficient.
+   These touch only the in-image copy; the vendored submodule stays pristine.
+
+8. **`CMD` uses exec (JSON) form** — `CMD ["/opt/janus/bin/janus"]` rather than the
+   reference's shell form — so Janus is PID 1 and gets SIGTERM directly for a
+   clean `docker stop` / `compose down` (no 10s SIGKILL wait).
+
+9. **Plugin Makefile robustness** (not a container divergence, but relevant to the
+   build): the out-of-tree `make` inlines `PKG_CONFIG_PATH=$(JANUS_PREFIX)/lib/pkgconfig`
+   into the `pkg-config` call (an `export`ed make var is not reliably visible to
+   `$(shell)` at read-time) and adds an explicit `-I$(JANUS_PREFIX)/include`
+   fallback so `<janus/plugins/plugin.h>` resolves even if `janus-gateway.pc`
+   isn't on the pkg-config path.
+
+## Verified
+
+Built and smoke-tested with Docker on this tree:
+- image builds clean;
+- `janus_slvoice.so` installs to `/opt/janus/lib/janus/plugins/`;
+- Janus starts and logs `Loading plugin 'janus_slvoice.so'` →
+  `Legion SLVoice mixer initialized! (API v106, ...)`;
+- `GET /janus/info` (the same plugin list the Admin API returns) includes
+  `"janus.plugin.slvoice":{"name":"Legion SLVoice mixer"}`.
+
 ## OpenSim side (unchanged)
 
 Point the OpenSim `os-webrtc-janus.ini` at this server exactly as for
