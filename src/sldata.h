@@ -11,17 +11,16 @@
  * include any Janus headers, so it compiles both into the plugin .so and into
  * a standalone unit-test binary (see tests/test_sldata.c, `make test`).
  *
- * Field set (per docs/webrtc-voice-spec.md §9 field list — reproduced from the
- * task brief, since the spec doc is not yet vendored into this repo):
+ * Field set (docs/voice/webrtc-voice-spec.md §9 client->mixer field list;
+ * `lh` semantics confirmed by §6):
  *   j, l, sp, sh, lp, lh, m, ug
- * plus the slvoice-specific `echo` extension (see docs/sldata-extensions.md).
+ * plus the slvoice `echo` extension (spec §4.2 echo-test control; see
+ * docs/sldata-extensions.md).
  *
  * Phase-1 policy: we PARSE and STORE the latest values; we do not act on the
  * geometry (no spatial logic until Phase 2). Unknown fields are ignored
  * silently; malformed JSON is reported (never crashes) so the caller can log
- * it at warn. The exact geometric meaning of sp/sh/lp/lh is treated as
- * provisional (documented in docs/sldata-extensions.md) pending the vendored
- * spec; the parse is tolerant of both array and object encodings.
+ * it at warn. The parse is tolerant of both array and object vector encodings.
  */
 
 #ifndef SLV_SLDATA_H

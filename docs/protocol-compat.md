@@ -19,26 +19,31 @@ This is why the scaffold recognises the audiobridge verbs and nothing else yet.
 
 ## The requests we must accept (same field names)
 
-Taken from the OpenSim survey `docs/current-architecture.md` §3 (the message
-table). These are the `body.request` shapes the C# `JanusMessages` classes
+Reconciled against the (now vendored) survey `docs/voice/current-architecture.md`
+§3.2. These are the `body.request` shapes the C# `JanusMessages` classes
 construct:
 
 | Request (`request`) | Fields the C# side sends | Source (C# class) |
 |---|---|---|
-| `create`   | `room`, `is_private`, `permanent`, `sampling_rate`, `spatial_audio`, `denoise`, `record`, optional `description` | `AudioBridgeCreateRoomReq` |
-| `destroy`  | `room`, `permanent` | `AudioBridgeDestroyRoomReq` |
-| `join`     | `room`, `display` (+ JSEP `offer`) | `AudioBridgeJoinRoomReq` |
-| `configure`| (audiobridge `configure` body) | `AudioBridgeConfigRoomReq` |
+| `create`   | `room` (dynamic, `CalcRoomNumber`) + fixed `is_private:false`, `permanent:false`, `sampling_rate:48000`, `spatial_audio:<bool>`, `denoise:false`, `record:false`, optional `description` | `AudioBridgeCreateRoomReq` |
+| `destroy`  | `room`, `permanent:true` | `AudioBridgeDestroyRoomReq` |
+| `join`     | `room`, `display` (agent UUID; **no** mute/allow/hide) + JSEP `offer` | `AudioBridgeJoinRoomReq` |
 | `leave`    | `room`, `id` | `AudioBridgeLeaveRoomReq` |
-| `list`     | — | `AudioBridgeListRoomsReq` |
-| `listparticipants` | `room` | `AudioBridgeListParticipantsReq` |
+| `list`     | — (console only) | `AudioBridgeListRoomsReq` |
+| `listparticipants` | `room` (console only) | `AudioBridgeListParticipantsReq` |
+| `configure`| — | `AudioBridgeConfigRoomReq` — **dead code**, never constructed (§2.5/§3.2) |
 
 Session-level ICE `trickle` is core Janus (not a plugin request) and is
 unaffected by this constraint.
 
-> When `docs/current-architecture.md` is dropped into this `docs/` directory,
-> treat its §3 message table as the authoritative field list and reconcile the
-> table above against it.
+> **Reconciled (Phase 1).** The plugin implements exactly these shapes and the
+> audiobridge **response** envelopes (top-level `audiobridge` key, `error_code`
+> matching audiobridge's numeric codes — incl. `create` on an existing room
+> returning **486**, which `JanusAudioBridge.CreateRoom` treats as success,
+> §3.3). `configure` is accepted defensively but the C# side never sends it.
+> Note (§4): the OpenSim side does **not** touch the data channel — it forwards
+> the viewer SDP (incl. `m=application`) verbatim — so the plugin answers the
+> data channel and parses SLData itself.
 
 ## Rules while the constraint is active
 

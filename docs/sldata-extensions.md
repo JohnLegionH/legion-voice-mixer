@@ -6,30 +6,32 @@ parses each object and stores the latest values per participant. This document
 describes what the plugin parses (Phase 1) and the one slvoice-specific
 **extension** it adds: the `echo` toggle.
 
-> **Sourcing note.** The canonical field list is `docs/webrtc-voice-spec.md` §9.
-> That spec document is not yet vendored into this repo, so the field set below
-> is taken from the Phase-1 task brief (`j, l, sp, sh, lp, lh, m, ug`). The
-> *names* are authoritative; the precise geometric **meaning** of `sp/sh/lp/lh`
-> is treated as **provisional** here and is not acted upon in Phase 1 (no
-> spatial logic until Phase 2). When the spec is vendored, reconcile the
-> "meaning" column against §9 — the parser (`src/sldata.c`) will not need to
-> change to store them, only Phase-2 code that interprets them.
+> **Source.** Reconciled against the vendored spec
+> `docs/voice/webrtc-voice-spec.md`. §9 fixes the client→mixer field set
+> (`j/l/sp/sh/lp/lh/m/ug`, "per the published format") and the Opus fmtp; §6
+> confirms `lh` is the listener-heading quaternion; §4.2 defines the echo test.
+> Phase 1 **stores** these values but does not act on the geometry (no spatial
+> logic until Phase 2). Per `docs/voice/current-architecture.md` §4 the OpenSim
+> C# side does **not** interpret SLData at all — it forwards the viewer's SDP
+> (including the `m=application` data-channel section) verbatim — so this
+> plugin is the first and only thing that answers the data channel and parses
+> these messages.
 
 ## Recognised fields (Phase 1)
 
 The parser (`src/sldata.c`, unit-tested by `tests/test_sldata.c`) recognises:
 
-| Key | Assumed meaning (provisional) | Accepted encoding | Stored as |
+| Key | Meaning (spec §9 published format; `lh` per §6) | Accepted encoding | Stored as |
 |---|---|---|---|
 | `j`  | join / roster marker | any | presence only |
 | `l`  | leave marker | any | presence only |
 | `sp` | self position (avatar) | `[x,y,z]` or `{x,y,z}` | `slv_vec3` |
 | `sh` | self heading/orientation | `[x,y,z,w]` or `{x,y,z,w}` | `slv_quat` |
 | `lp` | listener position (camera) | `[x,y,z]` or `{x,y,z}` | `slv_vec3` |
-| `lh` | listener heading/orientation | `[x,y,z,w]` or `{x,y,z,w}` | `slv_quat` |
+| `lh` | listener heading/orientation (**confirmed §6**) | `[x,y,z,w]` or `{x,y,z,w}` | `slv_quat` |
 | `m`  | mute flag | bool or int | `int` (0/1) |
 | `ug` | user gain | number | `double` |
-| `echo` | **slvoice extension** (see below) | bool or int | `int` (0/1) |
+| `echo` | **slvoice extension** (spec §4.2 echo-test control; see below) | bool or int | `int` (0/1) |
 
 Parsing policy (all enforced and unit-tested):
 
@@ -50,8 +52,12 @@ from the last parsed payload.
 
 ## The `echo` extension
 
-`echo` is a **slvoice-specific extension**, not part of the base SL protocol. It
-toggles the Phase-1 echo test on the participant that sent it:
+The spec provides for a self-serve echo test (§4.2: "on request — SLData message
+or viewer menu — the mixer loops the user's own audio back with ~500 ms delay")
+and lists **echo-test control** among the optional SLData extensions ignored by
+stock viewers (§9). The spec does not pin a wire field name for it; this plugin
+uses the boolean `echo` member. It toggles the echo test on the participant that
+sent it:
 
 ```json
 { "echo": true }     // enable: your audio is looped back to you, delayed 500ms
@@ -92,6 +98,10 @@ works regardless of this setting. See `docs/phase1-bringup.md`.
 - No use of `sp/sh/lp/lh` geometry (no distance attenuation, no panning).
 - No per-listener anything, no mixing across participants.
 - No mutation of another participant's state from `m`/`ug`.
+- No **mixer→client** SLData. The spec (§9) has the mixer push per-peer
+  `p/V/j/l` batched ~100 ms, plus the `diag` state member (§4.1); Phase 1
+  exposes diagnostics through `query_session`/the admin API instead (see
+  `docs/phase1-bringup.md`) and pushes nothing on the data channel yet.
 
 Those are Phase 2 (`src/mixer/mixer.h`). Phase 1 only **stores** the latest
 values so the storage/telemetry surface is in place from the start.

@@ -53,16 +53,24 @@
 #define JANUS_SLVOICE_PACKAGE         "janus.plugin.slvoice"
 
 /* Application-level error codes (returned in the audiobridge-shaped error
- * envelope: {"audiobridge":"event","error_code":N,"error":"..."}). */
-#define JANUS_SLVOICE_ERROR_NO_MESSAGE      411
-#define JANUS_SLVOICE_ERROR_INVALID_JSON    412
-#define JANUS_SLVOICE_ERROR_INVALID_REQUEST 413
-#define JANUS_SLVOICE_ERROR_MISSING_ELEMENT 414
-#define JANUS_SLVOICE_ERROR_INVALID_ELEMENT 415
-#define JANUS_SLVOICE_ERROR_NO_SUCH_ROOM    416
-#define JANUS_SLVOICE_ERROR_NOT_JOINED      418
-#define JANUS_SLVOICE_ERROR_ALREADY_JOINED  419
-#define JANUS_SLVOICE_ERROR_INVALID_SDP     420
+ * envelope: {"audiobridge":"event","error_code":N,"error":"..."}).
+ *
+ * These MUST match janus.plugin.audiobridge's numeric codes: the OpenSim C#
+ * side reads the `error_code` field and, in particular,
+ * JanusAudioBridge.CreateRoom treats 486 ("room exists") as success
+ * (docs/voice/current-architecture.md §3.3). Numbers taken verbatim from
+ * vendor/janus-gateway/src/plugins/janus_audiobridge.c. */
+#define JANUS_SLVOICE_ERROR_NO_MESSAGE      480
+#define JANUS_SLVOICE_ERROR_INVALID_JSON    481
+#define JANUS_SLVOICE_ERROR_INVALID_REQUEST 482
+#define JANUS_SLVOICE_ERROR_MISSING_ELEMENT 483
+#define JANUS_SLVOICE_ERROR_INVALID_ELEMENT 484
+#define JANUS_SLVOICE_ERROR_NO_SUCH_ROOM    485
+#define JANUS_SLVOICE_ERROR_ROOM_EXISTS     486
+#define JANUS_SLVOICE_ERROR_NOT_JOINED      487
+#define JANUS_SLVOICE_ERROR_UNAUTHORIZED    489
+#define JANUS_SLVOICE_ERROR_ALREADY_JOINED  491
+#define JANUS_SLVOICE_ERROR_INVALID_SDP     493
 #define JANUS_SLVOICE_ERROR_UNKNOWN         499
 
 /* ---- Media constants (Phase 1 echo) --------------------------------------
@@ -819,20 +827,24 @@ static void *janus_slvoice_handler(void *data) {
 
 			janus_mutex_lock(&rooms_mutex);
 			janus_slvoice_room *room = g_hash_table_lookup(rooms, &room_id);
-			if(room == NULL) {
-				room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, permanent);
-				guint64 *key = g_malloc(sizeof(guint64));
-				*key = room_id;
-				g_hash_table_insert(rooms, key, room);
-				JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s)\n",
-					JANUS_SLVOICE_PACKAGE, room_id, room->description);
-			} else {
-				/* Idempotent: report success for an existing room rather than
-				 * erroring, so a re-issued create during bring-up is harmless.
-				 * Shape stays audiobridge-compatible. */
-				JANUS_LOG(LOG_INFO, "[%s] Room %"PRIu64" already exists (idempotent create)\n",
+			if(room != NULL) {
+				/* Match audiobridge exactly: an existing room is error 486
+				 * ("room exists"). The OpenSim C# side (CreateRoom) treats 486
+				 * as success — every region that hashes to the same room number
+				 * relies on this (docs/voice/current-architecture.md §3.3). */
+				janus_mutex_unlock(&rooms_mutex);
+				error_code = JANUS_SLVOICE_ERROR_ROOM_EXISTS;
+				g_snprintf(error_cause, 512, "Room %"PRIu64" already exists", room_id);
+				JANUS_LOG(LOG_INFO, "[%s] Room %"PRIu64" already exists (error 486)\n",
 					JANUS_SLVOICE_PACKAGE, room_id);
+				goto respond;
 			}
+			room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, permanent);
+			guint64 *key = g_malloc(sizeof(guint64));
+			*key = room_id;
+			g_hash_table_insert(rooms, key, room);
+			JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s)\n",
+				JANUS_SLVOICE_PACKAGE, room_id, room->description);
 			janus_mutex_unlock(&rooms_mutex);
 
 			event = json_object();

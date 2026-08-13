@@ -48,11 +48,14 @@ GATE-0 failure is in the C#/ICE/network layer, not the plugin.
 
 4. **GATE 1 only — the `PluginName` key requires your
    `feature/voice-plugin-select` branch.** The stock os-webrtc-janus addon
-   hard-attaches to `janus.plugin.audiobridge` and has **no `PluginName`
-   setting**. Selecting `janus.plugin.slvoice` by config requires the
-   `feature/voice-plugin-select` branch to be **built and deployed into the
-   regionserver's addon assemblies** before GATE 1. Until that branch is
-   deployed, GATE 1 is blocked (see GATE 1 failure #1).
+   **hardcodes** `janus.plugin.audiobridge` (`JanusAudioBridge.cs:41`) and has
+   **no plugin-selection INI key** — confirmed by
+   `docs/voice/current-architecture.md` §6, which identifies that hardcoded
+   string as the single seam and notes selecting a different plugin means
+   "making it config-driven". That is exactly what `feature/voice-plugin-select`
+   does (the `[JanusWebRtcVoice] PluginName` key). It must be **built and
+   deployed into the regionserver's addon assemblies** before GATE 1. Until then
+   GATE 1 is blocked (see GATE 1 failure #1).
 
 ---
 
@@ -84,40 +87,50 @@ D:\legiongrid\regionserver\config\OpenSim.ini
 the **regionserver**). **Nothing** goes in `D:\legiongrid\gridserver\config\Robust.ini`
 for this in-process bring-up.
 
-> **Key-name caveat.** The authoritative C# config contract lives in
-> `docs/current-architecture.md`, which is not yet vendored into this repo. The
-> keys below follow the os-webrtc-janus convention and this repo's
-> `docs/docker-notes.md`. If your deployed addon build spells a key differently,
-> its own `.example`/`.ini` is the final authority — reconcile against it.
+The key names below are confirmed against `docs/voice/current-architecture.md`
+§5 (the config surface — every INI key the addon reads). Two things worth
+calling out from §5: the master `Enabled` gate lives in `[WebRtcVoice]` (the
+Janus leaf reads it too); `[JanusWebRtcVoice]` has **no** `Enabled` key — the
+Janus leaf enables itself once its four required fields are non-blank. And the
+`SpatialVoiceService`/`NonSpatialVoiceService` values are `dll:Class` strings,
+not bare names — copy the exact value from the addon's shipped
+`os-webrtc-janus.ini.example`.
 
 ```ini
 [WebRtcVoice]
     Enabled = true
-    ; In-process leaf on the region for both spatial and non-spatial voice.
-    SpatialVoiceService    = "WebRtcJanusService"
-    NonSpatialVoiceService = "WebRtcJanusService"
+    ; The in-process Janus leaf, as a dll:Class string. Copy the exact value
+    ; from the shipped os-webrtc-janus.ini.example (the dll:Class of the
+    ; WebRtcJanusService leaf). The grid-routed alternative, for reference, is
+    ; "WebRtcVoice.dll:WebRtcVoiceServiceConnector" (current-architecture.md §5).
+    SpatialVoiceService    = "<dll>:WebRtcJanusService"
+    NonSpatialVoiceService = "<dll>:WebRtcJanusService"   ; blank falls back to SpatialVoiceService
 
 [JanusWebRtcVoice]
-    Enabled = true
-    ; Signalling + admin endpoints of the container (note /voice, /voiceAdmin).
+    ; No Enabled key here — the four fields below being non-blank enable the leaf
+    ; (current-architecture.md §5). Signalling + admin endpoints of the
+    ; container (note the /voice, /voiceAdmin base paths).
     JanusGatewayURI      = "http://192.168.1.225:24223/voice"
+    APIToken             = "testsecret"      ; == container JS_API_SECRET
     JanusGatewayAdminURI = "http://192.168.1.225:24225/voiceAdmin"
-    ; Must equal the container's JS_API_SECRET / JS_ADMIN_SECRET.
-    APIToken      = "testsecret"
-    AdminAPIToken = "testadmin"
-
-    ; ---- Plugin selection --------------------------------------------------
-    ; GATE 0: leave PluginName unset (or commented) -> defaults to audiobridge.
-    ; GATE 1: set PluginName = janus.plugin.slvoice   (needs feature/voice-plugin-select)
-    ; PluginName = janus.plugin.slvoice
+    AdminAPIToken        = "testadmin"       ; == container JS_ADMIN_SECRET
 ```
 
 ### GATE 0 config
-Leave `PluginName` **commented/unset** (default `janus.plugin.audiobridge`).
+Use the config above as-is. The stock os-webrtc-janus addon **hardcodes** the
+plugin name `janus.plugin.audiobridge` (`JanusAudioBridge.cs:41`); there is no
+plugin-selection INI key in the stock build (§6). So a stock regionserver
+attaches to audiobridge automatically — nothing to set.
 
 ### GATE 1 config change
-Two edits, then restart the regionserver:
-1. Uncomment `PluginName = janus.plugin.slvoice` in `[JanusWebRtcVoice]`.
+`janus.plugin.slvoice` is selected by making that hardcoded name config-driven —
+the seam `docs/voice/current-architecture.md` §6 describes, which is what your
+**`feature/voice-plugin-select`** branch adds as a `[JanusWebRtcVoice] PluginName`
+key. With that branch built and deployed on the regionserver, make two edits and
+restart:
+1. Add to `[JanusWebRtcVoice]`: `PluginName = janus.plugin.slvoice`
+   (GATE 0 is the same branch with `PluginName = janus.plugin.audiobridge`, or
+   the key absent).
 2. Add `SLV_ECHO_AUTOSTART=true` to the container `.env` and
    `docker compose up -d` the container (so a stock viewer hears itself without
    sending an `{"echo":true}` data-channel message). Alternatively leave it off
@@ -225,8 +238,9 @@ exactly how far a connect got.
    `SLV_ECHO_AUTOSTART=true` (and re-`up` the container), or have your client
    send `{"echo":true}` on the data channel.
 3. **Opus not negotiated, or decode errors.** If the offer carries no Opus, join
-   fails: docker logs `[…slvoice-…] Request error 420: Offer does not include
-   Opus`, and the region console reports a provisioning error. If negotiation
+   fails: docker logs `[…slvoice-…] Request error 493: Offer does not include
+   Opus` (493 = audiobridge's INVALID_SDP), and the region console reports a
+   provisioning error. If negotiation
    succeeds but audio is garbled/silent, watch for repeated
    `[…slvoice-…] Opus decode error: …` (→ `last_decode_ok:false`). Fix: confirm
    the viewer offers Opus (it does by default) and that the negotiated
