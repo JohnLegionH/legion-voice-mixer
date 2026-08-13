@@ -60,6 +60,10 @@ services:
     environment:
       - SLV_ECHO_AUTOSTART=${SLV_ECHO_AUTOSTART:-false}
 
+    # Keeps voice up across crashes and host reboots. Note for JS_PUBLIC_HOST
+    # users: on each (re)start the entrypoint re-resolves the hostname to an
+    # IPv4, so a reboot picks up a changed dynamic IP automatically. A mid-run
+    # IP change still needs an explicit `docker compose restart`. See env.sample.
     restart: unless-stopped
 
     # ── Advanced config override (optional) ──────────────────────────────────

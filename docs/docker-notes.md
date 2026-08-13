@@ -47,6 +47,8 @@ over the whole config dir by default (that was the old model).
 | `.env` variable | Janus file → key | Default |
 |---|---|---|
 | `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping` (only if set) | *(unset)* |
+| `JS_PUBLIC_HOST` | resolved to IPv4 at start → `nat_1_1_mapping` (overrides `JS_PUBLIC_IP`) | *(unset)* |
+| `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
 | `JS_API_SECRET` | `janus.jcfg` → `api_secret` (only if set) | *(unset)* |
 | `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret` (only if set) | *(unset)* |
 | `JS_RTP_PORT_RANGE` | `janus.jcfg` → `rtp_port_range` | `10000-10200` |
@@ -63,6 +65,47 @@ never collide with `admin_http`/`admin_port`/`admin_base_path`, and `ws`/`ws_por
 never collide with `wss`/`admin_ws`/`admin_ws_port`. The container's internal WS
 port tracks `JS_WS_PORT` so the bridge port mapping stays symmetric (host ==
 container), matching how `JS_HTTP_PORT`/`JS_ADMIN_PORT` behave.
+
+### External access: public hostname and split-horizon ICE
+
+For outside testers, the server must advertise a reachable public address in its
+ICE candidates (`nat_1_1_mapping`). Two knobs support this:
+
+- **`JS_PUBLIC_HOST`** — a DNS/DDNS hostname (e.g. `legiongrid.ddns.net`).
+  `nat_1_1_mapping` requires an **IP literal**, not a hostname, so the entrypoint
+  **resolves the name to an IPv4 once at container start** (`getent ahostsv4`,
+  first A record) and uses that, **overriding `JS_PUBLIC_IP`**. If the name
+  fails to resolve the container **refuses to start** with a loud
+  `[entrypoint] FATAL: could not resolve JS_PUBLIC_HOST=…` message, rather than
+  coming up silently broken.
+
+  Because resolution happens **only at start**, a dynamic IP that changes while
+  the container runs leaves the old address baked into `nat_1_1_mapping` and
+  external voice breaks until you re-resolve: `docker compose restart` (or
+  `docker compose up -d` after the change). The `restart: unless-stopped` policy
+  in `docker-compose.yml` covers the host-reboot / Docker-restart case — the
+  container comes back and re-resolves automatically — but it does **not** react
+  to a mid-run IP change on its own. For frequently-changing IPs, pair this with
+  an external "restart on IP change" hook (e.g. your DDNS updater) if needed.
+
+- **`JS_KEEP_PRIVATE_HOST`** → Janus `keep_private_host`. When a public mapping
+  is in effect, `nat_1_1_mapping` normally **rewrites** every host candidate to
+  the public address. That breaks **LAN** viewers whose router lacks NAT
+  hairpin/loopback (common on home routers): they'd be told to reach the server
+  at its public IP and can't loop back to it. Setting `keep_private_host = true`
+  makes Janus advertise **both** the private and the public host candidate, so:
+  - **LAN viewers** pick the private candidate and connect directly — no hairpin
+    needed;
+  - **external viewers** pick the public candidate.
+
+  This is why the default is **`true` whenever a public address is set**. The
+  tradeoff: the container's private IP is included in candidates handed to
+  external peers (minor information disclosure), and there are marginally more
+  candidates to gather and connectivity-check. Set `JS_KEEP_PRIVATE_HOST=false`
+  to advertise only the public candidate (e.g. a pure cloud host with no LAN
+  viewers), accepting that same-LAN viewers then need working NAT loopback.
+  `keep_private_host` is only written when a public address is set; with none it
+  is left at the Janus default.
 
 ## Windows/Docker Desktop (networking)
 
