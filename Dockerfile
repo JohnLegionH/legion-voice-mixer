@@ -54,11 +54,21 @@ RUN cd /root/slvoice \
     && make install JANUS_PREFIX=/opt/janus \
     && ls -l /opt/janus/lib/janus/plugins/janus_slvoice.so
 
-# --- Install the plugin's config into the image (used when no volume is mounted) ---
+# --- Install the plugin's config into the image ---
 COPY etc/janus/janus.plugin.slvoice.jcfg /opt/janus/etc/janus/janus.plugin.slvoice.jcfg
 
-# The configuration directory mounted when run (same as the reference)
-VOLUME /opt/janus/etc/janus/
+# --- Snapshot the stock config as pristine templates ---
+# The entrypoint restores from here on every start, then applies env values, so
+# config generation is deterministic across restarts and never depends on a
+# volume. (`make configs` already populated /opt/janus/etc/janus with the stock
+# set, incl. janus.plugin.audiobridge.jcfg for A/B bring-up.)
+RUN mkdir -p /opt/janus/share/janus-templates \
+    && cp /opt/janus/etc/janus/*.jcfg /opt/janus/share/janus-templates/
+
+# --- Config-generating entrypoint (operators configure via env, not files) ---
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # API connections (Janus HTTP/HTTPS/admin/websockets live in 14220-14229)
 EXPOSE 14220-14229
@@ -66,5 +76,9 @@ EXPOSE 14220-14229
 # The WebRTC media streams created
 EXPOSE 10000-10200/udp
 
+# Advanced users may bind-mount complete *.jcfg files into /opt/janus/etc/janus.d
+# to override env/defaults (no VOLUME is declared, to avoid dangling anonymous
+# volumes; the entrypoint tolerates the directory being absent).
+
 # Exec form so Janus is PID 1 and receives SIGTERM directly (clean `docker stop`).
-CMD ["/opt/janus/bin/janus"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

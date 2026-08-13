@@ -1,20 +1,37 @@
-# Matches the expectations of Misterblue/os-webrtc-janus-docker:
-#   - single "janus" service
-#   - image name taken from $JS_IMAGE (see ./env)
-#   - host networking (WebRTC needs the real host ports / ICE candidates)
-#   - the local ./etc/janus is mounted over the container's config dir
-#   - restarts unless explicitly stopped
+# Legion SLVoice mixer — operator deployment.
 #
-# Start with ./run-janus.sh (which applies ./env + ./secrets to ./etc/janus first).
-version: '3'
+# Quick start (a machine with only Docker needs just this file + env.sample):
+#   1. cp env.sample .env
+#   2. edit the three required values in .env
+#   3. docker compose up -d
+#   4. curl http://localhost:14223/janus/info   # lists janus.plugin.slvoice
+#
+# Config is generated inside the container from .env at start; you never edit
+# files in the container. See the README "Install" section.
 
 services:
-    janus:
-        image: $JS_IMAGE
+  janus:
+    image: ghcr.io/johnlegionh/legion-voice-mixer:latest
 
-        network_mode: host
+    # ── Developers only ──────────────────────────────────────────────────────
+    # Build the image locally from source instead of pulling the published one.
+    # Requires the full repo checkout with submodules (see README "Development").
+    # Comment out the `image:` line above and uncomment this block:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
 
-        volumes:
-            - ./etc/janus:/opt/janus/etc/janus
+    # WebRTC needs the real host ports and ICE candidates.
+    network_mode: host
 
-        restart: unless-stopped
+    # All operator-tunable values live in .env (copied from env.sample).
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    # ── Advanced config override (optional) ──────────────────────────────────
+    # Drop complete Janus *.jcfg files here to override the env-generated config.
+    # Precedence: mounted file > env > default (see docs/docker-notes.md).
+    # volumes:
+    #   - ./janus.d:/opt/janus/etc/janus.d:ro

@@ -7,8 +7,14 @@
 .gitignore
 .gitmodules
 
-# Secrets never belong in an image layer
+# Secrets / operator config never belong in an image layer
 secrets
+.env
+
+# Not needed to build the image
+.github/
+docker-compose.yml
+env.sample
 
 # Local build artifacts
 *.o

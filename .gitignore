@@ -9,7 +9,8 @@
 src/*.o
 janus_slvoice.so
 
-# --- Secrets (NEVER commit; use secrets.sample as the template) ---
+# --- Secrets / local config (NEVER commit; use env.sample as the template) ---
+.env
 secrets
 
 # --- Editor / OS cruft ---
