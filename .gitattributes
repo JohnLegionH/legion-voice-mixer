@@ -1,0 +1,13 @@
+# Normalise this repo's own text files to LF, on every platform. This project
+# targets Linux/Janus; CRLF would break the shell scripts and the Makefile.
+# (The vendored Janus submodule is a gitlink and is unaffected by this file.)
+* text=auto eol=lf
+
+# Keep shell scripts and C explicitly LF
+*.sh    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.jcfg  text eol=lf
+*.yml   text eol=lf
