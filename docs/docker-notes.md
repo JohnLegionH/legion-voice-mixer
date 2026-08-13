@@ -55,10 +55,61 @@ over the whole config dir by default (that was the old model).
 | `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/voice` |
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
 | `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
+| `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` | `8188` |
 
-The entrypoint also forces `http = true` and `admin_http = true`. `sed`
-substitutions are anchored to line start so `http`/`port`/`base_path` never
-collide with `admin_http`/`admin_port`/`admin_base_path`.
+The entrypoint also forces `http = true`, `admin_http = true`, and `ws = true`.
+`sed` substitutions are anchored to line start so `http`/`port`/`base_path`
+never collide with `admin_http`/`admin_port`/`admin_base_path`, and `ws`/`ws_port`
+never collide with `wss`/`admin_ws`/`admin_ws_port`. The container's internal WS
+port tracks `JS_WS_PORT` so the bridge port mapping stays symmetric (host ==
+container), matching how `JS_HTTP_PORT`/`JS_ADMIN_PORT` behave.
+
+## Windows/Docker Desktop (networking)
+
+`docker-compose.yml` uses **bridge networking with explicit `ports:` mappings**,
+not `network_mode: host`. This is the portable default and the only mode that
+works on **Docker Desktop for Windows/macOS**.
+
+**Why host networking fails there.** On Docker Desktop the containers run inside
+a Linux VM (WSL2 on Windows, LinuxKit on macOS). `network_mode: host` binds the
+Janus ports on *that VM's* network namespace, not on the Windows/macOS host, so
+`curl http://localhost:14223/voice/info` from the host gets no route. Verified on
+this tree: with host networking the container binds and answers `/voice/info`
+*from inside the container*, but the same request from the Windows host fails.
+Bridge mode + `ports:` publishes the ports through Docker's proxy onto host
+`localhost`, which does work.
+
+**Ports published** (all driven by the `.env` values, so host == container):
+
+| Purpose | Port(s) | Proto | Env var |
+|---|---|---|---|
+| HTTP signalling (`/voice`) | `14223` | tcp | `JS_HTTP_PORT` |
+| Admin/monitor API (`/voiceAdmin`) | `14225` | tcp | `JS_ADMIN_PORT` |
+| WebSockets signalling | `8188` | tcp | `JS_WS_PORT` |
+| WebRTC media (RTP/RTCP) | `10000-10200` | udp | `JS_RTP_PORT_RANGE` |
+
+**ICE / `nat_1_1_mapping` under bridge mode.** This is the one behavioural
+gotcha. Under bridge networking Janus lives on the container's private network
+(e.g. `172.17.0.x`) and, left alone, gathers ICE **host candidates** with that
+private IP — unreachable from anything off the container, so media never flows
+even though the UDP ports are published. The fix is the existing `JS_PUBLIC_IP`
+path: it sets `nat_1_1_mapping` in `janus.jcfg`, which makes Janus **advertise
+that address in its candidates instead** of the private one. So under bridge
+mode `JS_PUBLIC_IP` is effectively **required for working media** — set it to the
+host's reachable IPv4 (a LAN address for LAN clients, the public IPv4 for
+internet clients). Note this is not a Windows-only concern: any NAT'd host needs
+it, but bridge networking makes it mandatory even for same-host reachability.
+
+Signalling is unaffected: `GET /voice/info` (the verify step) returns correctly
+with `JS_PUBLIC_IP` unset, because that path is plain published TCP and does not
+depend on ICE. Only the WebRTC media leg needs the mapping.
+
+**RTP range cost.** Docker publishes each UDP port in the range via a separate
+`docker-proxy`, so a wide `JS_RTP_PORT_RANGE` means many proxies and slower
+`compose up`. The default 201-port range is fine; keep it modest. On a native
+**Linux** host you can instead uncomment `network_mode: host` in
+`docker-compose.yml` — it skips the proxy entirely and lets Janus read the host
+interfaces directly for ICE. That block is kept commented for exactly this case.
 
 ## Divergences from os-webrtc-janus-docker
 

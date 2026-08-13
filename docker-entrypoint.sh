@@ -18,6 +18,7 @@ OVERRIDE_DIR=/opt/janus/etc/janus.d
 
 JANUS_JCFG="$CONF_DIR/janus.jcfg"
 HTTP_JCFG="$CONF_DIR/janus.transport.http.jcfg"
+WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 
 # ---- Defaults (env > default) ----
 : "${JS_SERVER_NAME:=GridVoice}"
@@ -25,6 +26,7 @@ HTTP_JCFG="$CONF_DIR/janus.transport.http.jcfg"
 : "${JS_HTTP_BASEPATH:=/voice}"
 : "${JS_ADMIN_PORT:=14225}"
 : "${JS_ADMIN_BASEPATH:=/voiceAdmin}"
+: "${JS_WS_PORT:=8188}"
 : "${JS_RTP_PORT_RANGE:=10000-10200}"
 : "${JS_PUBLIC_IP:=}"
 : "${JS_API_SECRET:=}"
@@ -61,6 +63,13 @@ set_kv "$HTTP_JCFG" admin_http      true
 set_kv "$HTTP_JCFG" admin_port      "${JS_ADMIN_PORT}"
 set_kv "$HTTP_JCFG" admin_base_path "\"${JS_ADMIN_BASEPATH}\""
 
+# WebSockets signalling transport. `ws` anchors to line start so it never
+# collides with `wss`/`admin_ws`/`admin_wss`; `ws_port` likewise never matches
+# `admin_ws_port`. The container's internal WS port tracks JS_WS_PORT so the
+# bridge port mapping in docker-compose.yml stays symmetric (host == container).
+set_kv "$WS_JCFG" ws      true
+set_kv "$WS_JCFG" ws_port "${JS_WS_PORT}"
+
 # ---- 3. Operator overrides (mounted file > env) ----
 if [ -d "$OVERRIDE_DIR" ]; then
 	for f in "$OVERRIDE_DIR"/*.jcfg; do
@@ -70,5 +79,5 @@ if [ -d "$OVERRIDE_DIR" ]; then
 	done
 fi
 
-echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} rtp=${JS_RTP_PORT_RANGE} public_ip=${JS_PUBLIC_IP:-<none>}"
+echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${JS_WS_PORT} rtp=${JS_RTP_PORT_RANGE} public_ip=${JS_PUBLIC_IP:-<none>}"
 exec /opt/janus/bin/janus "$@"

@@ -21,8 +21,33 @@ services:
     #   context: .
     #   dockerfile: Dockerfile
 
-    # WebRTC needs the real host ports and ICE candidates.
-    network_mode: host
+    # ── Networking: bridge + explicit port mappings ──────────────────────────
+    # This is the portable default and the ONLY mode that works on Docker Desktop
+    # for Windows/macOS: there `network_mode: host` binds inside the WSL2/LinuxKit
+    # VM and the ports are NOT reachable from the Windows/macOS host. The mapped
+    # ports are driven by the same .env values the entrypoint uses to configure
+    # Janus, so host and container ports always match (symmetric mapping).
+    #
+    # IMPORTANT (WebRTC media): under bridge networking Janus gathers ICE
+    # candidates from the container's private IP, which is unreachable off-host.
+    # Set JS_PUBLIC_IP in .env to this host's reachable IPv4 so Janus advertises
+    # that instead (nat_1_1_mapping). Signalling — the /voice/info check — works
+    # without it; media does not. See docs/docker-notes.md → "Windows/Docker
+    # Desktop".
+    ports:
+      - "${JS_HTTP_PORT:-14223}:${JS_HTTP_PORT:-14223}/tcp"                        # HTTP signalling (/voice)
+      - "${JS_ADMIN_PORT:-14225}:${JS_ADMIN_PORT:-14225}/tcp"                      # Admin/monitor API (/voiceAdmin)
+      - "${JS_WS_PORT:-8188}:${JS_WS_PORT:-8188}/tcp"                              # WebSockets signalling
+      - "${JS_RTP_PORT_RANGE:-10000-10200}:${JS_RTP_PORT_RANGE:-10000-10200}/udp" # WebRTC media (RTP/RTCP)
+
+    # ── Linux hosts (optional) ───────────────────────────────────────────────
+    # On a native Linux host you may prefer host networking: it skips the
+    # per-port userland proxy (lighter for the wide RTP range, which otherwise
+    # spawns one docker-proxy per UDP port) and lets Janus see the real host
+    # interfaces directly when gathering ICE candidates. NOT usable on Docker
+    # Desktop (Windows/macOS) — see the note above. To use it, comment out the
+    # entire `ports:` block above and uncomment this line:
+    # network_mode: host
 
     # All operator-tunable values live in .env (copied from env.sample).
     env_file:
