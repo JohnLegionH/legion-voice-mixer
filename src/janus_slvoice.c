@@ -50,12 +50,13 @@
 #include <janus/refcount.h>
 #include <janus/utils.h>
 #include <janus/sdp-utils.h>
+#include <janus/rtp.h>   /* JANUS_RTP_EXTMAP_MID / JANUS_RTP_EXTMAP_AUDIO_LEVEL */
 
 #include "sldata.h"
 
 /* Plugin information */
 #define JANUS_SLVOICE_VERSION         4
-#define JANUS_SLVOICE_VERSION_STRING  "0.4.0"
+#define JANUS_SLVOICE_VERSION_STRING  "0.4.1"
 #define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 1A: holds a WebRTC voice session incl. the SLData data channel; no audio yet)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
@@ -670,6 +671,9 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	gboolean has_dc = (janus_sdp_mline_find(offer, JANUS_SDP_APPLICATION) != NULL);
 	JANUS_LOG(LOG_INFO, "[%s-%p] Offer received: Opus pt=%d, m=application present=%s\n",
 		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, has_dc ? "yes" : "no");
+	/* Full offer dump for capture against a live viewer (per-join, not spammy). */
+	JANUS_LOG(LOG_INFO, "[%s-%p] ==== OFFER SDP ====\n%s==== END OFFER SDP ====\n",
+		JANUS_SLVOICE_PACKAGE, session->handle, sdp_str);
 
 	/* Build the answer: accept Opus audio sendrecv AND the datachannel; reject
 	 * everything else (generate_answer defaults every m-line to rejected). */
@@ -678,18 +682,26 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	while(temp != NULL) {
 		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
 		if(m->type == JANUS_SDP_AUDIO) {
+			/* Accept the mid + audio-level RTP header extensions the viewer
+			 * offered. The mid extension is REQUIRED whenever the answer bundles
+			 * more than one m-line (audio + data): without it a strict libwebrtc
+			 * viewer (Firestorm) rejects the answer at setRemoteDescription and
+			 * abandons before ICE even starts. Mirrors janus_audiobridge.c:8244. */
 			janus_sdp_generate_answer_mline(offer, answer, m,
 				JANUS_SDP_OA_MLINE, JANUS_SDP_AUDIO,
 				JANUS_SDP_OA_CODEC, "opus",
 				JANUS_SDP_OA_DIRECTION, JANUS_SDP_SENDRECV,
+				JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_MID,
+				JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_AUDIO_LEVEL,
 				JANUS_SDP_OA_DONE);
 		} else if(m->type == JANUS_SDP_APPLICATION) {
-			/* THE critical line: accept + answer the SCTP DataChannel so the
-			 * core sets up SCTP (sdp.c:1611) instead of skipping it (sdp.c:1625).
-			 * Minimal correct option list; proto (UDP/DTLS/SCTP) and port are
-			 * filled by generate_answer_mline from the offer. */
+			/* Accept + answer the SCTP DataChannel so the core sets up SCTP
+			 * (sdp.c:1611) instead of skipping it (sdp.c:1625); also accept the
+			 * mid extension so the bundled data m-line carries its a=mid,
+			 * matching the audio line. Mirrors janus_videoroom.c:13114. */
 			janus_sdp_generate_answer_mline(offer, answer, m,
 				JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
+				JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_MID,
 				JANUS_SDP_OA_DONE);
 		}
 		temp = temp->next;
@@ -724,6 +736,10 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	*answer_sdp = new_sdp;
 	JANUS_LOG(LOG_INFO, "[%s-%p] Answer sent: audio Opus pt=%d; m=application answered=%s\n",
 		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, dc_answered ? "YES" : "NO");
+	/* Full answer dump (the plugin's answer, before the core's ICE/DTLS merge)
+	 * for capture against a live viewer. */
+	JANUS_LOG(LOG_INFO, "[%s-%p] ==== ANSWER SDP ====\n%s==== END ANSWER SDP ====\n",
+		JANUS_SLVOICE_PACKAGE, session->handle, new_sdp);
 	if(has_dc && !dc_answered)
 		JANUS_LOG(LOG_WARN, "[%s-%p] Offer had a data channel but the answer did NOT accept it — "
 			"the viewer will tear down (check Janus was built with SCTP)\n",
