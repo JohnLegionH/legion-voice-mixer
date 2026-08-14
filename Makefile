@@ -33,11 +33,11 @@ PKGCONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config
 
 # janus-gateway pulls in glib-2.0 and jansson via its Requires:; we name them
 # explicitly too so a build still works if only their .pc files are present.
-# Phase 1A does no audio, so opus is no longer a dependency.
-PKGS := janus-gateway glib-2.0 jansson
+# Phase 1B echoes audio, so opus (decode/encode) is a dependency again.
+PKGS := janus-gateway glib-2.0 jansson opus
 
 PKG_CFLAGS := $(shell $(PKGCONFIG) --cflags $(PKGS) 2>/dev/null)
-PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson 2>/dev/null)
+PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson opus 2>/dev/null) -lm
 
 CFLAGS  ?= -O2 -g
 # EXTRA_CFLAGS is an append-only hook for extra defines passed from the caller,

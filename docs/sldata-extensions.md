@@ -93,15 +93,18 @@ a normal viewer hears itself without any special client:
 Default is **off**. The runtime `{"echo":true}`/`{"echo":false}` toggle still
 works regardless of this setting. See `docs/phase1-bringup.md`.
 
-## What Phase 1 does NOT do
+## What's implemented vs deferred
 
-- No use of `sp/sh/lp/lh` geometry (no distance attenuation, no panning).
-- No per-listener anything, no mixing across participants.
-- No mutation of another participant's state from `m`/`ug`.
-- No **mixer→client** SLData. The spec (§9) has the mixer push per-peer
-  `p/V/j/l` batched ~100 ms, plus the `diag` state member (§4.1); Phase 1
-  exposes diagnostics through `query_session`/the admin API instead (see
-  `docs/phase1-bringup.md`) and pushes nothing on the data channel yet.
+**Mixer→client SLData is implemented** (Phase 1A/1B): the plugin pushes the
+per-peer power/VAD batch `{ "<uuid>": {"p":<RMS*128>,"V":<VAD>} }` every ~100 ms
+(spec §9). In Phase 1B, with echo on, `p`/`V` are the real RMS/VAD of each
+participant's decoded audio; with echo off they read 0. Per-peer `j`/`l`
+join/leave notices are also pushed.
 
-Those are Phase 2 (`src/mixer/mixer.h`). Phase 1 only **stores** the latest
-values so the storage/telemetry surface is in place from the start.
+**Deferred to Phase 2** (`src/mixer/mixer.h`):
+- Use of `sp/sh/lp/lh` geometry (distance attenuation, panning).
+- Cross-participant **mixing** and per-listener rendering (Phase 1B echoes each
+  participant to itself only — no mixing between participants).
+- Mutation of another participant's state from `m`/`ug`.
+- The `diag` state member (§4.1); diagnostics are exposed via `query_session` /
+  the admin API for now (see `docs/phase1-bringup.md`).

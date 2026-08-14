@@ -53,6 +53,12 @@ services:
     env_file:
       - .env
 
+    # Phase 1B echo-test knob, surfaced explicitly so it's discoverable. Default
+    # false. Set SLV_ECHO_AUTOSTART=true in .env for the echo acceptance run (each
+    # participant then hears itself ~500ms delayed), then set it back to false.
+    environment:
+      - SLV_ECHO_AUTOSTART=${SLV_ECHO_AUTOSTART:-false}
+
     # Keeps voice up across crashes and host reboots. Note for JS_PUBLIC_HOST
     # users: on each (re)start the entrypoint re-resolves the hostname to an
     # IPv4, so a reboot picks up a changed dynamic IP automatically. A mid-run

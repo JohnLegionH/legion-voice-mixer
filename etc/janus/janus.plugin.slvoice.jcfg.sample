@@ -10,6 +10,13 @@ general: {
 	# Human-readable label surfaced in logs/admin (optional).
 	#name = "Legion SLVoice mixer"
 
+	# Phase 1B: auto-enable echo (participant hears itself ~500ms delayed) as soon
+	# as its PeerConnection is up, so a stock viewer that can't send the
+	# {"echo":true} SLData toggle still gets echo. Default false. Under the Docker
+	# model the SLV_ECHO_AUTOSTART env var (add it to .env) is the easier knob and
+	# overrides this. See docs/phase1-bringup.md (CHECK 2).
+	#echo_autostart = false
+
 	# Set to true for very verbose per-tick logging once the mixer exists (Phase 2).
 	#events = true
 }
