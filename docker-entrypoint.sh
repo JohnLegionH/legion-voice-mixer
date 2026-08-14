@@ -82,14 +82,47 @@ set_kv() {
 	sed -i "s|^\([[:space:]]*\)#*[[:space:]]*${key} = .*|\1${key} = ${esc}|" "$file"
 }
 
+# Like set_kv, but GUARANTEES an uncommented `key = value` inside a named jcfg
+# section. set_kv alone silently no-ops if the template ships no matching line
+# (commented or not), which is how a critical key like nat_1_1_mapping can
+# silently stay commented. This first tries the in-place uncomment/replace, and
+# if that still leaves no uncommented line, injects one right after `section: {`.
+ensure_kv_in_section() {
+	file=$1; section=$2; key=$3; val=$4
+	esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+	# 1. Uncomment/replace an existing line (commented or not).
+	sed -i "s|^\([[:space:]]*\)#*[[:space:]]*${key} = .*|\1${key} = ${esc}|" "$file"
+	# 2. If no UNcommented line resulted, inject one after the `section: {` opener.
+	if ! grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
+		sed -i "s|^\([[:space:]]*\)${section}:[[:space:]]*{.*|&\n\t${key} = ${esc}|" "$file"
+	fi
+}
+
 # ---- 2. Apply environment values ----
 set_kv "$JANUS_JCFG" server_name "\"${JS_SERVER_NAME}\""
 if [ -n "$JS_API_SECRET" ];    then set_kv "$JANUS_JCFG" api_secret   "\"${JS_API_SECRET}\""; fi
 if [ -n "$JS_ADMIN_SECRET" ];  then set_kv "$JANUS_JCFG" admin_secret "\"${JS_ADMIN_SECRET}\""; fi
 if [ -n "$JS_RTP_PORT_RANGE" ];then set_kv "$JANUS_JCFG" rtp_port_range "\"${JS_RTP_PORT_RANGE}\""; fi
 if [ -n "$JS_PUBLIC_IP" ]; then
-	set_kv "$JANUS_JCFG" nat_1_1_mapping   "\"${JS_PUBLIC_IP}\""
-	set_kv "$JANUS_JCFG" keep_private_host "${JS_KEEP_PRIVATE_HOST}"
+	# nat_1_1_mapping/keep_private_host live in the nat:{} section, shipped
+	# COMMENTED in the stock template — use the robust helper so they reliably
+	# end up uncommented (see ensure_kv_in_section).
+	ensure_kv_in_section "$JANUS_JCFG" nat nat_1_1_mapping   "\"${JS_PUBLIC_IP}\""
+	ensure_kv_in_section "$JANUS_JCFG" nat keep_private_host "${JS_KEEP_PRIVATE_HOST}"
+	# Verify it actually landed, and state the applied value (fail loud if not).
+	if grep -Eq "^[[:space:]]*nat_1_1_mapping[[:space:]]*=" "$JANUS_JCFG"; then
+		echo "[entrypoint] nat_1_1_mapping = ${JS_PUBLIC_IP}"
+		echo "[entrypoint] keep_private_host = ${JS_KEEP_PRIVATE_HOST}"
+	else
+		echo "[entrypoint] FATAL: could not set nat_1_1_mapping in janus.jcfg (Janus template changed?); refusing to start" >&2
+		exit 1
+	fi
+else
+	# Fail-loud: no public address under bridge networking guarantees media failure.
+	echo "[entrypoint] WARNING: neither JS_PUBLIC_IP nor JS_PUBLIC_HOST is set." >&2
+	echo "[entrypoint] WARNING: under bridge networking Janus advertises only its private container IP," >&2
+	echo "[entrypoint] WARNING: so WebRTC MEDIA WILL FAIL for every viewer (signalling/ICE may still look ok)." >&2
+	echo "[entrypoint] WARNING: set JS_PUBLIC_IP (LAN or public IPv4) or JS_PUBLIC_HOST in .env. See docs/docker-notes.md." >&2
 fi
 
 set_kv "$HTTP_JCFG" http            true
