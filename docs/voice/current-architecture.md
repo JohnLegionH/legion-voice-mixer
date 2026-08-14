@@ -303,6 +303,7 @@ disables (`ServiceModule:79`–`:84`).
 | `APIToken` | `:76` | `""` | Required. |
 | `JanusGatewayAdminURI` | `:77` | `""` | Required. |
 | `AdminAPIToken` | `:78` | `""` | Required. |
+| `PluginName` | `:79` | `"janus.plugin.audiobridge"` | Janus plugin (mixer) to attach handles to. Added by `feature/voice-plugin-select` (commit `1fb6371`); default preserves the original hardcoded behaviour. Set to `janus.plugin.slvoice` to select the Legion mixer. See §6. |
 | `MessageDetails` | `:80` | `false` | Janus wire logging (separate from `[WebRtcVoice]` one). |
 
 Any of the four required fields blank → the Janus service disables itself
@@ -337,6 +338,15 @@ Goal: point the OpenSim side at a **different Janus plugin name** (not
   name as a parameter (`:339`), and `JanusPlugin` is entirely name-agnostic
   (`Activate:88`, `Detach:126`). So if the new plugin speaks the same `join`/`leave`/`create`
   vocabulary, changing this one string (or making it config-driven) is the whole diff.
+
+> **DONE (commit `1fb6371`, branch `feature/voice-plugin-select`).** This seam is
+> now config-driven: `WebRtcJanusService` reads the `[JanusWebRtcVoice] PluginName`
+> key (default `janus.plugin.audiobridge`, §5), logs the selected plugin at INFO,
+> and passes it to `JanusAudioBridge(JanusSession, string)` → the name-agnostic
+> base. Set `PluginName = janus.plugin.slvoice` to attach the Legion mixer; no
+> other change (the vocabulary is unchanged). Covered by
+> `Tests/WebRtcJanusService.Tests` (default-when-absent, honored-when-set,
+> flows-to-JanusPlugin).
 
 ### If the replacement plugin speaks a *different* request/response vocabulary
 
@@ -404,6 +414,22 @@ type," contradicting `:304`; that staleness is the fingerprint of the pre-libOMV
 integration superseded. So: the upstream libOMV integration subsumed the need for any
 `OSD.FromLong`-style patch; `OSDToLong` remains as defensive belt-and-suspenders and matches
 upstream exactly — there is nothing local to carry forward or reconcile here.
+
+> **FIXED — the stale `:131` comment marked a real defect (commit `be94487`,
+> branch `fix/janus-osdlong-session-id`).** `OSDToLong` (`:136`) switched on the
+> OSD type with cases only for `Integer`/`Binary`/`Array` — it had **no case for
+> `OSDType.Long`**, the type the ported-libOMV parser returns for any number
+> exceeding int32. Such ids fell through to the initialized `long ret = 0`, so
+> `CreateSessionResp.returnedId` (`:304`) returned `"0"`: every Janus session was
+> created with id 0, all follow-up requests 404'd (`…/voice/0`), plugin attach
+> failed, and the service disabled itself. Because Janus session/handle ids
+> exceed int32 in practice, this broke **every** NGC deployment using the Janus
+> voice addon (a coincidentally-small id was the only way it worked); the addon
+> file being byte-identical to `upstream/develop` means the defect is upstream.
+> The `:131`↔`:304` contradiction the note above flagged was its fingerprint. Fix:
+> `case OSDType.Long: ret = pIn.AsLong();` (+ corrected `:131` comment). Covered by
+> `Tests/WebRtcJanusService.Tests` (round-trips `923631757106466` and other >int32
+> values). Worth upstreaming to OpenSim-NGC.
 
 ---
 
