@@ -1,20 +1,35 @@
 /*! \file    mixer.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Per-region spatial voice mixer — model declarations (Phase 1)
+ * \brief    Per-region spatial voice mixer — model declarations (design record)
  *
- * \details  This header declares the tick model for the spatial mixer. It is
- * intentionally DECLARATIONS ONLY — there is no implementation yet. The
- * Phase-0 plugin scaffold (src/janus_slvoice.c) does not use any of this; it
- * is here to fix the shape of the Phase-1 work so the interfaces are agreed
- * before code lands.
+ * \details  This header captured the tick model BEFORE the mixer existed, to
+ * agree the shape of the Phase-2 work. That model is now REALISED (Phase 2,
+ * v0.6.0), but on the plugin's own `janus_slvoice_room` / `janus_slvoice_session`
+ * structs in src/janus_slvoice.c rather than on the aspirational \ref slv_region
+ * / \ref slv_participant types below — those structs already carry every piece
+ * of per-participant state (Janus handle, negotiated Opus PT, jitter buffer,
+ * codecs, data-channel state, diagnostics), so folding the tick onto them
+ * avoided a parallel object graph and a risky migration of the field-proven
+ * negotiation/echo code.
  *
- * Model in one sentence: a \ref slv_region owns a set of \ref slv_participant
- * instances and is advanced by a dedicated per-region thread that fires a
- * mix "tick" every 20ms (::SLV_TICK_INTERVAL_MS). One thread per region; no
- * shared mixing thread. Each tick pulls one frame from every participant's
- * jitter buffer, applies per-listener spatial gains, sums, and hands the
- * mixed frames back to the core for RTP relay.
+ * What actually ships (see src/janus_slvoice.c):
+ *   - one dedicated 20ms tick thread PER ROOM (janus_slvoice_room_ticker),
+ *     started in janus_slvoice_room_create, stopped in the destroy paths — the
+ *     "one thread per region, no shared mix thread" model below;
+ *   - each tick decodes every ACTIVE participant once (DTX/VAD cull with a
+ *     150ms release hold), then builds a flat N-minus-one mix per listener
+ *     honouring that listener's per-source mutes/gains, encodes, and relays;
+ *   - the pure summing/gain/RMS math lives in src/mixer/mix.c (Janus/Opus-free,
+ *     unit-tested by tests/test_mix.c);
+ *   - all buffers are preallocated at JOIN; the tick allocates nothing.
+ *
+ * The ::SLV_TICK_INTERVAL_MS / ::SLV_SAMPLE_RATE / ::SLV_SAMPLES_PER_TICK
+ * constants below are the canonical tick parameters (mirrored in the plugin as
+ * SLV_TICK_MS / SLV_RATE / SLV_FRAME_SAMPLES). The slv_region / slv_participant
+ * struct + function declarations that follow are a SUPERSEDED design record,
+ * kept for provenance; they are not compiled into the plugin and Phase 3
+ * (spatialization) extends the shipping room/session structs, not these.
  *
  * Written against the Janus 1.4.1 plugin API; forward-declares the Janus
  * types it will need rather than pulling the whole core in here.

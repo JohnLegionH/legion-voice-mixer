@@ -33,6 +33,14 @@
  * channel). SL position updates are a few hundred bytes at most. */
 #define SLV_SLDATA_MAX_BYTES 8192
 
+/*! \brief Max per-source mute/gain entries parsed from one SLData payload.
+ * The real Firestorm viewer sends one target per message (setUserMute /
+ * setUserVolume), so this only bounds a pathological batched payload. */
+#define SLV_MAX_PEER_ADJ 32
+
+/*! \brief Length of a stored participant UUID key (36 chars + NUL, rounded). */
+#define SLV_UUID_LEN 40
+
 /*! \brief Which recognised fields were present in a parsed payload.
  * Stored as a bitmask so diagnostics can report exactly what the last message
  * carried without keeping the raw JSON. */
@@ -54,6 +62,23 @@ typedef struct slv_vec3 { double x, y, z; } slv_vec3;
 /*! \brief An orientation quaternion. */
 typedef struct slv_quat { double x, y, z, w; } slv_quat;
 
+/*! \brief One per-source mute/gain adjustment, keyed by the TARGET
+ * participant's agent UUID.
+ *
+ * The Firestorm/SL viewer sends per-source control as objects keyed by UUID:
+ *   mute:  {"m":{"<uuid>":true}}     (LLVoiceWebRTCConnection::setUserMute)
+ *   gain:  {"ug":{"<uuid>":<uint>}}  (…::setUserVolume, value = volume*220)
+ * i.e. the LISTENER tells the mixer "for me, mute/adjust participant <uuid>".
+ * \c gain is stored as the RAW viewer integer; divide by the conversion factor
+ * (220) to recover a linear gain — the mixer does that when it applies it. */
+typedef struct slv_peer_adj {
+	char uuid[SLV_UUID_LEN]; /*!< target participant agent UUID (NUL-terminated) */
+	unsigned char has_mute;  /*!< this payload set a mute for the uuid */
+	unsigned char muted;     /*!< mute value (0/1), valid if has_mute */
+	unsigned char has_gain;  /*!< this payload set a gain for the uuid */
+	double gain;             /*!< raw viewer gain value, valid if has_gain */
+} slv_peer_adj;
+
 /*! \brief Parsed SLData. Only members whose bit is set in \c fields_seen carry
  * meaningful values; the rest are zero-initialised. */
 typedef struct slv_sldata {
@@ -62,9 +87,14 @@ typedef struct slv_sldata {
 	slv_quat sh;            /*!< self heading, if SLV_FIELD_SH */
 	slv_vec3 lp;            /*!< listener position, if SLV_FIELD_LP */
 	slv_quat lh;            /*!< listener heading, if SLV_FIELD_LH */
-	double   ug;            /*!< user gain, if SLV_FIELD_UG */
-	int      m;             /*!< mute (0/1), if SLV_FIELD_M */
+	double   ug;            /*!< legacy scalar user gain, if SLV_FIELD_UG and "ug" was a number */
+	int      m;             /*!< legacy scalar mute (0/1), if SLV_FIELD_M and "m" was a bool/int */
 	int      echo;          /*!< echo on(1)/off(0), if SLV_FIELD_ECHO */
+	/*! \brief Per-source mute/gain map (the real viewer shape). SLV_FIELD_M is
+	 * set when "m" was an object, SLV_FIELD_UG when "ug" was an object; the
+	 * corresponding entries land here rather than in \c m / \c ug. */
+	slv_peer_adj peers[SLV_MAX_PEER_ADJ];
+	int      n_peers;       /*!< number of populated \c peers entries */
 } slv_sldata;
 
 /*! \brief Result of a parse attempt. */

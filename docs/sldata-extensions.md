@@ -29,8 +29,8 @@ The parser (`src/sldata.c`, unit-tested by `tests/test_sldata.c`) recognises:
 | `sh` | self heading/orientation | `[x,y,z,w]` or `{x,y,z,w}` | `slv_quat` |
 | `lp` | listener position (camera) | `[x,y,z]` or `{x,y,z}` | `slv_vec3` |
 | `lh` | listener heading/orientation (**confirmed §6**) | `[x,y,z,w]` or `{x,y,z,w}` | `slv_quat` |
-| `m`  | mute flag | bool or int | `int` (0/1) |
-| `ug` | user gain | number | `double` |
+| `m`  | mute flag — **per-source object** (see below) | `{uuid:bool}` (or bool/int, legacy) | `slv_peer_adj[]` (or `int`) |
+| `ug` | user gain — **per-source object** (see below) | `{uuid:number}` (or number, legacy) | `slv_peer_adj[]` (or `double`) |
 | `echo` | **slvoice extension** (spec §4.2 echo-test control; see below) | bool or int | `int` (0/1) |
 
 Parsing policy (all enforced and unit-tested):
@@ -49,6 +49,83 @@ Parsing policy (all enforced and unit-tested):
 Diagnostics: `query_session` reports `data_msgs_received` and
 `last_data_fields_seen` (a comma-separated list such as `sp,sh,echo`), derived
 from the last parsed payload.
+
+## Per-source mute and gain — `m` / `ug` (Phase 2, verified against the viewer)
+
+The published field list names `m` and `ug`, but **does not** describe their
+shape. Reading the actual viewer source (`phoenix-firestorm/indra/newview/
+llvoicewebrtc.cpp`; Firestorm inherits Linden Lab's WebRTC voice code
+unchanged) settles it: both are **objects keyed by the TARGET participant's
+agent UUID**, emitted by the *listener*:
+
+```json
+{ "m":  { "<target-uuid>": true } }     // LLVoiceWebRTCConnection::setUserMute
+{ "ug": { "<target-uuid>": 220 } }      // …::setUserVolume, value = volume * 220
+```
+
+i.e. "for me, mute / re-gain participant `<target-uuid>`." So per-source
+mute/gain is genuinely per-listener, and *"mute A in B's viewer silences A for
+B only"* is exactly what the wire says — B sends `{"m":{"A":true}}`, the mixer
+drops A from B's mix, and no one else is affected. This is stronger than the SL
+client-side model: the mute is enforced **in the mix** (spec §3.4), so a
+modified viewer cannot defeat it.
+
+Mixer handling (`src/janus_slvoice.c`):
+
+- The parser (`src/sldata.c`) accepts the object form into `slv_sldata.peers[]`
+  (a `{uuid, has_mute, muted, has_gain, gain}` array). The legacy scalar forms
+  (`{"m":true}` / `{"ug":0.5}`) are still accepted into `slv_sldata.m/ug` for
+  tolerance, but the real viewer never sends them.
+- Messages arrive **separately and incrementally** (a mute message carries no
+  gain and vice-versa), so the plugin keeps a **persistent per-listener
+  peer-control map** on the session and merges each payload into it — a mute
+  update never wipes a prior gain.
+- In the mix loop, for listener L and each other source P, L's map is looked up
+  by P's agent UUID: muted → P excluded from L's mix; gain → P scaled.
+
+**Gain conversion — the `220` vs `200` quirk.** `setUserVolume` multiplies the
+linear volume by `PEER_GAIN_CONVERSION_FACTOR = 220`, so the mixer recovers
+linear gain as **`ug / 220`** (clamped to [0, 4]). Note the viewer is internally
+inconsistent: its *inbound* join-time gain restore (`OnDataReceivedImpl`) uses
+`* 200` instead. The two paths disagree by ~10%; the mixer standardises on
+`/220` (the realtime slider path, which is what fires when a user changes
+volume during a session). This is cosmetic for audibility and documented here so
+it isn't mistaken for a mixer bug.
+
+## Mixer→client format corrections (Phase 2, from the viewer parser)
+
+Reading the viewer's inbound parser (`OnDataReceivedImpl`) also corrected two
+mixer→client mistakes that were silently no-ops before:
+
+- **VAD key is lowercase `v`.** The viewer reads `participant_obj["v"]` into
+  `mIsSpeaking`; the plugin previously sent uppercase `"V"`, which the viewer
+  ignored, so a talker's *speaking* state never lit (only the `p` level moved).
+  The batch now sends `v`.
+- **Join `j` must be an object `{"p":<primary>}`.** The viewer requires
+  `j.is_object()` and reads `j.p` as the primary-server flag; a bare boolean
+  `"j":true` was rejected and the join dropped. Presence now sends
+  `{"<uuid>":{"j":{"p":true}}}` (single-region: every participant's primary
+  server is this mixer). `l` (leave) remains a plain boolean.
+
+## Echo ↔ mix interaction (Phase 2)
+
+Echo is retained from Phase 1 as a **diagnostic per-participant OUTPUT
+override**, toggled exactly as before (`{"echo":true/false}` on SLData, or
+`SLV_ECHO_AUTOSTART` for a stock viewer). Its meaning under the real mixer:
+
+- An **echoed** participant hears **their own audio, delayed 500 ms, INSTEAD of
+  the N-minus-one mix** — the mixer substitutes the echo output for that one
+  listener's mix. This proves the whole server media path (decode→delay→encode
+  →relay) for that participant, independent of anyone else talking.
+- It is **per-listener only**: an echoed participant still contributes normally
+  as a *source* to everyone else's mix, and everyone else still hears the real
+  conference mix. Only the echoed participant's own downstream is replaced.
+- Turning echo off returns that participant to the normal N-1 mix immediately
+  (no reallocation — the delay ring is preallocated at join and just cleared).
+
+Because echo is a bring-up/diagnostic aid, leave `SLV_ECHO_AUTOSTART=false` for
+normal conference operation; a whole room with autostart on would have everyone
+hear themselves and no one hear each other.
 
 ## The `echo` extension
 
@@ -95,16 +172,27 @@ works regardless of this setting. See `docs/phase1-bringup.md`.
 
 ## What's implemented vs deferred
 
-**Mixer→client SLData is implemented** (Phase 1A/1B): the plugin pushes the
-per-peer power/VAD batch `{ "<uuid>": {"p":<RMS*128>,"V":<VAD>} }` every ~100 ms
-(spec §9). In Phase 1B, with echo on, `p`/`V` are the real RMS/VAD of each
-participant's decoded audio; with echo off they read 0. Per-peer `j`/`l`
-join/leave notices are also pushed.
+**Mixer→client SLData** (Phase 1A → 2): the plugin pushes the per-peer batch
+`{ "<uuid>": {"p":<level*128>,"v":<VAD>} }` every ~100 ms (spec §9). In Phase 2
+`p`/`v` are the real level/VAD of **every ACTIVE participant**, computed by the
+mix tick from decoded audio — so other avatars' dots animate when they talk, not
+just the echoed one. Per-peer `j`/`l` join/leave notices are pushed (`j` now the
+correct object form).
 
-**Deferred to Phase 2** (`src/mixer/mixer.h`):
-- Use of `sp/sh/lp/lh` geometry (distance attenuation, panning).
-- Cross-participant **mixing** and per-listener rendering (Phase 1B echoes each
-  participant to itself only — no mixing between participants).
-- Mutation of another participant's state from `m`/`ug`.
-- The `diag` state member (§4.1); diagnostics are exposed via `query_session` /
-  the admin API for now (see `docs/phase1-bringup.md`).
+**Implemented in Phase 2** (`src/janus_slvoice.c`, math in `src/mixer/mix.c`):
+- Cross-participant flat **N-minus-one mixing**, per-listener, on a 20 ms
+  per-room tick (replaces the Phase-1B echo-to-self).
+- **`m`/`ug` acted on**: per-source mute/gain applied in the mix loop (above).
+- DTX/VAD cull (150 ms release hold) and encode-skip on silent mixes.
+- Per-connection **diag vector** + per-room tick-duration histogram in
+  `query_session` (spec §4.1): `ice_state`, `dtls_state`, `datachannel_open`,
+  `rtp_in_rate`, `rtp_out_rate`, `decode_ok`, `active`, `mix_memberships`,
+  `frames_mixed`, `last_rms`, `tick_histogram`.
+
+**Deferred to Phase 3:**
+- Use of `sp/sh/lp/lh` geometry (distance attenuation, panning, HRTF). The
+  parser stores them (each component is an int = value×100 on the wire); the mix
+  is flat until then.
+- The `diag` state member pushed on the **data channel** (§4.1); diagnostics are
+  exposed via `query_session` / the admin API for now (see
+  `docs/phase1-bringup.md`).

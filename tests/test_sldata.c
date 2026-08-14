@@ -167,6 +167,56 @@ static void test_length_honoured(void) {
 	CHECK(d.fields_seen == SLV_FIELD_M, "only m within bounded len");
 }
 
+/* ---- per-source m/ug maps (the real Firestorm/SL viewer shape) ---------- */
+static void test_per_source_map(void) {
+	printf("test_per_source_map\n");
+	const char *A = "11111111-1111-1111-1111-111111111111";
+	const char *B = "22222222-2222-2222-2222-222222222222";
+	slv_sldata d;
+
+	/* setUserMute: {"m":{"<A>":true}} — listener mutes participant A. */
+	char buf[256];
+	snprintf(buf, sizeof(buf), "{\"m\":{\"%s\":true}}", A);
+	CHECK(slv_sldata_parse(buf, strlen(buf), &d) == SLV_SLDATA_OK, "m-map OK");
+	CHECK(d.fields_seen & SLV_FIELD_M, "m-map sets M");
+	CHECK(d.m == 0, "m-map does not set legacy scalar m");
+	CHECK(d.n_peers == 1, "one peer entry");
+	CHECK(strcmp(d.peers[0].uuid, A) == 0, "peer uuid == A");
+	CHECK(d.peers[0].has_mute && d.peers[0].muted == 1, "A muted");
+	CHECK(!d.peers[0].has_gain, "no gain on a mute-only message");
+
+	/* setUserVolume: {"ug":{"<A>":220}} — value = volume*220. */
+	snprintf(buf, sizeof(buf), "{\"ug\":{\"%s\":220}}", A);
+	CHECK(slv_sldata_parse(buf, strlen(buf), &d) == SLV_SLDATA_OK, "ug-map OK");
+	CHECK(d.fields_seen & SLV_FIELD_UG, "ug-map sets UG");
+	CHECK(d.n_peers == 1 && d.peers[0].has_gain, "one peer with gain");
+	CHECK(approx(d.peers[0].gain, 220.0), "raw gain preserved (220 => linear 1.0)");
+
+	/* Both keys for the SAME uuid in one payload coalesce onto one entry. */
+	snprintf(buf, sizeof(buf), "{\"m\":{\"%s\":true},\"ug\":{\"%s\":110}}", A, A);
+	CHECK(slv_sldata_parse(buf, strlen(buf), &d) == SLV_SLDATA_OK, "m+ug coalesce OK");
+	CHECK(d.n_peers == 1, "coalesced to one entry");
+	CHECK(d.peers[0].has_mute && d.peers[0].has_gain, "entry carries both");
+	CHECK(approx(d.peers[0].gain, 110.0), "coalesced gain value");
+
+	/* Two distinct targets -> two entries. */
+	snprintf(buf, sizeof(buf), "{\"m\":{\"%s\":true,\"%s\":false}}", A, B);
+	CHECK(slv_sldata_parse(buf, strlen(buf), &d) == SLV_SLDATA_OK, "two-target OK");
+	CHECK(d.n_peers == 2, "two peer entries");
+	/* Order within a JSON object is not guaranteed; find each. */
+	int seenA = 0, seenB = 0;
+	for(int i = 0; i < d.n_peers; i++) {
+		if(!strcmp(d.peers[i].uuid, A)) { seenA = 1; CHECK(d.peers[i].muted == 1, "A muted"); }
+		if(!strcmp(d.peers[i].uuid, B)) { seenB = 1; CHECK(d.peers[i].muted == 0, "B unmuted"); }
+	}
+	CHECK(seenA && seenB, "both targets present");
+
+	/* Wrong-typed entry inside the map is skipped, not fatal. */
+	snprintf(buf, sizeof(buf), "{\"m\":{\"%s\":\"nope\"}}", A);
+	CHECK(slv_sldata_parse(buf, strlen(buf), &d) == SLV_SLDATA_EMPTY, "bad map entry -> EMPTY");
+	CHECK(!(d.fields_seen & SLV_FIELD_M) && d.n_peers == 0, "bad entry not counted");
+}
+
 /* ---- fields_str helper -------------------------------------------------- */
 static void test_fields_str(void) {
 	printf("test_fields_str\n");
@@ -191,6 +241,7 @@ int main(void) {
 	test_malformed();
 	test_oversized();
 	test_length_honoured();
+	test_per_source_map();
 	test_fields_str();
 	printf("== %d checks, %d failure(s) ==\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;

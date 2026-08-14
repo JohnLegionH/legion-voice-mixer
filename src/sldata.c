@@ -76,6 +76,29 @@ static int slv_get_vecN(json_t *v, int n, const char *const *keys, double *out) 
 	return 1;
 }
 
+/* Find the per-source entry for `uuid` in out->peers, or append a fresh one.
+ * Returns NULL only when the table is full and the uuid is new. A single
+ * message may carry both an "m" and a "ug" for the same uuid, so lookups
+ * coalesce onto one entry. Keys longer than the UUID slot are truncated. */
+static slv_peer_adj *slv_peer_find_or_add(slv_sldata *out, const char *uuid) {
+	if(uuid == NULL)
+		return NULL;
+	for(int i = 0; i < out->n_peers; i++) {
+		if(strncmp(out->peers[i].uuid, uuid, SLV_UUID_LEN - 1) == 0)
+			return &out->peers[i];
+	}
+	if(out->n_peers >= SLV_MAX_PEER_ADJ)
+		return NULL;
+	slv_peer_adj *e = &out->peers[out->n_peers++];
+	/* struct is already zeroed by the memset at parse entry */
+	size_t n = strlen(uuid);
+	if(n >= SLV_UUID_LEN)
+		n = SLV_UUID_LEN - 1;
+	memcpy(e->uuid, uuid, n);
+	e->uuid[n] = '\0';
+	return e;
+}
+
 slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out) {
 	/* Always start from a clean slate so partial parses never leak stale data. */
 	if(out != NULL)
@@ -125,19 +148,62 @@ slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out)
 		out->fields_seen |= SLV_FIELD_LH;
 	}
 
-	/* Scalars: m (mute), ug (user gain). */
+	/* m (mute) and ug (gain). The real Firestorm/SL viewer sends these as
+	 * OBJECTS keyed by target participant UUID (per-source, listener-issued):
+	 *   {"m":{"<uuid>":true}}  {"ug":{"<uuid>":<uint = volume*220>}}
+	 * We parse that into out->peers[]. For tolerance we ALSO accept the legacy
+	 * scalar forms ({"m":true}/{"ug":0.5}) into out->m / out->ug; only one form
+	 * is used per key. Either form sets the corresponding fields_seen bit. */
 	{
-		int b;
-		if(slv_get_bool(json_object_get(root, "m"), &b)) {
-			out->m = b;
-			out->fields_seen |= SLV_FIELD_M;
+		json_t *mv = json_object_get(root, "m");
+		if(mv != NULL) {
+			if(json_is_object(mv)) {
+				const char *key;
+				json_t *val;
+				json_object_foreach(mv, key, val) {
+					int b;
+					if(!slv_get_bool(val, &b))
+						continue;   /* wrong-typed entry ignored, not fatal */
+					slv_peer_adj *e = slv_peer_find_or_add(out, key);
+					if(e == NULL)
+						continue;   /* table full: drop extras silently */
+					e->has_mute = 1;
+					e->muted = (unsigned char)(b ? 1 : 0);
+					out->fields_seen |= SLV_FIELD_M;
+				}
+			} else {
+				int b;
+				if(slv_get_bool(mv, &b)) {
+					out->m = b;
+					out->fields_seen |= SLV_FIELD_M;
+				}
+			}
 		}
 	}
 	{
-		double g;
-		if(slv_get_number(json_object_get(root, "ug"), &g)) {
-			out->ug = g;
-			out->fields_seen |= SLV_FIELD_UG;
+		json_t *gv = json_object_get(root, "ug");
+		if(gv != NULL) {
+			if(json_is_object(gv)) {
+				const char *key;
+				json_t *val;
+				json_object_foreach(gv, key, val) {
+					double g;
+					if(!slv_get_number(val, &g))
+						continue;
+					slv_peer_adj *e = slv_peer_find_or_add(out, key);
+					if(e == NULL)
+						continue;
+					e->has_gain = 1;
+					e->gain = g;
+					out->fields_seen |= SLV_FIELD_UG;
+				}
+			} else {
+				double g;
+				if(slv_get_number(gv, &g)) {
+					out->ug = g;
+					out->fields_seen |= SLV_FIELD_UG;
+				}
+			}
 		}
 	}
 

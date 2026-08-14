@@ -1,6 +1,6 @@
 # Phase 1 bring-up runbook — hold the session, then echo
 
-Two in-world checks against a real **Firestorm 7.2.2** viewer on
+In-world checks against a real **Firestorm 7.2.2** viewer on
 `janus.plugin.slvoice`:
 
 - **CHECK 1 — held session (Phase 1A):** the viewer establishes and *holds* a
@@ -8,8 +8,12 @@ Two in-world checks against a real **Firestorm 7.2.2** viewer on
   churn. Silence is correct here.
 - **CHECK 2 — echo (Phase 1B):** with `SLV_ECHO_AUTOSTART=true`, you speak and
   hear yourself ~500 ms delayed, and see your own level move on the dot.
+- **CHECK 3 — two-party mix (Phase 2):** two viewers in one room hear *each
+  other* (not themselves); muting one silences it for the other only; the
+  speaker's dot animates on the listener's screen.
 
-Do CHECK 1 first; CHECK 2 builds on the held session.
+Do CHECK 1 first; CHECK 2 and CHECK 3 build on the held session. CHECK 3 is the
+Phase-2 acceptance and needs `SLV_ECHO_AUTOSTART=false` (echo OFF).
 
 > **"Room already exists" is EXPECTED**, not a bug: the C# side re-creates rooms
 > and treats error 486 as success (`docs/voice/current-architecture.md` §3.3).
@@ -153,7 +157,90 @@ packets sent back), and `last_rms` non-zero (your speaking level).
 
 ---
 
-## The media path (Phase 1B)
+## CHECK 3 — two-party mix (Phase 2 acceptance)
+
+Set **`SLV_ECHO_AUTOSTART=false`** (echo OFF — echo would make each person hear
+themselves instead of the other). Bring **two** voice-enabled viewers into the
+**same region/parcel**, in voice range: e.g. *Legion Hienrichs* (A) and *Aleric
+Fenwood* (B), on one machine (two viewer instances) or two.
+
+Both provision and join the same room number (the C# `CalcRoomNumber` is
+deterministic per parcel, so both land in one room; "Room already exists (486)"
+on the second is **expected**). Each join logs `Participant <id> (<uuid>) joined
+room <N>`.
+
+**Pass criteria (the acceptance):**
+1. **A speaks → B hears A; B speaks → A hears B.**
+2. **Neither hears themselves** (N-minus-one: a listener's own audio is excluded
+   from its mix).
+3. **Mute A in B's viewer → A goes silent for B only** (right-click A → mute, or
+   the volume slider to 0). A still hears B; if a third party C were present, C
+   would still hear A. Un-mute restores A for B.
+4. **The speaker's dot animates on the listener's screen** — when A talks, B's
+   viewer shows A's voice dot/level moving (and vice-versa).
+
+**Mix log trail** (on top of CHECK 1's; `docker logs <container>`):
+
+| Stage | Docker logs (slvoice plugin) |
+|---|---|
+| **Both joined** | two `Participant <id> (<uuid>) joined room <N>` lines; each viewer gets a `{"<other-uuid>":{"j":{"p":true}}}` presence push |
+| **Someone speaks** | `First audio frame decoded (960 samples/ch)` for the *speaking* participant's handle (decode happens once per source in the tick, not per listener) |
+| **Active-set churn** (debug log level) | `participant <id> entered the active set` when talk starts; `… left the active set` ~150 ms after it stops |
+| **Tick health** | no `room <N> tick <k> took …ms (>15ms deadline)` warnings under a 2-party load |
+
+**Live diagnostics** (`query_session` on each handle, admin API as in CHECK 1).
+For a **listener that is currently hearing a talker**:
+- `active:true` on the **talking** participant; `rtp_in_rate` ~50 pkt/s on the talker;
+- `frames_mixed` climbing and `rtp_out_rate` ~50 pkt/s on the **listener**
+  (encode-skip means a listener hearing silence has `rtp_out_rate` ~0 — that is
+  correct, not a fault);
+- `mix_sources` ≥ 1 on a listener while someone else talks;
+- `mix_memberships` ≥ 1 on a talker (its audio is folded into the other's mix);
+- `tick_histogram.overruns` stays 0; `tick_histogram.max_ms` well under 15.
+
+### CHECK 3 failure signatures
+1. **Each person hears themselves, not the other.** `echo_active:true` in
+   `query_session`. Cause: `SLV_ECHO_AUTOSTART=true` still set — echo overrides
+   the mix per participant. Set it `false` and re-`up`.
+2. **A talks, B hears nothing.** On B (listener): `rtp_out_rate` ~0 and
+   `frames_mixed` flat while A's `active:true` and A's `rtp_in_rate` > 0. Check
+   A is actually in the **same room** as B (`room` matches in both
+   `query_session`), A is un-muted in B (`peer_ctl_entries`/mute), and A's audio
+   is decoding (A `decode_ok:true`, `frames_decoded` climbing). If A's
+   `rtp_in_rate` is 0, A isn't sending (viewer mic muted / device) — not a mixer
+   fault.
+3. **Mute doesn't silence.** Muting A in B has no effect. Confirm B's viewer sent
+   it: B's `query_session` `data_msgs_received` rises on the mute click and
+   `peer_ctl_entries` ≥ 1; with `SLV_DEBUG_MEDIA` the log shows
+   `SLData fields=[m]`. If `peer_ctl_entries` stays 0, the viewer isn't emitting
+   `{"m":{"<A>":true}}` on the data channel (check the data channel is open,
+   `datachannel_open:true`).
+4. **Dot doesn't animate for the other avatar.** The other participant must exist
+   in the viewer's roster and the batch must reach it. Confirm `datachannel_open:
+   true` on the listener and that the talker's `power_p`/VAD are non-zero
+   server-side (talker `active:true`, `last_rms` > 0). The batch uses lowercase
+   `v` for VAD and `{"j":{"p":true}}` for joins (both corrected in Phase 2 from
+   the viewer source); an old build sending `"V"`/bare `"j"` would show a level
+   but no speaking state / no data-channel-driven join.
+5. **Choppy mix / robotic.** As CHECK 2: packet loss (PLC) or CPU. Watch for
+   `room <N> tick … took …ms (>15ms deadline)` warnings and `Opus decode/encode
+   error` lines; `tick_histogram` buckets show where ticks land.
+
+## The media path (Phase 2)
+
+`incoming_rtp` now only feeds each participant's fixed-lag **jitter buffer** and
+stamps liveness. A dedicated **per-room 20 ms tick thread** then, each tick:
+(1) decodes every ACTIVE participant once (DTX/VAD cull: no RTP within 150 ms →
+inactive → decode skipped), computing real level/VAD; (2) for each listener,
+sums the OTHER active participants (flat, equal gain, minus that listener's
+per-source mutes, scaled by per-source `ug/220`) — the **N-minus-one** mix —
+clamps, Opus-encodes (stereo, spec §9 fmtp), and `relay_rtp`s it; a listener
+whose mix is silent is **encode-skipped** (no packet, timestamp still advances)
+so encode cost scales with *audible* listeners. An **echoed** participant hears
+its own 500 ms-delayed audio instead of the mix (diagnostic override). The pure
+summing math is in `src/mixer/mix.c` (unit-tested, `tests/test_mix.c`).
+
+## The media path (Phase 1B, superseded by the tick above)
 
 `incoming_rtp` → fixed-lag **jitter buffer** (reorder + Opus PLC for gaps) →
 `opus_decode_float` (48 kHz stereo) → **500 ms delay ring** → `opus_encode_float`
