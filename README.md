@@ -6,11 +6,13 @@ WebRTC voice protocol**. It is the server-side counterpart to the OpenSim
 `os-webrtc-janus` addon, intended as a drop-in alternative to the stock
 `janus.plugin.audiobridge`.
 
-> **Status: Phase 1 — echo test.** The plugin negotiates Opus + data channel,
-> speaks the audiobridge-compatible request protocol, and proves the full
-> single-participant media path with a 500 ms echo (decode → delay → re-encode →
-> relay). No mixing or spatial logic yet — that is Phase 2 (`src/mixer/mixer.h`).
-> See `docs/phase1-bringup.md` for the in-world bring-up runbook (GATE 0 → GATE 1).
+> **Status: Phase 1A — holds a WebRTC voice session.** The plugin negotiates
+> Opus + the SLData **DataChannel** (both m-lines answered, so a real Firestorm
+> viewer establishes and *holds* a session — no join/leave loop), speaks the
+> audiobridge-compatible request protocol, pushes the mixer→client power/VAD
+> batch so the viewer renders a (silent) voice dot, and exposes a diagnostics
+> trail. No audio yet: `incoming_rtp` only counts packets. Audio (mixing, echo,
+> Opus) is Phase 1B+. See `docs/phase1a-bringup.md` for the in-world runbook.
 
 The published container image bundles Janus **v1.4.1** and this plugin, so
 operators deploy it **without cloning, submodules, or build tools**.
@@ -133,7 +135,7 @@ image and pushes `ghcr.io/johnlegionh/legion-voice-mixer:{version}` and
 ### Layout
 
 ```
-src/janus_slvoice.c      the plugin (Phase 1: rooms, JSEP, echo, diagnostics)
+src/janus_slvoice.c      the plugin (Phase 1A: rooms, JSEP+datachannel, SLData, diagnostics)
 src/sldata.{c,h}          SLData data-channel parser (jansson-only; unit-tested)
 src/mixer/mixer.h         Phase-2 per-region tick model (declarations only)
 tests/test_sldata.c       SLData parser unit tests (`make test`)
@@ -160,10 +162,12 @@ vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
   and its expiry.
 - `docs/docker-notes.md` — image/config-precedence details and divergences from
   `Misterblue/os-webrtc-janus-docker`.
-- `docs/sldata-extensions.md` — the data-channel SLData field set and the
-  slvoice `echo` extension (Phase 1).
-- `docs/phase1-bringup.md` — the in-world Phase-1 bring-up runbook (GATE 0 →
-  GATE 1), incl. the exact regionserver INI keys.
+- `docs/sldata-extensions.md` — the data-channel SLData field set (the `echo`
+  field is parsed but not acted on from Phase 1A onward; audio is deferred).
+- `docs/phase1a-bringup.md` — the in-world Phase-1A runbook: hold a WebRTC voice
+  session (data channel negotiation), INI, log trail, failure signatures.
+- `docs/phase1-bringup.md` — the earlier Phase-1 echo runbook (superseded by 1A
+  for bring-up; kept for reference).
 
 > The three OpenSim C# surveys live in `docs/voice/`; the other docs are
 > maintained here. Phase 1 was reconciled against them — message shapes/error

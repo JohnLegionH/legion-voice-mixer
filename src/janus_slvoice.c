@@ -1,36 +1,46 @@
 /*! \file    janus_slvoice.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Janus SLVoice plugin — Phase 1 (echo test)
+ * \brief    Janus SLVoice plugin — Phase 1A (hold a WebRTC voice session)
  *
  * \details  \c janus.plugin.slvoice is a spatial voice mixer for OpenSimulator
- * grids speaking the Second Life WebRTC voice protocol. This is the Phase-1
- * build: it proves the full single-participant media path (JSEP negotiation ->
- * ICE/DTLS -> Opus RTP in -> decode -> 500ms delay -> Opus encode -> RTP back
- * to the same peer) WITHOUT any mixing, spatial, or per-listener logic. Those
- * are Phase 2 (see src/mixer/mixer.h).
+ * grids speaking the Second Life WebRTC voice protocol. Phase 1A's goal is to
+ * make a real Firestorm viewer ESTABLISH AND HOLD a voice session — a stable
+ * PeerConnection with a working voice dot and silence. No audio processing yet.
+ *
+ * The critical piece is full JSEP negotiation INCLUDING the SCTP DataChannel:
+ * the viewer's offer carries both m=audio (Opus) and m=application (the SLData
+ * DataChannel it creates before negotiation, per docs/webrtc-voice-spec.md §9).
+ * Both must be answered. If the m=application line is not answered (port>0,
+ * DTLS/SCTP proto), the Janus core logs "Skipping unsupported application media
+ * line" (vendor/janus-gateway/src/sdp.c:1625) and the viewer tears the session
+ * down and retries — the join/leave loop this phase fixes.
+ *
+ * We answer the application m-line by calling janus_sdp_generate_answer_mline()
+ * with JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION — the pattern used by
+ * janus_videoroom.c:13113 (janus_textroom is the DataChannel reference for the
+ * relay_data/incoming_data/data_ready lifecycle, but it is offer-only, so the
+ * answer pattern is modelled on videoroom). No plugin capability flag exists;
+ * the core wires up SCTP purely from the answer's accepted application m-line
+ * (sdp.c:1611-1637), provided Janus was built with HAVE_SCTP (data_channels:true).
  *
  * Protocol: handle_message() implements a superset of the audiobridge request
- * protocol the OpenSim C# side already emits (create/destroy/join/leave/
- * configure/list/listparticipants), with the SAME field names and the SAME
- * response envelope key ("audiobridge") so the C# side can flip between
- * janus.plugin.audiobridge and janus.plugin.slvoice by configuration alone,
- * with no code change (A/B fault isolation). See docs/protocol-compat.md.
+ * protocol the OpenSim C# side emits (create/destroy/join/leave/configure/list/
+ * listparticipants), with the SAME field names, the SAME response envelope key
+ * ("audiobridge"), and the SAME error codes (486 room-exists, 485 no-such-room)
+ * so the C# side flips audiobridge <-> slvoice by config alone. See
+ * docs/protocol-compat.md and docs/voice/current-architecture.md §3.
  *
- * Echo mode is toggled per-participant by an "echo" field on the data-channel
- * SLData payload (a slvoice extension; see docs/sldata-extensions.md), not by a
- * plugin request.
+ * Explicitly OUT OF SCOPE for 1A: audio mixing, echo, Opus decode/encode, RTP
+ * forwarding. incoming_rtp only ingests and counts packets.
  *
- * Written against the Janus 1.4.1 plugin API (vendor/janus-gateway,
- * JANUS_PLUGIN_API_VERSION 106); the vendored headers and in-tree plugins
- * (audiobridge, echotest) are the authority, not remembered signatures.
+ * Written against the Janus 1.4.1 plugin API (JANUS_PLUGIN_API_VERSION 106);
+ * the vendored headers and in-tree plugins are the authority.
  */
 
 #include <inttypes.h>
 #include <string.h>
-#include <arpa/inet.h>
 
-#include <opus/opus.h>
 #include <jansson.h>
 
 #include <janus/plugins/plugin.h>
@@ -39,26 +49,21 @@
 #include <janus/mutex.h>
 #include <janus/refcount.h>
 #include <janus/utils.h>
-#include <janus/rtp.h>
 #include <janus/sdp-utils.h>
 
 #include "sldata.h"
 
 /* Plugin information */
-#define JANUS_SLVOICE_VERSION         3
-#define JANUS_SLVOICE_VERSION_STRING  "0.3.1"
-#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 1: single-participant echo test; no mixing yet)."
+#define JANUS_SLVOICE_VERSION         4
+#define JANUS_SLVOICE_VERSION_STRING  "0.4.0"
+#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 1A: holds a WebRTC voice session incl. the SLData data channel; no audio yet)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
 #define JANUS_SLVOICE_PACKAGE         "janus.plugin.slvoice"
 
-/* Application-level error codes (returned in the audiobridge-shaped error
- * envelope: {"audiobridge":"event","error_code":N,"error":"..."}).
- *
- * These MUST match janus.plugin.audiobridge's numeric codes: the OpenSim C#
- * side reads the `error_code` field and, in particular,
- * JanusAudioBridge.CreateRoom treats 486 ("room exists") as success
- * (docs/voice/current-architecture.md §3.3). Numbers taken verbatim from
+/* Application-level error codes — MUST match janus.plugin.audiobridge's numeric
+ * codes: the OpenSim C# side reads `error_code` and treats 486 ("room exists")
+ * as success (docs/voice/current-architecture.md §3.3). Numbers verbatim from
  * vendor/janus-gateway/src/plugins/janus_audiobridge.c. */
 #define JANUS_SLVOICE_ERROR_NO_MESSAGE      480
 #define JANUS_SLVOICE_ERROR_INVALID_JSON    481
@@ -68,23 +73,14 @@
 #define JANUS_SLVOICE_ERROR_NO_SUCH_ROOM    485
 #define JANUS_SLVOICE_ERROR_ROOM_EXISTS     486
 #define JANUS_SLVOICE_ERROR_NOT_JOINED      487
-#define JANUS_SLVOICE_ERROR_UNAUTHORIZED    489
 #define JANUS_SLVOICE_ERROR_ALREADY_JOINED  491
 #define JANUS_SLVOICE_ERROR_INVALID_SDP     493
 #define JANUS_SLVOICE_ERROR_UNKNOWN         499
 
-/* ---- Media constants (Phase 1 echo) --------------------------------------
- * Everything runs at Opus fullband, stereo (matching the negotiated
- * stereo=1;sprop-stereo=1 fmtp), so decode/encode channel counts are fixed. */
-#define SLV_RATE            48000
-#define SLV_CHANNELS        2
-#define SLV_ECHO_DELAY_MS   500
-#define SLV_DELAY_SAMPLES   ((SLV_RATE/1000)*SLV_ECHO_DELAY_MS)   /* 24000 per channel */
-#define SLV_DECODE_MAX      5760    /* per-channel decode headroom (120ms @48k = max Opus frame) */
-#define SLV_RING_SAMPLES    (SLV_DELAY_SAMPLES + SLV_DECODE_MAX + (SLV_RATE/1000)*20)
-#define SLV_RTP_OUT_MAX     1500
+/* Mixer->client SLData power/VAD batch cadence (spec §9: ~100ms). */
+#define SLV_POWER_TICK_MS   100
 
-/* Packet-level media logging is gated behind a compile-time flag so the hot
+/* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
 #ifdef SLV_DEBUG_MEDIA
 #define SLV_MEDIA_LOG(...) JANUS_LOG(LOG_HUGE, __VA_ARGS__)
@@ -153,21 +149,15 @@ janus_plugin *create(void) {
 /* Useful stuff */
 static volatile gint initialized = 0, stopping = 0;
 static janus_callbacks *gateway = NULL;
-static GThread *handler_thread = NULL;
+static GThread *handler_thread = NULL;   /* async request handler */
+static GThread *sender_thread = NULL;    /* ~100ms mixer->client SLData ticker */
 static void *janus_slvoice_handler(void *data);
-
-/* Phase-1 bring-up convenience: when set, echo mode is auto-enabled as soon as
- * a participant's PeerConnection comes up, so a stock viewer hears itself
- * without having to send an {"echo":true} SLData message. Default OFF. Set via
- * the SLV_ECHO_AUTOSTART environment variable or general.echo_autostart in the
- * plugin jcfg. The {"echo":true}/{"echo":false} data-channel toggle still works
- * regardless. See docs/phase1-bringup.md and docs/sldata-extensions.md. */
-static gboolean echo_autostart = FALSE;
+static void *janus_slvoice_sender(void *data);
 
 /* ---- Rooms (slv_regions) and participants (folded into the session) -------
- * Phase 1 keeps the participant state on the session itself: one WebRTC peer =
- * one participant. A room is a lightweight membership + metadata holder; the
- * per-region mix thread (src/mixer/mixer.h) is Phase 2. */
+ * One WebRTC peer = one participant. A room is a lightweight membership +
+ * metadata holder keyed by the room number the C# side computes (CalcRoomNumber).
+ * The per-region mix thread (src/mixer/mixer.h) is Phase 2. */
 typedef struct janus_slvoice_room {
 	guint64 room_id;
 	char *description;
@@ -185,35 +175,18 @@ typedef struct janus_slvoice_session {
 	janus_plugin_session *handle;
 	guint64 user_id;             /* participant id; 0 until joined */
 	janus_slvoice_room *room;    /* ref held while joined; NULL otherwise (guarded by mutex) */
-	char *display;               /* display name from join */
+	char *display;               /* display name from join = the agent UUID string (§3.2) */
 	int opus_pt;                 /* negotiated Opus payload type; -1 until join */
-	gboolean has_datachannel;    /* data channel present in the negotiated SDP */
+	gboolean has_datachannel;    /* offer contained an m=application line */
+	gboolean dc_answered;        /* our answer accepted the m=application line */
+	gint64 created_ts;           /* monotonic us at session create (for uptime) */
 
 	volatile gint webrtc_up;     /* setup_media(1) / hangup_media(0) — coarse ICE/DTLS up */
-	volatile gint dc_open;       /* data_ready seen at least once */
-
-	/* Echo/media state (guarded by mutex). All buffers allocated at echo-enable
-	 * and freed at echo-disable — no per-packet allocation. */
-	volatile gint echo_active;
-	OpusDecoder *dec;
-	OpusEncoder *enc;
-	float *ring;                 /* SLV_RING_SAMPLES * SLV_CHANNELS interleaved floats */
-	int ring_wpos;               /* write cursor, per-channel sample index */
-	float *decbuf;               /* SLV_DECODE_MAX * SLV_CHANNELS interleaved floats */
-	float *framebuf;             /* SLV_DECODE_MAX * SLV_CHANNELS delayed frame to encode */
-	unsigned char *outbuf;       /* SLV_RTP_OUT_MAX: 12B RTP header + Opus payload */
-	uint16_t out_seq;
-	uint32_t out_ts;
-	uint32_t out_ssrc;
+	volatile gint dc_open;       /* data_ready seen: the data channel is writable */
 
 	/* Diagnostics (guarded by mutex except where atomic) */
-	guint64 rtp_in_count;
-	guint64 rtp_in_bytes;
-	gint64  rate_t0;             /* start of the current 1s rate window (monotonic us) */
-	guint32 rate_ctr;            /* packets in the current window */
-	guint32 rtp_in_rate;         /* packets in the last completed 1s window */
-	volatile gint last_decode_ok;/* 1 ok, 0 fail, -1 none yet */
-	guint64 data_msgs_received;
+	guint64 rtp_in_count;        /* RTP packets ingested (counted only; not processed) */
+	guint64 data_msgs_received;  /* SLData messages received on the data channel */
 	slv_sldata last_data;        /* latest parsed SLData values */
 	unsigned last_data_fields;   /* fields_seen from the last SLData */
 
@@ -256,7 +229,7 @@ static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *des
 	room->room_id = id;
 	room->description = desc ? g_strdup(desc) : g_strdup_printf("Region %"PRIu64, id);
 	room->is_private = is_private;
-	room->sampling_rate = rate ? rate : SLV_RATE;
+	room->sampling_rate = rate ? rate : 48000;
 	room->spatial_audio = spatial;
 	room->permanent = permanent;
 	/* keys are heap guint64 (freed by the table); values are borrowed sessions */
@@ -280,62 +253,9 @@ static janus_slvoice_room *janus_slvoice_room_ref_by_id(guint64 id) {
 	return room;
 }
 
-/* ---- Echo resource management (session->mutex must be held) --------------- */
-
-static void janus_slvoice_echo_free_locked(janus_slvoice_session *s) {
-	if(s->dec) { opus_decoder_destroy(s->dec); s->dec = NULL; }
-	if(s->enc) { opus_encoder_destroy(s->enc); s->enc = NULL; }
-	g_free(s->ring);      s->ring = NULL;
-	g_free(s->decbuf);    s->decbuf = NULL;
-	g_free(s->framebuf);  s->framebuf = NULL;
-	g_free(s->outbuf);    s->outbuf = NULL;
-	s->ring_wpos = 0;
-}
-
-static gboolean janus_slvoice_echo_start_locked(janus_slvoice_session *s) {
-	if(g_atomic_int_get(&s->echo_active) && s->dec && s->enc)
-		return TRUE;
-	int err = 0;
-	s->dec = opus_decoder_create(SLV_RATE, SLV_CHANNELS, &err);
-	if(err != OPUS_OK || s->dec == NULL) {
-		JANUS_LOG(LOG_ERR, "[%s] opus_decoder_create failed: %s\n", JANUS_SLVOICE_PACKAGE, opus_strerror(err));
-		janus_slvoice_echo_free_locked(s);
-		return FALSE;
-	}
-	err = 0;
-	s->enc = opus_encoder_create(SLV_RATE, SLV_CHANNELS, OPUS_APPLICATION_VOIP, &err);
-	if(err != OPUS_OK || s->enc == NULL) {
-		JANUS_LOG(LOG_ERR, "[%s] opus_encoder_create failed: %s\n", JANUS_SLVOICE_PACKAGE, opus_strerror(err));
-		janus_slvoice_echo_free_locked(s);
-		return FALSE;
-	}
-	opus_encoder_ctl(s->enc, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
-	opus_encoder_ctl(s->enc, OPUS_SET_INBAND_FEC(1));
-	opus_encoder_ctl(s->enc, OPUS_SET_PACKET_LOSS_PERC(10));
-	opus_encoder_ctl(s->enc, OPUS_SET_COMPLEXITY(9));
-	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(48000));
-	s->ring     = g_malloc0(sizeof(float) * SLV_RING_SAMPLES * SLV_CHANNELS);
-	s->decbuf   = g_malloc0(sizeof(float) * SLV_DECODE_MAX * SLV_CHANNELS);
-	s->framebuf = g_malloc0(sizeof(float) * SLV_DECODE_MAX * SLV_CHANNELS);
-	s->outbuf   = g_malloc0(SLV_RTP_OUT_MAX);
-	s->ring_wpos = 0;
-	s->out_seq  = (uint16_t)(janus_random_uint64() & 0xFFFF);
-	s->out_ts   = (uint32_t)(janus_random_uint64() & 0xFFFFFFFF);
-	s->out_ssrc = (uint32_t)(janus_random_uint64() & 0xFFFFFFFF);
-	g_atomic_int_set(&s->echo_active, 1);
-	return TRUE;
-}
-
-static void janus_slvoice_echo_stop_locked(janus_slvoice_session *s) {
-	if(!g_atomic_int_get(&s->echo_active) && s->dec == NULL && s->enc == NULL)
-		return;
-	g_atomic_int_set(&s->echo_active, 0);
-	janus_slvoice_echo_free_locked(s);
-}
-
 /* Remove a session from its room (if any) and drop the room ref. The session
- * that transitions room from non-NULL to NULL is the one that unrefs — this
- * makes leave / destroy_session / room-destroy races safe. */
+ * that transitions room from non-NULL to NULL is the one that unrefs — making
+ * leave / destroy_session / room-destroy races safe. */
 static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	janus_slvoice_room *room = NULL;
 	guint64 uid = 0;
@@ -352,13 +272,58 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	janus_refcount_decrease(&room->ref);
 }
 
+/* ---- Mixer->client SLData (data channel send) ---------------------------- */
+
+/* Relay a JSON object to one participant over the data channel. Text, default
+ * label (janus_textroom.c:1632 uses .label=NULL .protocol=NULL .binary=FALSE).
+ * relay_data copies the buffer synchronously, so we free it right after. Only
+ * sends once the channel is writable (data_ready has fired). */
+static void janus_slvoice_relay_json(janus_slvoice_session *s, json_t *obj) {
+	if(s == NULL || obj == NULL || gateway == NULL)
+		return;
+	if(!g_atomic_int_get(&s->dc_open))
+		return;
+	char *text = json_dumps(obj, JSON_COMPACT);
+	if(text == NULL)
+		return;
+	size_t len = strlen(text);
+	if(len < 65536) {
+		janus_plugin_data data = { .label = NULL, .protocol = NULL, .binary = FALSE,
+			.buffer = text, .length = (uint16_t)len };
+		gateway->relay_data(s->handle, &data);
+	}
+	free(text);
+}
+
+/* Per-peer presence notice: {"<who>":{"j"|"l":true}} to every OTHER participant
+ * in the room. `who` is the joining/leaving participant's display (agent UUID).
+ * Caller must NOT hold room->mutex. */
+static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *who, gboolean join) {
+	if(room == NULL || who == NULL)
+		return;
+	json_t *entry = json_object();
+	json_t *sub = json_object();
+	json_object_set_new(sub, join ? "j" : "l", json_true());
+	json_object_set_new(entry, who, sub);
+	janus_mutex_lock(&room->mutex);
+	GHashTableIter iter;
+	gpointer value;
+	g_hash_table_iter_init(&iter, room->participants);
+	while(g_hash_table_iter_next(&iter, NULL, &value)) {
+		janus_slvoice_session *p = value;
+		if(p->display != NULL && !strcmp(p->display, who))
+			continue;   /* skip the subject itself */
+		janus_slvoice_relay_json(p, entry);
+	}
+	janus_mutex_unlock(&room->mutex);
+	json_decref(entry);
+}
+
 /* ---- Session helpers ----------------------------------------------------- */
 
 static void janus_slvoice_session_free(const janus_refcount *ref) {
 	janus_slvoice_session *session = janus_refcount_containerof(ref, janus_slvoice_session, ref);
 	JANUS_LOG(LOG_VERB, "[%s] Freeing session %p\n", JANUS_SLVOICE_PACKAGE, session);
-	/* Echo buffers must already be freed via echo_stop; free the rest. */
-	janus_slvoice_echo_free_locked(session);
 	g_free(session->display);
 	g_free(session);
 }
@@ -414,7 +379,7 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 		const char *rate_s = janus_slvoice_cfg_item(config, cat, "sampling_rate");
 		const char *priv_s = janus_slvoice_cfg_item(config, cat, "is_private");
 		const char *spatial_s = janus_slvoice_cfg_item(config, cat, "spatial_audio");
-		guint32 rate = rate_s ? (guint32)g_ascii_strtoull(rate_s, NULL, 10) : SLV_RATE;
+		guint32 rate = rate_s ? (guint32)g_ascii_strtoull(rate_s, NULL, 10) : 48000;
 		gboolean is_private = priv_s && (!strcasecmp(priv_s, "true") || !strcasecmp(priv_s, "yes"));
 		gboolean spatial = spatial_s && (!strcasecmp(spatial_s, "true") || !strcasecmp(spatial_s, "yes"));
 		janus_mutex_lock(&rooms_mutex);
@@ -455,27 +420,6 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 
 	/* Optional static rooms; dynamic create/join is the primary path */
 	janus_slvoice_load_static_rooms(config);
-
-	/* echo_autostart: jcfg general.echo_autostart, overridable by the
-	 * SLV_ECHO_AUTOSTART environment variable (which is the convenient knob
-	 * under the env-driven Docker model — just add it to .env). */
-	if(config != NULL) {
-		janus_config_category *general = janus_config_get(config, NULL, janus_config_type_category, "general");
-		const char *ea = general ? janus_slvoice_cfg_item(config, general, "echo_autostart") : NULL;
-		if(ea && (!strcasecmp(ea, "true") || !strcasecmp(ea, "yes")))
-			echo_autostart = TRUE;
-	}
-	const char *ea_env = getenv("SLV_ECHO_AUTOSTART");
-	if(ea_env) {
-		if(!strcasecmp(ea_env, "true") || !strcasecmp(ea_env, "1") || !strcasecmp(ea_env, "yes"))
-			echo_autostart = TRUE;
-		else if(!strcasecmp(ea_env, "false") || !strcasecmp(ea_env, "0") || !strcasecmp(ea_env, "no"))
-			echo_autostart = FALSE;
-	}
-	if(echo_autostart)
-		JANUS_LOG(LOG_INFO, "[%s] echo_autostart ENABLED — echo starts automatically on connect\n",
-			JANUS_SLVOICE_PACKAGE);
-
 	if(config != NULL)
 		janus_config_destroy(config);
 
@@ -486,7 +430,16 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 	handler_thread = g_thread_try_new("slvoice handler", janus_slvoice_handler, NULL, &error);
 	if(error != NULL) {
 		g_atomic_int_set(&initialized, 0);
-		JANUS_LOG(LOG_ERR, "[%s] Got error %d (%s) trying to launch the handler thread\n",
+		JANUS_LOG(LOG_ERR, "[%s] Got error %d (%s) launching the handler thread\n",
+			JANUS_SLVOICE_PACKAGE, error->code, error->message ? error->message : "??");
+		g_error_free(error);
+		return -1;
+	}
+	error = NULL;
+	sender_thread = g_thread_try_new("slvoice sender", janus_slvoice_sender, NULL, &error);
+	if(error != NULL) {
+		g_atomic_int_set(&initialized, 0);
+		JANUS_LOG(LOG_ERR, "[%s] Got error %d (%s) launching the sender thread\n",
 			JANUS_SLVOICE_PACKAGE, error->code, error->message ? error->message : "??");
 		g_error_free(error);
 		return -1;
@@ -508,6 +461,10 @@ void janus_slvoice_destroy(void) {
 		g_thread_join(handler_thread);
 		handler_thread = NULL;
 	}
+	if(sender_thread != NULL) {
+		g_thread_join(sender_thread);
+		sender_thread = NULL;
+	}
 
 	janus_mutex_lock(&sessions_mutex);
 	if(sessions != NULL) {
@@ -518,7 +475,6 @@ void janus_slvoice_destroy(void) {
 
 	janus_mutex_lock(&rooms_mutex);
 	if(rooms != NULL) {
-		/* Values are ref-counted rooms; drop our (hash) reference to each */
 		GHashTableIter iter;
 		gpointer value;
 		g_hash_table_iter_init(&iter, rooms);
@@ -562,7 +518,7 @@ void janus_slvoice_create_session(janus_plugin_session *handle, int *error) {
 	janus_slvoice_session *session = g_malloc0(sizeof(janus_slvoice_session));
 	session->handle = handle;
 	session->opus_pt = -1;
-	g_atomic_int_set(&session->last_decode_ok, -1);
+	session->created_ts = janus_get_monotonic_time();
 	janus_mutex_init(&session->mutex);
 	janus_refcount_init(&session->ref, janus_slvoice_session_free);
 	handle->plugin_handle = session;
@@ -587,10 +543,7 @@ void janus_slvoice_destroy_session(janus_plugin_session *handle, int *error) {
 	}
 	JANUS_LOG(LOG_INFO, "[%s-%p] Destroying session (id=%"PRIu64")\n",
 		JANUS_SLVOICE_PACKAGE, handle, session->user_id);
-	/* Tear down media and room membership before dropping the session */
-	janus_mutex_lock(&session->mutex);
-	janus_slvoice_echo_stop_locked(session);
-	janus_mutex_unlock(&session->mutex);
+	/* Drop room membership before dropping the session */
 	janus_slvoice_leave_room(session);
 
 	janus_mutex_lock(&sessions_mutex);
@@ -613,25 +566,24 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	gboolean up = g_atomic_int_get(&session->webrtc_up);
 	/* Plugins only learn PeerConnection up/down (setup_media / hangup_media);
 	 * we report ICE/DTLS coarsely as Janus surfaces it to us. */
-	json_object_set_new(info, "webrtc_up", up ? json_true() : json_false());
 	json_object_set_new(info, "ice_state", json_string(up ? "connected" : "disconnected"));
 	json_object_set_new(info, "dtls_state", json_string(up ? "connected" : "disconnected"));
-	json_object_set_new(info, "datachannel_open", g_atomic_int_get(&session->dc_open) ? json_true() : json_false());
 	json_object_set_new(info, "datachannel_negotiated", session->has_datachannel ? json_true() : json_false());
+	json_object_set_new(info, "datachannel_answered", session->dc_answered ? json_true() : json_false());
+	json_object_set_new(info, "datachannel_open", g_atomic_int_get(&session->dc_open) ? json_true() : json_false());
 	if(session->room != NULL)
 		json_object_set_new(info, "room", json_integer((json_int_t)session->room->room_id));
 	json_object_set_new(info, "id", json_integer((json_int_t)session->user_id));
+	if(session->display)
+		json_object_set_new(info, "display", json_string(session->display));
 	json_object_set_new(info, "opus_pt", json_integer(session->opus_pt));
-	json_object_set_new(info, "echo_active", g_atomic_int_get(&session->echo_active) ? json_true() : json_false());
 	json_object_set_new(info, "rtp_in_count", json_integer((json_int_t)session->rtp_in_count));
-	json_object_set_new(info, "rtp_in_bytes", json_integer((json_int_t)session->rtp_in_bytes));
-	json_object_set_new(info, "rtp_in_rate", json_integer(session->rtp_in_rate));
-	int ldo = g_atomic_int_get(&session->last_decode_ok);
-	json_object_set_new(info, "last_decode_ok", ldo < 0 ? json_null() : (ldo ? json_true() : json_false()));
 	json_object_set_new(info, "data_msgs_received", json_integer((json_int_t)session->data_msgs_received));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
 	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));
+	gint64 uptime = (janus_get_monotonic_time() - session->created_ts) / G_USEC_PER_SEC;
+	json_object_set_new(info, "session_uptime", json_integer((json_int_t)uptime));
 	janus_mutex_unlock(&session->mutex);
 	return info;
 }
@@ -685,9 +637,12 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 }
 
 /* ---- JSEP negotiation helper (join / configure with an offer) ------------
- * Parses the offer, picks the Opus PT, builds an Opus (48k stereo) + optional
- * datachannel answer with the spec fmtp, and returns the answer SDP string.
- * On success returns TRUE and *answer_sdp (caller g_free's). */
+ * Parses the offer, picks the Opus PT, and builds an answer that accepts BOTH
+ * the m=audio (Opus 48k + spec §9 fmtp) AND the m=application (SCTP DataChannel)
+ * lines. Answering the application line (JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
+ * modelled on janus_videoroom.c:13113) is THE fix for "Skipping unsupported
+ * application media line" — see the file header. Returns TRUE + *answer_sdp
+ * (caller g_free's). */
 static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *jsep,
 		char **answer_sdp, int *error_code, char *error_cause) {
 	*answer_sdp = NULL;
@@ -713,9 +668,11 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 		return FALSE;
 	}
 	gboolean has_dc = (janus_sdp_mline_find(offer, JANUS_SDP_APPLICATION) != NULL);
+	JANUS_LOG(LOG_INFO, "[%s-%p] Offer received: Opus pt=%d, m=application present=%s\n",
+		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, has_dc ? "yes" : "no");
 
-	/* Build the answer: accept Opus audio sendrecv, accept the datachannel if
-	 * present, reject everything else (generate_answer defaults to rejected). */
+	/* Build the answer: accept Opus audio sendrecv AND the datachannel; reject
+	 * everything else (generate_answer defaults every m-line to rejected). */
 	janus_sdp *answer = janus_sdp_generate_answer(offer);
 	GList *temp = offer->m_lines;
 	while(temp != NULL) {
@@ -727,6 +684,10 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 				JANUS_SDP_OA_DIRECTION, JANUS_SDP_SENDRECV,
 				JANUS_SDP_OA_DONE);
 		} else if(m->type == JANUS_SDP_APPLICATION) {
+			/* THE critical line: accept + answer the SCTP DataChannel so the
+			 * core sets up SCTP (sdp.c:1611) instead of skipping it (sdp.c:1625).
+			 * Minimal correct option list; proto (UDP/DTLS/SCTP) and port are
+			 * filled by generate_answer_mline from the offer. */
 			janus_sdp_generate_answer_mline(offer, answer, m,
 				JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
 				JANUS_SDP_OA_DONE);
@@ -743,6 +704,9 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 		janus_sdp_attribute *a = janus_sdp_attribute_create("fmtp", "%s", fmtp);
 		janus_sdp_attribute_add_to_mline(am, a);
 	}
+	/* Did we actually accept the application m-line in the answer? (port>0) */
+	janus_sdp_mline *am_dc = janus_sdp_mline_find(answer, JANUS_SDP_APPLICATION);
+	gboolean dc_answered = (am_dc != NULL && am_dc->port > 0);
 
 	char *new_sdp = janus_sdp_write(answer);
 	janus_sdp_destroy(offer);
@@ -755,10 +719,15 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	janus_mutex_lock(&session->mutex);
 	session->opus_pt = opus_pt;
 	session->has_datachannel = has_dc;
+	session->dc_answered = dc_answered;
 	janus_mutex_unlock(&session->mutex);
 	*answer_sdp = new_sdp;
-	JANUS_LOG(LOG_INFO, "[%s-%p] Negotiated Opus pt=%d, datachannel=%s\n",
-		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, has_dc ? "yes" : "no");
+	JANUS_LOG(LOG_INFO, "[%s-%p] Answer sent: audio Opus pt=%d; m=application answered=%s\n",
+		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, dc_answered ? "YES" : "NO");
+	if(has_dc && !dc_answered)
+		JANUS_LOG(LOG_WARN, "[%s-%p] Offer had a data channel but the answer did NOT accept it — "
+			"the viewer will tear down (check Janus was built with SCTP)\n",
+			JANUS_SLVOICE_PACKAGE, session->handle);
 	return TRUE;
 }
 
@@ -803,6 +772,10 @@ static void *janus_slvoice_handler(void *data) {
 		json_t *root = msg->message;
 		json_t *event = NULL;        /* the plugin event JSON to push */
 		json_t *jsep_answer = NULL;  /* optional JSEP answer to push alongside */
+		/* Deferred presence push (done after locks are released) */
+		janus_slvoice_room *presence_room = NULL;
+		char *presence_who = NULL;
+		gboolean presence_join = FALSE;
 
 		json_t *request = json_object_get(root, "request");
 		if(!json_is_string(request)) {
@@ -822,16 +795,15 @@ static void *janus_slvoice_handler(void *data) {
 			gboolean is_private = json_is_true(json_object_get(root, "is_private"));
 			gboolean spatial = json_is_true(json_object_get(root, "spatial_audio"));
 			json_t *rate_j = json_object_get(root, "sampling_rate");
-			guint32 rate = (rate_j && json_is_integer(rate_j)) ? (guint32)json_integer_value(rate_j) : SLV_RATE;
+			guint32 rate = (rate_j && json_is_integer(rate_j)) ? (guint32)json_integer_value(rate_j) : 48000;
 			gboolean permanent = json_is_true(json_object_get(root, "permanent"));
 
 			janus_mutex_lock(&rooms_mutex);
 			janus_slvoice_room *room = g_hash_table_lookup(rooms, &room_id);
 			if(room != NULL) {
-				/* Match audiobridge exactly: an existing room is error 486
-				 * ("room exists"). The OpenSim C# side (CreateRoom) treats 486
-				 * as success — every region that hashes to the same room number
-				 * relies on this (docs/voice/current-architecture.md §3.3). */
+				/* Match audiobridge exactly: an existing room is error 486. The
+				 * C# side (CreateRoom) treats 486 as success — every region that
+				 * hashes to the same room number relies on this (§3.3). */
 				janus_mutex_unlock(&rooms_mutex);
 				error_code = JANUS_SLVOICE_ERROR_ROOM_EXISTS;
 				g_snprintf(error_cause, 512, "Room %"PRIu64" already exists", room_id);
@@ -869,8 +841,8 @@ static void *janus_slvoice_handler(void *data) {
 				goto respond;
 			}
 			g_atomic_int_set(&room->destroyed, 1);
-			/* Evict participants: each session that we transition out of the
-			 * room drops the ref it held (mutex makes the transition unique). */
+			/* Evict participants: each session we transition out drops the ref
+			 * it held (mutex makes the transition unique). */
 			janus_mutex_lock(&room->mutex);
 			GList *members = g_hash_table_get_values(room->participants);
 			GList *mi = members;
@@ -882,7 +854,6 @@ static void *janus_slvoice_handler(void *data) {
 				if(p->room == room) {
 					p->room = NULL;
 					unref = TRUE;
-					janus_slvoice_echo_stop_locked(p);
 				}
 				janus_mutex_unlock(&p->mutex);
 				if(unref)
@@ -891,7 +862,6 @@ static void *janus_slvoice_handler(void *data) {
 			g_list_free(members);
 			g_hash_table_remove_all(room->participants);
 			janus_mutex_unlock(&room->mutex);
-			/* Drop the hash's reference */
 			g_hash_table_remove(rooms, &room_id);
 			janus_mutex_unlock(&rooms_mutex);
 			janus_refcount_decrease(&room->ref);
@@ -910,7 +880,6 @@ static void *janus_slvoice_handler(void *data) {
 			guint64 room_id = (guint64)json_integer_value(room_j);
 			const char *display = json_string_value(json_object_get(root, "display"));
 
-			/* Already in a room? */
 			janus_mutex_lock(&session->mutex);
 			gboolean already = (session->room != NULL);
 			janus_mutex_unlock(&session->mutex);
@@ -925,7 +894,6 @@ static void *janus_slvoice_handler(void *data) {
 				g_snprintf(error_cause, 512, "No such room (%"PRIu64")", room_id);
 				goto respond;
 			}
-			/* Need an offer to negotiate */
 			if(msg->jsep == NULL) {
 				janus_refcount_decrease(&room->ref);
 				error_code = JANUS_SLVOICE_ERROR_INVALID_SDP;
@@ -950,7 +918,6 @@ static void *janus_slvoice_handler(void *data) {
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = user_id;
 			g_hash_table_insert(room->participants, key, session);
-			/* Build the roster of OTHER participants for the joiner */
 			json_t *list = json_array();
 			GHashTableIter iter;
 			gpointer value;
@@ -970,11 +937,16 @@ static void *janus_slvoice_handler(void *data) {
 			json_object_set_new(event, "participants", list);
 			jsep_answer = json_pack("{ssss}", "type", "answer", "sdp", answer_sdp);
 			g_free(answer_sdp);
+			/* Notify the other participants that this peer joined (after unlock) */
+			if(display != NULL) {
+				presence_room = room;   /* borrowed; still referenced by the session */
+				presence_who = g_strdup(display);
+				presence_join = TRUE;
+			}
 			JANUS_LOG(LOG_INFO, "[%s-%p] Participant %"PRIu64" (%s) joined room %"PRIu64"\n",
 				JANUS_SLVOICE_PACKAGE, msg->handle, user_id, display ? display : "??", room_id);
 			goto respond;
 		} else if(!strcasecmp(request_text, "configure")) {
-			/* Accept and ack; renegotiate if an offer rides along. */
 			if(msg->jsep != NULL) {
 				char *answer_sdp = NULL;
 				if(!janus_slvoice_negotiate(session, msg->jsep, &answer_sdp, &error_code, error_cause))
@@ -991,15 +963,19 @@ static void *janus_slvoice_handler(void *data) {
 			gboolean joined = (session->room != NULL);
 			guint64 room_id = session->room ? session->room->room_id : 0;
 			guint64 user_id = session->user_id;
+			char *who = session->display ? g_strdup(session->display) : NULL;
+			janus_slvoice_room *room = session->room;
 			janus_mutex_unlock(&session->mutex);
 			if(!joined) {
+				g_free(who);
 				error_code = JANUS_SLVOICE_ERROR_NOT_JOINED;
 				g_snprintf(error_cause, 512, "Not in a room");
 				goto respond;
 			}
-			janus_mutex_lock(&session->mutex);
-			janus_slvoice_echo_stop_locked(session);
-			janus_mutex_unlock(&session->mutex);
+			/* Notify others BEFORE we remove ourselves */
+			if(who != NULL && room != NULL)
+				janus_slvoice_push_presence(room, who, FALSE);
+			g_free(who);
 			janus_slvoice_leave_room(session);
 
 			event = json_object();
@@ -1083,10 +1059,77 @@ respond:
 		json_decref(event);
 		if(jsep_answer)
 			json_decref(jsep_answer);
+		/* Deferred join presence notice (after the response is sent) */
+		if(presence_room != NULL && presence_who != NULL)
+			janus_slvoice_push_presence(presence_room, presence_who, presence_join);
+		g_free(presence_who);
 		janus_slvoice_message_free(msg);
 		msg = NULL;
 	}
 	JANUS_LOG(LOG_VERB, "[%s] Leaving handler thread\n", JANUS_SLVOICE_PACKAGE);
+	return NULL;
+}
+
+/* ---- Mixer->client periodic power/VAD ticker -----------------------------
+ * Every ~100ms (spec §9) push each room's participants a well-formed per-peer
+ * batch keyed by display (agent UUID): { "<uuid>": {"p":<RMS*128>,"V":<VAD>} }.
+ * Phase 1A has no audio, so p=0 and V=false for everyone — the point is that the
+ * viewer receives valid state and renders a (silent) voice dot. */
+static void *janus_slvoice_sender(void *data) {
+	JANUS_LOG(LOG_VERB, "[%s] Joining sender thread\n", JANUS_SLVOICE_PACKAGE);
+	while(g_atomic_int_get(&initialized) && !g_atomic_int_get(&stopping)) {
+		g_usleep(SLV_POWER_TICK_MS * 1000);
+		if(g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
+			break;
+		janus_mutex_lock(&rooms_mutex);
+		GHashTableIter riter;
+		gpointer rvalue;
+		g_hash_table_iter_init(&riter, rooms);
+		while(g_hash_table_iter_next(&riter, NULL, &rvalue)) {
+			janus_slvoice_room *room = rvalue;
+			if(room == NULL || g_atomic_int_get(&room->destroyed))
+				continue;
+			janus_mutex_lock(&room->mutex);
+			if(g_hash_table_size(room->participants) == 0) {
+				janus_mutex_unlock(&room->mutex);
+				continue;
+			}
+			/* One batch for the whole room (all zeros for every participant) */
+			json_t *batch = json_object();
+			GHashTableIter piter;
+			gpointer pvalue;
+			g_hash_table_iter_init(&piter, room->participants);
+			while(g_hash_table_iter_next(&piter, NULL, &pvalue)) {
+				janus_slvoice_session *p = pvalue;
+				if(p->display == NULL)
+					continue;
+				json_t *pv = json_object();
+				json_object_set_new(pv, "p", json_integer(0));   /* power = RMS*128 (silence) */
+				json_object_set_new(pv, "V", json_false());      /* VAD (not talking) */
+				json_object_set_new(batch, p->display, pv);
+			}
+			char *text = json_dumps(batch, JSON_COMPACT);
+			if(text != NULL) {
+				size_t len = strlen(text);
+				if(len < 65536) {
+					g_hash_table_iter_init(&piter, room->participants);
+					while(g_hash_table_iter_next(&piter, NULL, &pvalue)) {
+						janus_slvoice_session *p = pvalue;
+						if(!g_atomic_int_get(&p->dc_open))
+							continue;
+						janus_plugin_data d = { .label = NULL, .protocol = NULL, .binary = FALSE,
+							.buffer = text, .length = (uint16_t)len };
+						gateway->relay_data(p->handle, &d);
+					}
+				}
+				free(text);
+			}
+			json_decref(batch);
+			janus_mutex_unlock(&room->mutex);
+		}
+		janus_mutex_unlock(&rooms_mutex);
+	}
+	JANUS_LOG(LOG_VERB, "[%s] Leaving sender thread\n", JANUS_SLVOICE_PACKAGE);
 	return NULL;
 }
 
@@ -1097,15 +1140,8 @@ void janus_slvoice_setup_media(janus_plugin_session *handle) {
 	if(session == NULL)
 		return;
 	g_atomic_int_set(&session->webrtc_up, 1);
-	JANUS_LOG(LOG_INFO, "[%s-%p] WebRTC media is now available (PeerConnection up)\n",
+	JANUS_LOG(LOG_INFO, "[%s-%p] WebRTC media is now available (ICE connected, DTLS complete, PeerConnection up)\n",
 		JANUS_SLVOICE_PACKAGE, handle);
-	if(echo_autostart) {
-		janus_mutex_lock(&session->mutex);
-		gboolean ok = janus_slvoice_echo_start_locked(session);
-		janus_mutex_unlock(&session->mutex);
-		JANUS_LOG(ok ? LOG_INFO : LOG_ERR, "[%s-%p] Echo %s (echo_autostart)\n",
-			JANUS_SLVOICE_PACKAGE, handle, ok ? "auto-started" : "auto-start FAILED");
-	}
 }
 
 void janus_slvoice_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp *packet) {
@@ -1115,94 +1151,16 @@ void janus_slvoice_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp *
 	if(session == NULL || g_atomic_int_get(&session->destroyed))
 		return;
 	if(packet == NULL || packet->buffer == NULL || packet->video)
-		return;   /* audio only in Phase 1 */
-
+		return;   /* audio only; Phase 1A ingests and counts, never processes */
 	janus_mutex_lock(&session->mutex);
-	/* Diagnostics counters + 1s rate window */
-	gint64 now = janus_get_monotonic_time();
 	session->rtp_in_count++;
-	session->rtp_in_bytes += packet->length;
-	if(session->rate_t0 == 0)
-		session->rate_t0 = now;
-	session->rate_ctr++;
-	if(now - session->rate_t0 >= G_USEC_PER_SEC) {
-		session->rtp_in_rate = session->rate_ctr;
-		session->rate_ctr = 0;
-		session->rate_t0 = now;
-	}
-
-	if(!g_atomic_int_get(&session->echo_active) || session->dec == NULL || session->enc == NULL) {
-		janus_mutex_unlock(&session->mutex);
-		SLV_MEDIA_LOG("[%s-%p] incoming_rtp %d bytes (echo off; dropped)\n",
-			JANUS_SLVOICE_PACKAGE, handle, packet->length);
-		return;
-	}
-
-	/* Decode Opus -> interleaved 48k stereo float */
-	int plen = 0;
-	char *payload = janus_rtp_payload(packet->buffer, packet->length, &plen);
-	if(payload == NULL || plen <= 0) {
-		janus_mutex_unlock(&session->mutex);
-		return;
-	}
-	int samples = opus_decode_float(session->dec, (const unsigned char *)payload, plen,
-		session->decbuf, SLV_DECODE_MAX, 0);
-	if(samples < 0) {
-		g_atomic_int_set(&session->last_decode_ok, 0);
-		janus_mutex_unlock(&session->mutex);
-		JANUS_LOG(LOG_WARN, "[%s-%p] Opus decode error: %s\n",
-			JANUS_SLVOICE_PACKAGE, handle, opus_strerror(samples));
-		return;
-	}
-	g_atomic_int_set(&session->last_decode_ok, 1);
-	if(samples > SLV_DECODE_MAX)
-		samples = SLV_DECODE_MAX;
-
-	/* Delay line: write freshly-decoded samples at the write cursor; read the
-	 * frame that entered SLV_DELAY_SAMPLES ago (zeros for the first 500ms). */
-	int wp = session->ring_wpos;
-	int rp = (wp + SLV_RING_SAMPLES - SLV_DELAY_SAMPLES) % SLV_RING_SAMPLES;
-	for(int i = 0; i < samples; i++) {
-		session->framebuf[2*i]     = session->ring[2*rp];
-		session->framebuf[2*i + 1] = session->ring[2*rp + 1];
-		session->ring[2*wp]     = session->decbuf[2*i];
-		session->ring[2*wp + 1] = session->decbuf[2*i + 1];
-		wp = (wp + 1) % SLV_RING_SAMPLES;
-		rp = (rp + 1) % SLV_RING_SAMPLES;
-	}
-	session->ring_wpos = wp;
-
-	/* Re-encode the delayed frame and build an RTP packet around it */
-	int enc_len = opus_encode_float(session->enc, session->framebuf, samples,
-		session->outbuf + 12, SLV_RTP_OUT_MAX - 12);
-	if(enc_len < 0) {
-		janus_mutex_unlock(&session->mutex);
-		JANUS_LOG(LOG_WARN, "[%s-%p] Opus encode error: %s\n",
-			JANUS_SLVOICE_PACKAGE, handle, opus_strerror(enc_len));
-		return;
-	}
-	janus_rtp_header *rtp = (janus_rtp_header *)session->outbuf;
-	memset(rtp, 0, 12);
-	rtp->version = 2;
-	rtp->type = (session->opus_pt > 0 ? session->opus_pt : 111);
-	rtp->markerbit = 0;
-	rtp->seq_number = htons(session->out_seq++);
-	rtp->timestamp = htonl(session->out_ts);
-	rtp->ssrc = htonl(session->out_ssrc);
-	session->out_ts += samples;   /* 48k clock, per-channel samples */
-
-	janus_plugin_rtp outp = { .mindex = -1, .video = FALSE,
-		.buffer = (char *)session->outbuf, .length = (uint16_t)(12 + enc_len) };
-	janus_plugin_rtp_extensions_reset(&outp.extensions);
-	/* Relay under the session lock so echo-disable can't free outbuf mid-send. */
-	gateway->relay_rtp(handle, &outp);
-	SLV_MEDIA_LOG("[%s-%p] echo: in %d bytes -> %d samples -> out %d bytes (pt=%d)\n",
-		JANUS_SLVOICE_PACKAGE, handle, plen, samples, enc_len, rtp->type);
 	janus_mutex_unlock(&session->mutex);
+	SLV_MEDIA_LOG("[%s-%p] incoming_rtp %d bytes (counted; not processed)\n",
+		JANUS_SLVOICE_PACKAGE, handle, packet->length);
 }
 
 void janus_slvoice_incoming_rtcp(janus_plugin_session *handle, janus_plugin_rtcp *packet) {
-	/* Phase 1: RTCP is not acted on (no mixing/feedback loop yet). */
+	/* Phase 1A: RTCP is not acted on. */
 }
 
 void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data *packet) {
@@ -1235,22 +1193,6 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 			JANUS_SLVOICE_PACKAGE, handle, packet->length);
 		return;
 	}
-
-	/* Echo toggle (slvoice extension) */
-	if(d.fields_seen & SLV_FIELD_ECHO) {
-		janus_mutex_lock(&session->mutex);
-		if(d.echo) {
-			if(janus_slvoice_echo_start_locked(session))
-				JANUS_LOG(LOG_INFO, "[%s-%p] Echo mode ENABLED (500ms delay)\n", JANUS_SLVOICE_PACKAGE, handle);
-			else
-				JANUS_LOG(LOG_ERR, "[%s-%p] Echo mode enable FAILED (codec init)\n", JANUS_SLVOICE_PACKAGE, handle);
-		} else {
-			janus_slvoice_echo_stop_locked(session);
-			JANUS_LOG(LOG_INFO, "[%s-%p] Echo mode DISABLED\n", JANUS_SLVOICE_PACKAGE, handle);
-		}
-		janus_mutex_unlock(&session->mutex);
-	}
-
 #ifdef SLV_DEBUG_MEDIA
 	{
 		char fbuf[96];
@@ -1258,7 +1200,7 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 		SLV_MEDIA_LOG("[%s-%p] SLData fields=[%s] (status=%d)\n", JANUS_SLVOICE_PACKAGE, handle, fbuf, st);
 	}
 #endif
-	/* Phase 1 stores sp/sh/lp/lh/m/ug (in session->last_data) but does not act
+	/* Phase 1A stores sp/sh/lp/lh/m/ug (in session->last_data) but does not act
 	 * on the geometry — spatial mixing is Phase 2. */
 }
 
@@ -1266,8 +1208,9 @@ void janus_slvoice_data_ready(janus_plugin_session *handle) {
 	janus_slvoice_session *session = (janus_slvoice_session *)handle->plugin_handle;
 	if(session == NULL)
 		return;
+	/* Do not relay_data before this fires (janus_textroom.c:1491). */
 	if(g_atomic_int_compare_and_exchange(&session->dc_open, 0, 1))
-		JANUS_LOG(LOG_INFO, "[%s-%p] Data channel open\n", JANUS_SLVOICE_PACKAGE, handle);
+		JANUS_LOG(LOG_INFO, "[%s-%p] Data channel open (writable)\n", JANUS_SLVOICE_PACKAGE, handle);
 }
 
 void janus_slvoice_slow_link(janus_plugin_session *handle, int mindex, gboolean video, gboolean uplink) {
@@ -1284,8 +1227,4 @@ void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 		return;
 	g_atomic_int_set(&session->webrtc_up, 0);
 	g_atomic_int_set(&session->dc_open, 0);
-	g_atomic_int_set(&session->last_decode_ok, -1);
-	janus_mutex_lock(&session->mutex);
-	janus_slvoice_echo_stop_locked(session);
-	janus_mutex_unlock(&session->mutex);
 }
