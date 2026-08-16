@@ -676,3 +676,26 @@ irrespective of `TaxFree`, whereas this voids the deny even on *per-parcel chann
 when `TaxFree` is set. A per-listener visibility matrix (see `mixer-feed-protocol.md`) that derives
 from the sim predicates would inherit the `TaxFree` exemption *by construction* — so honoring or
 overriding it becomes an explicit policy choice rather than a silent gate.
+
+### F. Phase-3a implementation decisions (VoiceStateFeeder)
+
+Recorded here so the shipped behavior is traceable to a decision, not an accident. Both are
+implemented in `Addons/os-webrtc-janus/Visibility/` (`VisibilityRules`) with tests in
+`Tests/WebRtcJanusService.Tests/VoiceStateFeederTests.cs`.
+
+- **SeeAVs hiding is implemented SYMMETRIC — pending SL verification.** The visual model is
+  one-way at the source (§1.2); for voice the feeder excludes a pair if *either* party is on a
+  `SeeAVs=false` parcel (and they are on different parcels), so a listener never hears someone
+  they cannot see. This is **implemented-symmetric-pending-SL-verification**: whether stock SL
+  voice hides symmetrically is not yet confirmed in-world. The rule is isolated behind
+  `VisibilityRules.SeeAvsHidesSymmetric` with an ambiguity comment; if SL proves one-way, drop the
+  second disjunct there and this reverts to source-only. (Decision 1b.)
+- **The `TaxFree` ban void is FIXED in the feeder — overriding the "inherit by construction"
+  default described in §E above.** The matrix evaluates parcel ban/restrict on ban-list
+  *membership* (position-independent: a banned avatar physically inside the banning parcel is still
+  excluded — tested) and, in production, **without** the `TaxFree` short-circuit, so a parcel ban
+  is honored in voice even on a `TaxFree` estate. The admin/EM/owner/self exemptions are retained.
+  Note this deliberately introduces a voice-vs-visual divergence under `TaxFree` (voice enforces a
+  parcel ban that the visual/access layer does not); it was chosen over §E's parity default per
+  explicit decision. The parcel voice-**enable** `TaxFree` override (§E first bullet) is **not**
+  changed — only the ban/restrict void. (Decision 2b.)

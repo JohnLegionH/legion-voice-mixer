@@ -196,24 +196,35 @@ A concrete venue, to check the recommendation survives real numbers rather than 
 
 **What one crossing actually changes.** A crossing only mutates exclusions when it changes a
 `P_L == P_S` relationship or a banned parcel's occupant set:
-- **Into/out of H**: flips the mover's relationship with all 8 hidden occupants → **8 unordered
-  (16 directed)**.
+- **Into/out of a SeeAVs (hidden) parcel** — the fan-out the first draft undercounted. Entering H
+  does not merely re-pair the mover with H's occupants; the mover *itself* becomes hidden from
+  **every** outsider on a different parcel. So the change is **−(occupants) removed** (co-occupants
+  no longer hidden from the mover) **+ (N − occupants − 1) added** (mover now hidden from all
+  outsiders). For the 40-avatar / H=8 case: **−8 + 31 = 39 unordered (78 directed)**, touching ~40
+  listener entries. This crossing is **O(N)**, not O(1).
 - **Into/out of a banned parcel** (mover not the banned one): adds/removes the mover ↔ each avatar
   banned from that parcel → typically **1–2 unordered (2–4 directed)**.
-- **Ordinary ↔ ordinary** (neither H nor banned): the mover stays an outsider to H and touches no
-  ban set → **0 entries**. A banned avatar simply *moving* also changes nothing (its exclusions
-  track the banned parcel's occupants, not its own position). **The majority of crossings touch
-  zero exclusion entries.**
-- **Worst-case single crossing** (into H, which also happens to carry a couple of bans):
-  ≈8+2 = **10 unordered ≈ 20 directed entries**.
+- **Ordinary ↔ ordinary** (neither hidden nor banned): the mover stays an outsider to every hidden
+  parcel and touches no ban set → **0 entries**. A banned avatar simply *moving* also changes
+  nothing (its exclusions track the banned parcel's occupants, not its own position). **The
+  majority of crossings touch zero exclusion entries.**
+- **Worst-case single crossing** is that SeeAVs-boundary case: **≈ 2·(N − occupants) directed**, up
+  to **N−1 unordered** when stepping onto an *empty* hidden parcel (hidden from everyone at once).
+  For N=40 that is ~39 unordered / ~78 directed.
+
+> **Executable pin.** This fan-out is asserted by
+> `Tests/WebRtcJanusService.Tests/VoiceStateFeederTests.SeeAvsFanOut_MoverEntersHiddenParcel_AddsExclusionWithEveryOutsider`:
+> a mover stepping onto an *empty* hidden parcel among 17 outsiders yields exactly **17 additions**
+> (mover ↔ each outsider, both directions) and **0 removals**. If this worked example and that test
+> ever disagree, the test is the source of truth.
 
 **(B) extend `peer_ctl` — delta:**
 | Metric | Value |
 |---|---|
 | Messages/sec at mixer | ≤4 (one per 250 ms tick), typically **2–3/s**; empty ticks skipped |
-| Bytes/msg | worst case ~20 directed entries ≈ **<1 KB** (usually <200 B) |
-| **Mixer entry-writes/sec** | ~half of crossings are relevant → ≈1.5 relevant/s × ~10 directed ≈ **~15/s** (peak ~16–20/s if every crossing enters H) |
-| Entries touched / crossing | **0 (majority) … 20 (worst)** |
+| Bytes/msg | a SeeAVs-boundary crossing ~78 directed ≈ **<2 KB**; ordinary crossings <200 B |
+| **Mixer entry-writes/sec** | movement-dependent: ordinary crossings ~0, a SeeAVs-boundary crossing ~78 directed. At ~3 crossings/s with occasional hidden-parcel boundaries, **low tens/s typical, ~80/s peak** |
+| Entries touched / crossing | **0 (ordinary) … ~2·(N−occ) ≈ 78 (a SeeAVs boundary)** |
 
 **(A) bulk matrix — full push per change:**
 | Metric | Value |
@@ -224,9 +235,11 @@ A concrete venue, to check the recommendation survives real numbers rather than 
 | Entries touched / crossing | **602–1560 (always the whole matrix)** |
 
 **Verdict — recommendation (B) survives, and here's exactly why.**
-- **Mixer-side churn** is the decisive axis: **≈15 entry-writes/s (delta) vs ≈1,800–4,700/s
-  (bulk)** — a **~100–300× difference at only N=40**, because bulk re-touches the entire matrix on
-  every crossing while most crossings genuinely change nothing.
+- **Mixer-side churn** is still the decisive axis, though the honest per-crossing gap is narrower
+  than a first cut suggested: a SeeAVs-boundary crossing touches ~78 directed (not ~15), while an
+  ordinary crossing touches ~0. Bulk re-touches the full **602–1560** every crossing regardless. So
+  the delta advantage runs from **unbounded** (0 vs the whole matrix, the common ordinary crossing)
+  down to **~20× at N=40** on the worst SeeAVs crossing (1560 / 78) — never against delta.
 - **Raw bandwidth is *not* the argument at this size**: a bulk *bitmap* is only ~195 B × 3/s ≈
   **0.6 KB/s**, comparable to the delta stream. If someone argues bulk on bytes alone, they're not
   wrong at N=40 — so the recommendation rests on churn and structure, not bandwidth.
@@ -234,14 +247,16 @@ A concrete venue, to check the recommendation survives real numbers rather than 
   per-listener map (the `m`/`ug` path). Delta updates drop straight in. The bulk *bitmap* needs a
   dense N×N with a stable avatar-index map the mixer doesn't have; the bulk *list* form is just a
   delta message that always sends everything. Either bulk variant fights the existing design.
-- **Scaling** settles it. Delta cost ≈ O(crossings × avg-affected), roughly linear in venue
-  activity. Bulk is **O(N² × crossing-rate)**. At **N=200** (multi-region estate, busy sim): bulk
-  ≈ 200×199×3 ≈ **119,000 entry-writes/s**; delta stays in the **tens–low-hundreds/s**. The
-  crossover is well below any realistic estate population.
+- **Scaling** settles it. Delta cost per crossing is **O(N)** worst-case (a SeeAVs boundary fans out
+  to all outsiders) and ~0 for ordinary crossings; bulk is **O(N²)** every crossing. At **N=200**
+  (multi-region estate, busy sim): bulk ≈ 200×199×3 ≈ **119,000 entry-writes/s**; delta is ~0 for
+  ordinary crossings and at most a few × 2·200 ≈ **hundreds–low-thousands/s** even when hidden-parcel
+  boundaries are being crossed. The O(N)-vs-O(N²) gap widens with population.
 
 **Conclusion:** extend `peer_ctl` with delta `add`/`remove` + a per-listener `replace` snapshot
-(§3.2). The one honest caveat — raw bytes are a wash at N=40 — does not change the decision, which
-turns on mixer churn (~100×) and O(N²)-vs-O(Δ) scaling.
+(§3.2). The corrected arithmetic narrows the per-crossing margin at N=40 (to ~20× on a SeeAVs
+boundary, unbounded on ordinary crossings) but does not change the decision, which turns on
+**O(N)-per-crossing vs O(N²)** scaling and structure fit.
 
 ### 3.3 Proposed message shape (illustrative — names to be finalized in code review)
 
@@ -271,6 +286,19 @@ set of **excluded source** UUIDs:
 
 The mixer folds `excl` into each listener's `peer_ctl` entry as a `has_vis`/`visible=false` flag
 (§4), independent of `has_mute`/`has_gain`.
+
+**Wire invariant — empty is reason-free.** Because reason codes are off the wire (above), an
+**empty per-listener set carries no cause**: an empty `add`/`remove` delta means "nothing changed,"
+and an empty `replace` snapshot means "this listener excludes no one." That empty state is
+**deliberately ambiguous between "no exclusions" (voice on, nothing hidden) and "voice denied"** —
+the mixer **treats them identically**, because it only ever applies the exclusions it is handed, and
+in the deny-voice case there is no audible room to mix regardless (the outcome turns on whether the
+room/audio exists, not on the visibility feed). *(The current feeder does not exercise the
+ambiguity: whole-room deny-voice is emitted as a **full** per-listener exclusion set, not an empty
+one — `VisibilityRules` rule (1) excludes every source. The empty-means-deny reading is reserved so
+a future feeder may drop those redundant exclusions without a wire change.)* If a consumer ever
+needs to distinguish the two — e.g. to drive a "voice disabled" UI — add a **room-level flag in
+v1.1** rather than overloading the empty set.
 
 ---
 
