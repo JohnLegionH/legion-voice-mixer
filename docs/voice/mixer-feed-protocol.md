@@ -300,6 +300,46 @@ a future feeder may drop those redundant exclusions without a wire change.)* If 
 needs to distinguish the two — e.g. to drive a "voice disabled" UI — add a **room-level flag in
 v1.1** rather than overloading the empty set.
 
+### 3.3.1 Shipped-handler behaviour (v0.7.0)
+
+Three properties of the shipped `handle_admin_message` → `apply_visbatch` path that the wire format
+above leaves implicit. Verified against `janus.plugin.slvoice` v0.7.0 source and a `0.7.0-debug`
+container run. These are **descriptive** notes on the shipped handler; they add nothing normative
+to the `op`/`room`/`excl` contract and do not change §3.2.
+
+- **Op scoping is per-listener, never room-wide — for all three ops.** The apply loop iterates only
+  the listeners *named in this batch's `excl` map* (`janus_slvoice.c:955`, `for i < vb->n_entries`);
+  it never iterates the room's participants to clear anyone. `replace` rebuilds and swaps **only the
+  named listener's** set (`:1014`–`:1015`, `g_hash_table_destroy(L->excluded); L->excluded = newset`);
+  `add`/`remove` mutate only the named listener's set. So **a `replace` naming one listener leaves
+  every other listener's set intact** — a listener *omitted* from the batch keeps whatever it had.
+  This is why "empty list clears L" (above) matters: to clear a listener you must **name it with an
+  empty list**; there is no room-wide reset op. (A full-room snapshot must therefore name every
+  listener whose column changed, including those cleared to empty — omission is not a clear.)
+
+- **A batch entry whose listener is not currently in the room is dropped, silently.** If the listener
+  key resolves to no session, the entry is skipped and stored nowhere (`janus_slvoice.c:958`,
+  `if(L == NULL) continue`). There is **no log line** for this (unlike an unknown *room*), and the
+  admin response is **byte-identical to a fully applied batch**: `entries` counts *parsed* entries
+  (including the dropped one) and `skipped` counts **only parse-time malformed items**, not
+  application-time drops. A sender cannot observe a dropped listener at all. **This is precisely why
+  §3.2 makes the *feeder* responsible for sending a listener's full column (a `replace`) on that
+  listener's join/reassignment** — the mixer holds nothing for an absent listener, so the feeder must
+  re-send when it appears. The two halves are one contract; a reader of §3.2 alone cannot see that
+  the mixer-side drop is the reason the feeder-side snapshot is mandatory, not optional.
+
+- **The "at most one batch per tick" bound is per-op, not per-wire-message.** A feeder tick that
+  carries both additions and removals emits **at most one `add` message and one `remove` message**
+  (the handler parses a single `op` per message; a `replace` snapshot is one message). The bound
+  exists to prevent per-listener fan-out (§3.2.1) — one message *per op kind*, never one per listener
+  — and that property is preserved.
+
+> **Operational note (verified against `0.7.0-debug`).** An unrecognised `room` number is dropped
+> with a `WARN` in the mixer log (`peer_ctl_batch for unknown room <n> … dropped`) but still returns
+> `{"slvoice":"applied", …}` to the sender. **A wrong room is therefore undetectable from the
+> response** — the sender sees `applied` whether or not the room existed. Confirm room identity out
+> of band (e.g. the same `CalcRoomNumber` the mixer uses); do not treat `applied` as proof of effect.
+
 ---
 
 ## 4. Mixer side — folding visibility into the existing per-listener map
