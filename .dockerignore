@@ -23,6 +23,11 @@ env.sample
 *.a
 /build/
 /out/
+# compiled unit-test binaries (built by `make test`; recompiled inside the image)
+tests/test_sldata
+tests/test_mix
+tests/test_visbatch
+tests/test_roster
 
 # Not needed at build time
 docs/

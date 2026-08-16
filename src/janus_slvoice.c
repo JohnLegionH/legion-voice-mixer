@@ -61,11 +61,13 @@
 #include <math.h>        /* sqrtf for RMS */
 
 #include "sldata.h"
+#include "visbatch.h"    /* Phase 3a: server-to-server visibility batch parser (unit-tested) */
+#include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
 
 /* Plugin information */
-#define JANUS_SLVOICE_VERSION         6
-#define JANUS_SLVOICE_VERSION_STRING  "0.6.0"
+#define JANUS_SLVOICE_VERSION         7
+#define JANUS_SLVOICE_VERSION_STRING  "0.7.0"
 #define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 2: real per-room flat N-minus-one conference mixing with DTX/VAD cull, per-source mute/gain, and encode-skip; echo remains as a per-participant diagnostic override; no spatialization yet)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
@@ -229,6 +231,15 @@ typedef struct janus_slvoice_room {
 	double tick_last_ms;
 	double tick_max_ms;
 
+	/* ---- Phase 3a per-listener visibility feed (server-to-server peer_ctl_batch).
+	 * Guarded by room->mutex (the tick's whole-pass lock) — see
+	 * janus_slvoice_apply_visbatch for the atomicity contract. */
+	guint64 vis_epoch;             /* +1 per applied batch (feed liveness / ordering) */
+	gint64 vis_last_ts;            /* monotonic us of the last applied batch (0 = none) */
+	slv_vis_op vis_last_mode;      /* op of the last applied batch (add/remove/replace) */
+	gboolean vis_have_batch;       /* at least one batch applied */
+	guint64 vis_joins_since_snapshot; /* participant joins since the last REPLACE (re-derive lag) */
+
 	volatile gint destroyed;
 	janus_refcount ref;
 } janus_slvoice_room;
@@ -297,6 +308,16 @@ typedef struct janus_slvoice_session {
 	/* Persistent per-source mute/gain this listener has applied to others. */
 	slv_peer_ctl peer_ctl[SLV_MAX_PEER_ADJ];
 	int n_peer_ctl;
+
+	/* Phase 3a per-listener visibility exclusions: a set of TARGET (source) agent
+	 * UUID strings this listener must not hear or see. A PARALLEL structure to
+	 * peer_ctl (not folded into it) because it is O(N) not O(few), sim-sourced not
+	 * viewer-sourced, and wants O(1) membership in the hot mix loop. Both the mix
+	 * loop and the roster/presence path read this ONE set (single source of truth).
+	 * Written under room->mutex + session->mutex; read by the tick / query_session
+	 * under session->mutex and by the sender / presence under room->mutex. Keys are
+	 * g_strdup'd (freed on removal / destroy). */
+	GHashTable *excluded;
 
 	/* Diagnostics (guarded by mutex except where atomic) */
 	guint64 rtp_in_count;        /* RTP packets ingested */
@@ -456,6 +477,10 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 	}
 	json_object_set_new(entry, who, sub);
 	janus_mutex_lock(&room->mutex);
+	/* Phase 3a: a join running ahead of the visibility feed is a re-derive-pending
+	 * event; count it so query_session shows how far the roster leads the feed. */
+	if(join)
+		room->vis_joins_since_snapshot++;
 	GHashTableIter iter;
 	gpointer value;
 	g_hash_table_iter_init(&iter, room->participants);
@@ -463,6 +488,11 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 		janus_slvoice_session *p = value;
 		if(p->display != NULL && !strcmp(p->display, who))
 			continue;   /* skip the subject itself */
+		/* Phase 3a roster omission: a listener that excludes the subject gets no
+		 * join/leave dot for it — same set that culls its audio (single source of
+		 * truth). The apply path emits the corrective join/leave on transitions. */
+		if(slv_roster_excludes(p->excluded, who))
+			continue;
 		janus_slvoice_relay_json(p, entry);
 	}
 	janus_mutex_unlock(&room->mutex);
@@ -475,6 +505,8 @@ static void janus_slvoice_session_free(const janus_refcount *ref) {
 	janus_slvoice_session *session = janus_refcount_containerof(ref, janus_slvoice_session, ref);
 	JANUS_LOG(LOG_VERB, "[%s] Freeing session %p\n", JANUS_SLVOICE_PACKAGE, session);
 	janus_slvoice_media_free_locked(session);   /* belt-and-suspenders (already freed at leave) */
+	if(session->excluded != NULL)
+		g_hash_table_destroy(session->excluded);
 	g_free(session->display);
 	g_free(session);
 }
@@ -693,6 +725,7 @@ void janus_slvoice_create_session(janus_plugin_session *handle, int *error) {
 	session->handle = handle;
 	session->opus_pt = -1;
 	session->created_ts = janus_get_monotonic_time();
+	session->excluded = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	janus_mutex_init(&session->mutex);
 	janus_refcount_init(&session->ref, janus_slvoice_session_free);
 	handle->plugin_handle = session;
@@ -772,6 +805,8 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "echo_active", g_atomic_int_get(&session->echo_active) ? json_true() : json_false());
 	json_object_set_new(info, "last_rms", json_real(session->last_rms));
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
+	json_object_set_new(info, "excluded_entries",
+		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
 	json_object_set_new(info, "data_msgs_received", json_integer((json_int_t)session->data_msgs_received));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
@@ -811,8 +846,22 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(hist, "last_ms", json_real(qroom->tick_last_ms));
 		json_object_set_new(hist, "max_ms", json_real(qroom->tick_max_ms));
 		json_object_set_new(hist, "tick_seq", json_integer((json_int_t)qroom->tick_seq));
+		/* Phase 3a visibility feed state (the admin-API verification surface).
+		 * epoch = batches applied; joins_since_snapshot = roster-ahead-of-feed
+		 * count (reset by each REPLACE snapshot). */
+		json_t *vis = json_object();
+		json_object_set_new(vis, "epoch", json_integer((json_int_t)qroom->vis_epoch));
+		json_object_set_new(vis, "have_batch", qroom->vis_have_batch ? json_true() : json_false());
+		if(qroom->vis_have_batch) {
+			json_object_set_new(vis, "last_mode", json_string(slv_vis_op_str(qroom->vis_last_mode)));
+			gint64 age_ms = (janus_get_monotonic_time() - qroom->vis_last_ts) / 1000;
+			json_object_set_new(vis, "last_batch_age_ms", json_integer((json_int_t)age_ms));
+		}
+		json_object_set_new(vis, "joins_since_snapshot",
+			json_integer((json_int_t)qroom->vis_joins_since_snapshot));
 		janus_mutex_unlock(&qroom->mutex);
 		json_object_set_new(info, "tick_histogram", hist);
+		json_object_set_new(info, "visibility", vis);
 		janus_refcount_decrease(&qroom->ref);
 	}
 	return info;
@@ -852,6 +901,138 @@ struct janus_plugin_result *janus_slvoice_handle_message(janus_plugin_session *h
 	return janus_plugin_result_new(JANUS_PLUGIN_OK_WAIT, NULL, NULL);
 }
 
+/* Build {who:{"j":{"p":true}}} (join) or {who:{"l":true}} (leave) and relay it to
+ * one listener — the per-(listener,source) transition emit used when a visibility
+ * change flips an already-present pair. Caller must NOT hold L->mutex (relay needs
+ * no session lock; matches janus_slvoice_push_presence). */
+static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const char *who, gboolean join) {
+	json_t *entry = json_object();
+	json_t *sub = json_object();
+	if(join) {
+		json_t *jd = json_object();
+		json_object_set_new(jd, "p", json_true());
+		json_object_set_new(sub, "j", jd);
+	} else {
+		json_object_set_new(sub, "l", json_true());
+	}
+	json_object_set_new(entry, who, sub);
+	janus_slvoice_relay_json(L, entry);
+	json_decref(entry);
+}
+
+/* Apply one parsed visibility batch (peer_ctl_batch, §3.3) to its room.
+ *
+ * ATOMICITY — SHARED LOCK (explicitly NOT a staged double-buffer + tick-boundary
+ * swap): the whole batch is applied while holding room->mutex, the SAME lock
+ * janus_slvoice_room_tick holds for its ENTIRE pass. So a batch lands wholly
+ * between two mix ticks and is never observed half-applied across a pass. A staged
+ * buffer + swap was considered and rejected: at one batch per ~250ms feeder tick
+ * vs 20ms mix ticks the lock is held sub-millisecond and contention is negligible,
+ * and the shared lock keeps every reader — tick, sender, presence — on one
+ * discipline (room->mutex -> session->mutex). Per-listener mutation also takes
+ * L->mutex so query_session (session->mutex) reads a consistent excluded size. */
+static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
+	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb->room);
+	if(room == NULL) {
+		JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch for unknown room %"PRId64" (op=%s); dropped\n",
+			JANUS_SLVOICE_PACKAGE, (int64_t)vb->room, slv_vis_op_str(vb->op));
+		return;
+	}
+	janus_mutex_lock(&room->mutex);
+
+	/* Index the room once: display -> session (listener lookup) doubling as the
+	 * present-set for transition gating (emit join/leave only for present sources). */
+	GHashTable *by_display = g_hash_table_new(g_str_hash, g_str_equal);
+	GHashTableIter it;
+	gpointer v;
+	g_hash_table_iter_init(&it, room->participants);
+	while(g_hash_table_iter_next(&it, NULL, &v)) {
+		janus_slvoice_session *p = v;
+		if(p->display != NULL)
+			g_hash_table_insert(by_display, p->display, p);   /* borrowed key + value */
+	}
+
+	for(int i = 0; i < vb->n_entries; i++) {
+		const slv_vis_entry *e = &vb->entries[i];
+		janus_slvoice_session *L = g_hash_table_lookup(by_display, e->listener);
+		if(L == NULL)
+			continue;   /* listener not in this room right now */
+
+		/* Transitions to emit AFTER releasing L->mutex. Bounded by set sizes; an
+		 * overflow only delays a dot flip by one sender tick (~100ms backstop). */
+		char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
+		gboolean trans_join[SLV_VIS_MAX_EXCL * 2];
+		int ntrans = 0;
+
+		janus_mutex_lock(&L->mutex);
+		if(vb->op == SLV_VIS_OP_ADD) {
+			for(int k = 0; k < e->n_excl; k++) {
+				const char *s = e->excl[k];
+				if(!g_hash_table_contains(L->excluded, s)) {
+					g_hash_table_add(L->excluded, g_strdup(s));
+					if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+						trans_join[ntrans++] = FALSE;   /* newly excluded -> leave */
+					}
+				}
+			}
+		} else if(vb->op == SLV_VIS_OP_REMOVE) {
+			for(int k = 0; k < e->n_excl; k++) {
+				const char *s = e->excl[k];
+				if(g_hash_table_remove(L->excluded, s)) {
+					if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+						trans_join[ntrans++] = TRUE;   /* un-excluded -> join */
+					}
+				}
+			}
+		} else {   /* SLV_VIS_OP_REPLACE: set exactly; diff old vs new for transitions */
+			GHashTable *newset = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+			for(int k = 0; k < e->n_excl; k++)
+				g_hash_table_add(newset, g_strdup(e->excl[k]));
+			/* removed = old \ new -> join (if present) */
+			GHashTableIter oit;
+			gpointer ok;
+			g_hash_table_iter_init(&oit, L->excluded);
+			while(g_hash_table_iter_next(&oit, &ok, NULL)) {
+				const char *s = ok;
+				if(!g_hash_table_contains(newset, s)
+						&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+					g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+					trans_join[ntrans++] = TRUE;
+				}
+			}
+			/* added = new \ old -> leave (if present) */
+			for(int k = 0; k < e->n_excl; k++) {
+				const char *s = e->excl[k];
+				if(!g_hash_table_contains(L->excluded, s)
+						&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+					g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+					trans_join[ntrans++] = FALSE;
+				}
+			}
+			g_hash_table_destroy(L->excluded);
+			L->excluded = newset;
+		}
+		janus_mutex_unlock(&L->mutex);
+
+		for(int t = 0; t < ntrans; t++)
+			janus_slvoice_relay_presence_one(L, trans_uuid[t], trans_join[t]);
+	}
+
+	g_hash_table_destroy(by_display);
+
+	room->vis_epoch++;
+	room->vis_last_ts = janus_get_monotonic_time();
+	room->vis_last_mode = vb->op;
+	room->vis_have_batch = TRUE;
+	if(vb->op == SLV_VIS_OP_REPLACE)
+		room->vis_joins_since_snapshot = 0;   /* a fresh snapshot re-derives the roster */
+
+	janus_mutex_unlock(&room->mutex);
+	janus_refcount_decrease(&room->ref);
+}
+
 json_t *janus_slvoice_handle_admin_message(json_t *message) {
 	const char *request_text = NULL;
 	if(message != NULL && json_is_object(message)) {
@@ -859,9 +1040,41 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 		if(json_is_string(request))
 			request_text = json_string_value(request);
 	}
+	json_t *response = json_object();
+
+	if(request_text != NULL && !strcmp(request_text, "peer_ctl_batch")) {
+		/* Server-to-server visibility feed. Parse via the dependency-free visbatch
+		 * module (unit-tested), then apply atomically. Malformed/unknown per-listener
+		 * or per-source items were already skipped-and-counted by the parser; a batch
+		 * missing op/room is rejected whole. Never affects a viewer session. */
+		char *buf = json_dumps(message, JSON_COMPACT);
+		slv_visbatch vb;
+		slv_visbatch_status st = slv_visbatch_parse(buf, buf ? strlen(buf) : 0, &vb);
+		if(buf != NULL)
+			free(buf);
+		if(st == SLV_VISBATCH_OK) {
+			janus_slvoice_apply_visbatch(&vb);
+			json_object_set_new(response, "slvoice", json_string("applied"));
+			json_object_set_new(response, "op", json_string(slv_vis_op_str(vb.op)));
+			json_object_set_new(response, "room", json_integer((json_int_t)vb.room));
+			json_object_set_new(response, "entries", json_integer(vb.n_entries));
+			json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
+		} else if(st == SLV_VISBATCH_EMPTY) {
+			json_object_set_new(response, "slvoice", json_string("empty"));
+			json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
+		} else {
+			JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch rejected: %s\n", JANUS_SLVOICE_PACKAGE,
+				st == SLV_VISBATCH_TOOBIG ? "too_big" : "malformed");
+			json_object_set_new(response, "slvoice", json_string("error"));
+			json_object_set_new(response, "reason",
+				json_string(st == SLV_VISBATCH_TOOBIG ? "too_big" : "malformed"));
+		}
+		slv_visbatch_free(&vb);
+		return response;
+	}
+
 	JANUS_LOG(LOG_INFO, "[%s] handle_admin_message: request=\"%s\"\n",
 		JANUS_SLVOICE_PACKAGE, request_text ? request_text : "(none)");
-	json_t *response = json_object();
 	json_object_set_new(response, "slvoice", json_string("ack"));
 	return response;
 }
@@ -1180,6 +1393,14 @@ static void *janus_slvoice_handler(void *data) {
 				janus_slvoice_session *p = value;
 				if(p == session)
 					continue;
+				/* Phase 3a: the initial roster (join-backlog) a newly-connecting
+				 * listener receives is filtered by the SAME exclusion predicate the
+				 * live join/leave, power batch, and mix cull use — a speaker this
+				 * listener excludes is omitted from its initial roster, exactly as a
+				 * live join would be suppressed. (Read under room->mutex, which we
+				 * hold; the batch apply also takes room->mutex, so no race.) */
+				if(slv_roster_excludes(session->excluded, p->display))
+					continue;
 				json_array_append_new(list, janus_slvoice_participant_summary(p));
 			}
 			janus_mutex_unlock(&room->mutex);
@@ -1385,22 +1606,49 @@ static void *janus_slvoice_sender(void *data) {
 				json_object_set_new(pv, "v", g_atomic_int_get(&p->vad) ? json_true() : json_false());
 				json_object_set_new(batch, p->display, pv);
 			}
-			char *text = json_dumps(batch, JSON_COMPACT);
-			if(text != NULL) {
-				size_t len = strlen(text);
-				if(len < 65536) {
-					g_hash_table_iter_init(&piter, room->participants);
-					while(g_hash_table_iter_next(&piter, NULL, &pvalue)) {
-						janus_slvoice_session *p = pvalue;
-						if(!g_atomic_int_get(&p->dc_open))
-							continue;
+			/* Send per listener. A listener with NO exclusions gets the shared full
+			 * batch (fast path — the common case). A listener with exclusions gets a
+			 * filtered copy omitting excluded sources' {p,v} dots — roster omission
+			 * from the SAME set that culls its audio (single source of truth §1).
+			 * p->excluded is read under room->mutex, which we hold here; the batch
+			 * apply also takes room->mutex, so the two never overlap. */
+			char *full_text = json_dumps(batch, JSON_COMPACT);
+			size_t full_len = full_text ? strlen(full_text) : 0;
+			g_hash_table_iter_init(&piter, room->participants);
+			while(g_hash_table_iter_next(&piter, NULL, &pvalue)) {
+				janus_slvoice_session *p = pvalue;
+				if(!g_atomic_int_get(&p->dc_open))
+					continue;
+				if(p->excluded == NULL || g_hash_table_size(p->excluded) == 0) {
+					if(full_text != NULL && full_len < 65536) {
 						janus_plugin_data d = { .label = NULL, .protocol = NULL, .binary = FALSE,
-							.buffer = text, .length = (uint16_t)len };
+							.buffer = full_text, .length = (uint16_t)full_len };
 						gateway->relay_data(p->handle, &d);
 					}
+					continue;
 				}
-				free(text);
+				json_t *filt = json_object();
+				const char *bk;
+				json_t *bv;
+				json_object_foreach(batch, bk, bv) {
+					if(slv_roster_excludes(p->excluded, bk))
+						continue;   /* omit an excluded source's dot for this listener */
+					json_object_set(filt, bk, bv);   /* increfs bv */
+				}
+				char *ftext = json_dumps(filt, JSON_COMPACT);
+				if(ftext != NULL) {
+					size_t flen = strlen(ftext);
+					if(flen < 65536) {
+						janus_plugin_data d = { .label = NULL, .protocol = NULL, .binary = FALSE,
+							.buffer = ftext, .length = (uint16_t)flen };
+						gateway->relay_data(p->handle, &d);
+					}
+					free(ftext);
+				}
+				json_decref(filt);
 			}
+			if(full_text != NULL)
+				free(full_text);
 			json_decref(batch);
 			janus_mutex_unlock(&room->mutex);
 		}
@@ -1754,6 +2002,12 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 					break;
 				}
 			}
+			/* Phase 3a visibility: a sim-excluded source contributes nothing to
+			 * this listener's mix. Culled here (O(1) set lookup) BEFORE any Phase-3b
+			 * spatial DSP, alongside the per-source mute and the VAD/DTX cull. Reads
+			 * the SAME set the roster/presence path uses (single source of truth). */
+			if(slv_roster_excludes(s->excluded, disp))
+				mutes[j] = 1;
 		}
 
 		float frame[SLV_FRAME_TOTAL];

@@ -8,8 +8,11 @@
 *.d
 src/*.o
 janus_slvoice.so
-# compiled unit-test binary (built by `make test`)
+# compiled unit-test binaries (built by `make test`)
 tests/test_sldata
+tests/test_mix
+tests/test_visbatch
+tests/test_roster
 
 # --- Secrets / local config (NEVER commit; use env.sample as the template) ---
 .env
