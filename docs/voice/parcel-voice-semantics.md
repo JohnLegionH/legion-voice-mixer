@@ -555,3 +555,124 @@ required. OPEN rows are the actionable gaps.
 - WebRTC provisioning has two `ProvisionVoiceAccountRequest` overloads; the 3-arg one throws
   `NotImplementedException` (`WebRtcJanusService.cs:364`). Confirm the live service path
   before depending on a specific overload (§3.3).
+
+---
+
+## ADDENDUM — Re-baseline verification (2026-08-16)
+
+**Scope.** This addendum records a re-verification of the citations above against the current
+tree; it does **not** rewrite the body. The body's `path:line` citations remain relative to the
+original baseline commit `0bdeb0bf08`.
+
+| | |
+|---|---|
+| Verified against | `1696a6ecff` (`Voice: coalesce concurrent room creation…`) |
+| Branch | `fix/room-selection-race` |
+| Working tree | clean at survey time |
+| Commits since baseline | `be94487b1b` (session-id parse), `1fb63713c5` (PluginName), `dc252686e0` (provision guard), `b3c680d625` (stun-servers), `1696a6ecff` (room-selection race) |
+
+**Semantic result: every rule in §1–§4 still holds.** All *sim-side* files cited (`LandObject.cs`,
+`ILandObject.cs`, `LandData.cs`, `LandManagementModule.cs`, `ScenePresence.cs`, `SceneGraph.cs`,
+`Scene.cs`, `EventManager.cs`, `EstateSettings.cs`) and the Vivox/FreeSwitch modules are
+**untouched** by the five commits — their line numbers are unchanged. Only the four WebRTC/Janus
+files moved, and only line numbers drifted; the logic (gates, hashing, flat symmetric membership,
+the estate-channel ban bypass) is unchanged. Two items need a substantive note (C, D below).
+
+### A. Line-number drift — `WebRtcVoiceRegionModule.cs` (`b3c680d625` inserted ≈+15 lines above the gate)
+
+| Cited in doc | Was | Now |
+|---|---|---|
+| §3.1 AllowVoice estate gate | `:233` | `:248` |
+| §1.3/§1.4/§3.1 parcel `AllowVoiceChat` gate (`TaxFree` read) | `:274` | `:289` |
+| §1.3/§3.1/§3.2 `UseEstateVoiceChan` test | `:282` | `:297` |
+| §3.1 `map.Remove("parcel_local_id")` (estate branch) | `:282`–`:284` | `:299` |
+| §3.1/§3.2 `else if` ban/restrict (`IsRestrictedFromLand`/`IsBannedFromLand`) | `:286`–`:293` | `:301`–`:308` |
+| §3.1 `GetLandObject(parcelID)` (client-supplied parcel) | `:256`–`:258` | `:273` |
+| §3.1 `//do fully not trust viewers voice parcel requests` | `:230` | `:245` |
+| §3.3 3-arg `ProvisionVoiceAccountRequest(map, agentID, RegionID)` call | `:299` | `:314` |
+
+### B. Line-number drift — Janus files
+
+`JanusAudioBridge.cs` (`1fb6371` + `1696a6e`, heavy):
+
+| Cited | Was | Now |
+|---|---|---|
+| §3.1/§3.3 `CalcRoomNumber` | `:141`–`:167` | `:194`–`:220` |
+| §3.1 `REGION_ROOM_ID = -999` | `:134` | `:175` |
+| §3.1 `Math.Abs(hash)` | `:165` | `:218` |
+| §3.3 `SelectRoom` | `:168`–`:181` | `:221`–`:238` |
+| §3.3 `CreateRoom` (486-reuse retained) | `:80`–`:116` | `:92`–`:155` |
+| §3.3 `DestroyRoom` | `:118`–`:131` | `:157` |
+
+`JanusMessages.cs` (`be94487`): §3.2 `AudioBridgeJoinRoomReq` `:524`–`:533` → `:533`–`:541`
+(still only `request`/`room`/`display`); §3.2 room-create params `:492`–`:511` →
+`AudioBridgeCreateRoomReq` `:506`–`:515` (`is_private=false`, `spatial_audio`, `sampling_rate`,
+`denoise`, `record` all present; a `"permanent":false` field was added — no allow/deny list).
+
+`WebRtcJanusService.cs` (`1fb6371` + `1696a6e`): §3.3 4-arg `ViewerSession` overload `:191` →
+`:200` (sync wrapper; async body `ProvisionVoiceAccountRequestBAD` at `:205`); §3.3 3-arg
+`NotImplementedException` `:364`–`:367` → `:377`–`:379`; §3.1/§3.3 `REGION_ROOM_ID` default
+`:227` → `:236`. The §3.3 ambiguity flag still stands verbatim.
+
+Note: `dc252686e0` (provision guard) touched `WebRtcVoiceServiceModule.cs`, which the body does
+**not** cite. It changes create-vs-lookup handling of a zero/empty `viewer_session`; it does **not**
+touch the parcel/estate/ban gate. No effect on §1–§4.
+
+### C. §3.3 room-race description is superseded (behaviour changed, not just line numbers)
+
+The body's §3.3 line "*a create race is resolved by destroying the loser and adopting the existing
+room (:186–210)*" describes the **pre-`1696a6ecff`** logic. Current behaviour: same-process racers
+are coalesced through `_roomCreateLocks`/`_knownRooms` (`JanusAudioBridge.cs:187`–`:188`,
+`SelectRoomCoalesced` `:240`) so N racers collapse to one Janus `create`; the cross-process race is
+covered by `CreateWithRecheck` re-attempting and reusing on Janus error 486 (`:104`–`:114`,
+`:130`); stale hints are cleared via `ForgetRoom`. The room *identity* rule (deterministic
+`CalcRoomNumber` hash; `-999` for the estate channel) is unchanged, so no §4 requirement is
+affected — this note exists only so a reader doesn't look for the old destroy-the-loser path.
+
+### D. Correction to #12 — an estate-change event DOES exist (contradicts the OPEN-items claim)
+
+Row 12 / the OPEN-items list states *"no granular event found … a voice cache has nothing to
+subscribe to."* **The second clause is wrong.** `IEstateModule.OnEstateInfoChange`
+(`Source/OpenSim.Region.Framework/Interfaces/IEstateModule.cs:41`, delegate
+`ChangeDelegate(UUID regionID)` at `:35`) exists and fires on estate **access deltas — including
+bans and managers** — from `ExecDeltaRequests` (`EstateManagementModule.cs:871`), as well as
+estate owner/name/region-link/settings changes (`:370`, `:414`, `:443`, `:2221`, `:2250`). A voice
+cache *can* subscribe today via `scene.RequestModuleInterface<IEstateModule>()`.
+
+What is genuinely missing is **granularity**: the delegate carries only the region UUID, not what
+changed, so a subscriber must re-read `RegionInfo.EstateSettings` and diff. The `AllowVoice`
+estate-flags path is **confirmed** to reach a fire site on both viewer transports — legacy UDP
+`HandleEstateChangeInfo` sets `AllowVoice` (`EstateManagementModule.cs:2205`/`:2207`) → store
+`:2214` → `TriggerEstateInfoChange()` `:2221`; CAP `handleEstateChangeInfoCap` sets it (`:2239`) →
+store `:2246` → `TriggerEstateInfoChange()` `:2250`. So #12 should read: *"a coarse region-scoped
+event exists (`OnEstateInfoChange`) and it does fire for voice-enable, bans, and managers; the gap
+is a payload-carrying event."* This is the correction that reshapes the #12 design in
+`mixer-feed-protocol.md`.
+
+### E. Second structural defect — under `TaxFree` the provision gate consults NO per-parcel voice/ban/restrict deny
+
+This addendum records the second reportable finding explicitly (§1.4 and §1.1 already carry the raw
+material; this spotlights it). Estate **`TaxFree`** (the `!AllowAccessOverride` misnomer, §1.4)
+voids every per-parcel *deny* in the WebRTC provision path:
+
+- **Parcel voice-disable is overridden.** `WebRtcVoiceRegionModule.cs:289` (was `:274` at baseline)
+  gates the parcel-voice check behind `!EstateSettings.TaxFree`:
+  `if (!TaxFree && (land.Flags & ParcelFlags.AllowVoiceChat) == 0) → deny`. When `TaxFree` is set
+  the clause is false, so a parcel that has **explicitly cleared `AllowVoiceChat`** (voice off) is
+  still provisioned voice. The parcel owner's deny-voice is never consulted.
+- **Parcel ban/restrict self-nullifies.** Even on the per-parcel channel where the ban/restrict
+  check *is* reached (`:301`), `IsBannedFromLand` / `IsRestrictedFromLand` **return `false` under
+  `TaxFree`** via their common exemption preamble (`LandObject.cs:724`, `:842`; §1.1). So the `:301`
+  check is a no-op whenever `TaxFree` is set.
+- **Net:** under estate `TaxFree`, anyone who can be present in the estate is provisioned voice
+  regardless of per-parcel voice setting, parcel ban, or parcel restriction.
+
+**Scope / honesty:** this is the **shared cross-module contract** — the identical enable gate and
+the same `TaxFree` preamble govern Vivox and FreeSwitch too (§3.1), so it is a *design consequence
+of the `TaxFree` misnomer*, **not** a WebRTC-specific regression. It is reportable because (a) the
+flag's name hides that it silently disables all per-parcel voice/ban control estate-wide, and
+(b) it is **distinct from #13**: #13 bypasses the `:301` check on the *estate/shared channel*
+irrespective of `TaxFree`, whereas this voids the deny even on *per-parcel channels*, specifically
+when `TaxFree` is set. A per-listener visibility matrix (see `mixer-feed-protocol.md`) that derives
+from the sim predicates would inherit the `TaxFree` exemption *by construction* — so honoring or
+overriding it becomes an explicit policy choice rather than a silent gate.
