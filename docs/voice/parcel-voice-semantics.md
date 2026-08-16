@@ -699,3 +699,57 @@ implemented in `Addons/os-webrtc-janus/Visibility/` (`VisibilityRules`) with tes
   parcel ban that the visual/access layer does not); it was chosen over §E's parity default per
   explicit decision. The parcel voice-**enable** `TaxFree` override (§E first bullet) is **not**
   changed — only the ban/restrict void. (Decision 2b.)
+
+### G. Neighbour-region voice rooms — a semantics gap (child-agent room, 2026-08-16)
+
+Recorded here because an in-world baseline capture (Ebony + Transylvania, two avatars) surfaced a
+case §1–§4 does **not** model. Nothing above is amended; this documents where the room model and
+reality diverge, and pins the open decision.
+
+**The finding.** A single avatar occupies **one voice room per adjacent region**, not one room:
+
+- The **viewer** establishes one WebRTC voice connection per neighbouring region *by design* —
+  `LLWebRTCVoiceClient::updateNeighboringRegions` (`indra/newview/llvoicewebrtc.cpp:665`), comment
+  *"Estate voice requires connection to neighboring regions"* (`:674`), with a Firestorm opt-out
+  `FSDisableNeighbourRegionConnections` (`:681`, off by default). It **renders** neighbour audio:
+  `mPrimary` gates only the **microphone** (`setMute(mMuted || !mPrimary)` at `:3116`, which acts on
+  the peer connection's **senders** — `indra/llwebrtc/llwebrtc.cpp:1342`, `track->set_enabled`), and
+  **not** the receive path (`setReceiveVolume(mSpeakerVolume)` is set for every spatial connection at
+  `:3065`, acting on the **receivers** — `llwebrtc.cpp:1388`). So neighbour-room audio is played, not
+  suppressed; the participant-roster dedup for non-primary servers (`:3289`–`:3294`, `:3319`) is
+  metadata only, not the audio path.
+- The **sim** does not gate provisioning on child vs root: `ProvisionVoiceAccountRequest` fetches the
+  presence but never checks `sp.IsChildAgent` (`Addons/os-webrtc-janus/WebRtcVoiceRegionModule.cs:299`).
+  So a **child agent** in the neighbour region provisions a **distinct room** there
+  (`CalcRoomNumber(neighbourRegionId, "local", -999)` — a different room from the root region's).
+
+**Consequence — the §3.1 room model does not match reality.** §3.1 (`:444`–`:446`) frames voice as
+"one region/estate channel keyed on the region … all parcels that resolve to the estate channel
+share a single room," and §2.3 (`:339`) frames cross-region voice as *children enumerated into this
+region's matrix*. Both describe a **single** estate room per region with children folded in. In fact
+an avatar near a region border is a live participant in **each adjacent region's own room**, and
+**each region's feeder governs only its own room** (one `VoiceVisibilityService` per `Scene`, keyed on
+that Scene's `RegionID`). The "fold children in" mental model is intra-region; it says nothing about
+the second room the child simultaneously joins in the neighbour.
+
+**OPEN QUESTION (UNRESOLVED — pending SL verification).** When avatar X is banned from a parcel in
+region **A**, and X and Y *also* share region **B**'s neighbour room (both present there as
+root/child), should **B**'s matrix exclude the X–Y pair?
+
+- **Reading 1 — ban is land-scoped.** B's rules are B's. A parcel ban in A has no jurisdiction over
+  B's parcels; B's matrix should exclude the pair only if B's own land/estate predicates say so.
+  Under the **current** design this is what happens — each region's feeder derives from its own land,
+  and a neighbour room is not adjusted for another region's bans.
+- **Reading 2 — ban intent is to silence the pair.** The operator banning X intends X and Y not to
+  hear each other; a neighbour room that carries their audio un-excluded is a bypass of that intent,
+  regardless of which land the room is keyed to.
+
+This is left **UNRESOLVED pending in-world SL verification**, the same treatment as the
+symmetric-`SeeAVs` decision in §F: record both readings, change no normative rule, and isolate the
+choice for when SL behaviour is confirmed.
+
+**Enforcement requirement that follows (independent of the open question).** Whatever the ban answer,
+the feeder/sender must be **enabled in every loaded region**. Because each region governs only its own
+room, a region whose emission is disabled leaves its room — including any neighbour room an adjacent
+region's avatars occupy — as an **unenforced path**: exclusions computed elsewhere never reach it.
+Per-region emission is therefore a coverage requirement, not a per-region convenience.
