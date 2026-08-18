@@ -847,3 +847,171 @@ body under a revision.
 - **`Ok` ≠ applied.** An unknown room returns `{"slvoice":"applied"}` with `entries` = the *parsed*
   count. Application is confirmable only via `excluded_entries` on a live handle whose room matches
   `CalcRoomNumber`.
+
+### Provenance caveat added 2026-08-18 — §H and §I evidence is not attributable to a commit
+
+The `tick-built` / `sendresult` / `exclPairs` telemetry cited in §H and §I does not
+exist in any commit. A search of the full history (`git log -S`) finds those strings
+nowhere in `Addons/os-webrtc-janus/`; they exist only on the local, never-merged
+`diag/visibility-tick-heartbeat` branch. The region server process that produced the
+15:35 and 15:53 readings started at 15:25:38 and was running a locally-instrumented
+build whose source was never committed.
+
+The Commit row above (`6935d941f8`) is therefore **wrong for this evidence**. Those
+binaries were written at 17:39:39 and did not go live until the 17:41:07 restart —
+after both readings. The build that produced §H and §I cannot be identified: its dlls
+were overwritten by the 17:39 rebuild, and no per-plugin version line is logged.
+
+Consequences, per section:
+
+- **§H** — the feeder-side chain (`seq`, `exclPairs`, `path=delta op=add`) is
+  unattributable. The mixer-side observation (`excluded_entries=1` on both handles,
+  `last_mode=add`, room `226001844`) and the by-ear result do not depend on the
+  instrumented build and stand as observations, but not as observations *of a known
+  commit*. Re-verified against a known commit on 2026-08-18 — see §K.
+- **§I** — the mixer-side evidence (`frames_mixed`/`rtp_out` diverging between two
+  listeners of one talker) is independent of the instrumented build and stands. The
+  `exclPairs=4` and per-listener `EXCL` 1/2/1 figures are feeder-side and are
+  unattributable. **The third-avatar culling test has not been re-run against a known
+  commit.**
+
+Nothing in §H–§J is deleted. This caveat records what the evidence can and cannot
+support.
+
+---
+
+## ADDENDUM 3 — Phase 3a re-verification and a mixer defect (2026-08-18)
+
+**Scope.** Re-verifies §H against a known commit, records a neighbour-room data point
+that §G's open question can actually use, and documents a mixer-side defect found in
+the process. Append-only; no normative rule is changed and §G remains unresolved.
+
+| | |
+|---|---|
+| Tree | `D:\tranquillity-develop` |
+| Branch | `feature/voice-visibility-matrix` |
+| Commit | `3b0e03bcd1` |
+| Build configuration | **Debug** — load-bearing; the `Debug.Assert` tick-thread guard (`VoiceStateFeeder.cs:112`) compiles out in Release |
+| Deployed artifact | `WebRtcVoiceRegionModule.dll`, SHA256 `016FE179…`, built 21:50:20, deployed 21:50:20, region server restart 21:54:14 (2026-08-17) |
+| Mixer | `legion-voice-mixer-janus-1`, plugin 0.7.0 |
+| Region | Ebony `c44606b1-43e1-45fb-8ae8-201545dc2f6a`, estate room `226001844` |
+
+### K. Symmetric ban enforcement re-verified against a known commit (2026-08-18)
+
+**Conditions.** Estate `TaxFree = 0` and Ebony parcel `LocalLandID 2` carries
+`UseBanList` (`LandFlags & 1024`), both confirmed by direct query before the run — the
+two preconditions that would otherwise void the test via the §1.1 exemption preamble.
+Ban entry names Aleric Fenwood only; Legion Hienrichs is estate owner and ban-exempt.
+Stock Firestorm both sides.
+
+**Enforced state.** Room `226001844`, exactly two handles, one per avatar, both
+`ice_state: connected`:
+
+| Handle | Display | `excluded_entries` | epoch | `last_mode` |
+|---|---|---|---|---|
+| `6155889928500904` | Legion `4fbdfd2a…` | **1** | 33 | `replace` |
+| `5851260946832861` | Aleric `4dc144cb…` | **1** | 33 | `replace` |
+
+**By ear:** neither avatar could hear the other. Microphone waveform active on both,
+confirming capture and transmission — the silence is enforcement, not a dead audio
+path.
+
+**Removal as a live delta.** The ban entry was removed and the same two handles
+re-read:
+
+| Handle | `excluded_entries` | epoch | `last_mode` |
+|---|---|---|---|
+| `6155889928500904` | **0** | 34 | `remove` |
+| `5851260946832861` | **0** | 34 | `remove` |
+
+`last_mode: remove` at an advanced epoch establishes a live delta on a running room.
+Legion could hear Aleric again after removal. The reverse direction was **not**
+confirmed by ear: Legion's viewer lost its microphone (greyed, receive path intact) at
+this point and re-provisioned, so audibility of Legion by Aleric post-removal is
+unrecorded.
+
+**What this establishes and what it does not.** Symmetric enforcement is confirmed
+against a known commit, from a snapshot (`replace`, epoch 33) and released as a live
+delta (`remove`, epoch 34). **The `add` delta path was not re-verified** — the session
+ended before the ban was re-applied. §H's `add` observation remains the only one, and
+it is unattributable per the caveat above.
+
+### L. §G neighbour-room data point — question REMAINS OPEN (2026-08-18)
+
+Throughout §K's enforced state, both avatars simultaneously held handles in
+Transylvania's room `1578726032` — Aleric `7842546127144060`, Legion
+`7796732499225250` — and **both read `excluded_entries: 0` at epoch 32**, unchanged
+across Ebony's transitions to epochs 33 and 34.
+
+This is a usable data point on §G, unlike the 2026-08-17 reading (which was discarded
+because the second avatar held no handle in the neighbour room). Both parties to the
+excluded pair were present in the neighbour room, and the neighbour room carried no
+exclusion. That is **Reading 1** — ban is land-scoped — observed in the current
+implementation.
+
+It is **not** a resolution. §G asks what the semantics *should* be, and that remains
+UNRESOLVED pending in-world SL verification. This records what the implementation
+currently does, which was previously undocumented.
+
+### M. Mixer resolves exclusions by display string and silently drops one participant on collision
+
+**Observed 2026-08-18, before the §K run.** Enforcement failed in one direction: the
+banned avatar could not hear the talker, the talker heard the banned avatar normally.
+
+Room `226001844` held **three** handles for two avatars:
+
+| Handle | Display | ICE | `rtp_in_count` | `excluded_entries` |
+|---|---|---|---|---|
+| `2992794682240457` | Aleric | connected | 1142 | 1 |
+| `1984643388050503` | Legion | **disconnected** | 0 | **1** |
+| `3957655785919019` | Legion | connected | 0 | **0** |
+
+All three at epoch 24 from one snapshot: the exclusion was computed, delivered, and
+applied — to Legion's orphaned handle rather than his live one. The orphan survived a
+full avatar relog.
+
+**Mechanism.** `janus_slvoice_apply_visbatch` indexes the room into a temporary
+`by_display` table keyed on `p->display`
+(`D:\legion-voice-mixer\src\janus_slvoice.c:945`–`:953`) and resolves each entry's
+listener against it (`:957`). `display` is the avatar UUID string (`:262`), which is
+**not** the participant identity — `room->participants` is keyed on `user_id` (`:219`,
+`:260`). The exclusion path resolves through a value not guaranteed unique within a
+room. `g_hash_table_insert` replaces on duplicate key, so two sessions sharing a
+`display` collapse to one; the other silently receives nothing. Which survives is last
+insert wins in GLib hash-iteration order, **which GLib does not define**.
+
+**Why it is silent.** The overwrite during index build (`:952`) emits no log, and the
+surviving entry is applied and counted normally — `excluded_entries` advances on a
+handle and every counter reads healthy. Nothing distinguishes "applied to the right
+handle" from "applied to the wrong one."
+
+**This is the failure mode §H named as its control:** *a pipeline that computed
+symmetric pairs but applied only one direction at the mixer would have shown
+`excluded_entries=1` on one handle and `0` on the other.* §H's run had no duplicate
+handle present; this run did. It is the realization of that case, not a contradiction
+of §H.
+
+**Confirmed by elimination.** Clearing mixer session state so each avatar held exactly
+one handle restored correct symmetric enforcement (§K) with no change to the sim, the
+feeder, or the matrix. The matrix was correct throughout; the mixer applied its output
+to the wrong participant.
+
+**Origin of the duplicate — cross-reference only.** The orphaned handle is consistent
+with the unwired `OnRemovePresence` teardown recorded in `KnownDefects.md`, which
+leaves sim-side presence removals without a corresponding `LeaveRoom`. That defect is
+C#-side and **was not confirmed against mixer code**; nothing in the mixer repository
+corroborates the origin. Treat as a pointer, not a finding.
+
+**Suggested first step.** Decide whether the wire format should carry participant
+identity rather than display, or whether an entry should apply to **all** participants
+matching a display. At minimum, detect the collision at `janus_slvoice.c:952` and log
+it — a silent overwrite in an enforcement path should never be silent.
+
+### N. Instrument note — `epoch`
+
+`epoch` on a handle's `visibility` block increments per applied batch and is the
+field that distinguishes "the feeder never recomputed" from "it recomputed and the
+result was wrong." Two uses proven on 2026-08-18: identical epochs across handles with
+differing `excluded_entries` isolated the fault to application rather than derivation
+(§M); and an unexpected jump of twelve epochs revealed repeated join/leave churn during
+a viewer re-provision that was otherwise invisible.
