@@ -875,6 +875,9 @@ Consequences, per section:
   unattributable. **The third-avatar culling test has not been re-run against a known
   commit.**
 
+  **Update 2026-08-18:** the third-avatar culling test has now been re-run against a
+  known commit, and the `EXCL` 1/2/1 distribution reproduced exactly. See §O.
+
 Nothing in §H–§J is deleted. This caveat records what the evidence can and cannot
 support.
 
@@ -895,6 +898,21 @@ the process. Append-only; no normative rule is changed and §G remains unresolve
 | Deployed artifact | `WebRtcVoiceRegionModule.dll`, SHA256 `016FE179…`, built 21:50:20, deployed 21:50:20, region server restart 21:54:14 (2026-08-17) |
 | Mixer | `legion-voice-mixer-janus-1`, plugin 0.7.0 |
 | Region | Ebony `c44606b1-43e1-45fb-8ae8-201545dc2f6a`, estate room `226001844` |
+
+**Where each claim's best evidence lives.** Sections are append-only and earlier ones
+are retained as written; this index points at the strongest evidence for each claim
+rather than the first.
+
+| Claim | Best evidence | Status |
+|---|---|---|
+| Symmetric ban enforcement | §O (`add` delta, same handles before/after) | Verified against a known commit |
+| Live delta emission | §O (`add`), §K (`remove`) | Verified |
+| Per-listener culling | §O | Verified against a known commit |
+| Parcel-ban scope (all occupants of the banning parcel) | §O (`EXCL` 1/2/1) | Verified against a known commit |
+| Parcel-transition re-derivation | §O | Observed, first record |
+| Neighbour-room behaviour under a ban | §O, §L | Observed; §G remains UNRESOLVED |
+| Mixer misapplies on duplicate display | §M | Defect, open |
+| §H, §I evidence | ADDENDUM 2 caveat | Unattributable; superseded by §O |
 
 ### K. Symmetric ban enforcement re-verified against a known commit (2026-08-18)
 
@@ -1015,3 +1033,118 @@ result was wrong." Two uses proven on 2026-08-18: identical epochs across handle
 differing `excluded_entries` isolated the fault to application rather than derivation
 (§M); and an unexpected jump of twelve epochs revealed repeated join/leave churn during
 a viewer re-provision that was otherwise invisible.
+
+### O. Full Phase 3a acceptance run against a known commit (2026-08-18)
+
+Supersedes §H and §I as the authoritative acceptance evidence, and strengthens §K by
+holding handle identity constant across the transition. Earlier sections are retained
+as written.
+
+| | |
+|---|---|
+| Tree | `D:\tranquillity-develop` |
+| Branch | `feature/voice-visibility-matrix` |
+| Commit | `8e52212b0f` |
+| Build configuration | **Debug** — load-bearing; the `Debug.Assert` tick-thread guard (`VoiceStateFeeder.cs:112`) compiles out in Release |
+| Deployed artifacts | `WebRtcVoiceRegionModule.dll` SHA256 `016FE179…` (watchdog, deployed 2026-08-17); `WebRtcJanusService.dll` SHA256 `E082CFAE…` (Shutdown serialization + Detach idempotency, deployed 2026-08-18 17:23:44) |
+| Region server boot | 2026-08-18 17:27:10, clean — three watchdog-tracked feeders, no voice ERROR/WARN |
+| Mixer | `legion-voice-mixer-janus-1`, plugin 0.7.0 |
+| Region | Ebony `c44606b1-43e1-45fb-8ae8-201545dc2f6a`, estate room `226001844` |
+
+**Preconditions verified by direct query, not assumed.** Estate `TaxFree = 0`. Parcel
+`LocalLandID 2` initially carried `UseBanList = 0` — cleared by the grid reset — and
+the run was held until adding a ban entry set it to `1024`. Without that bit
+`IsBannedFromLand` skips the scan entirely (§1.1) and the run would have produced a
+false negative.
+
+Note this viewer exposes no separate ban-list-enable control; `UseBanList` is set
+implicitly by the presence of a ban entry.
+
+#### O.1 Baseline — no ban
+
+Room `226001844`, exactly two handles, one per avatar, both `ice_state: connected`,
+no duplicate display (the §M collision condition absent):
+
+| Handle | Display | `excluded_entries` | epoch | `last_mode` |
+|---|---|---|---|---|
+| `7164843412038165` | Aleric `4dc144cb…` | 0 | 69 | `replace` |
+| `2541861752414627` | Legion `4fbdfd2a…` | 0 | 69 | `replace` |
+
+#### O.2 Ban applied — live `add` delta, symmetric
+
+Ban entry added on parcel 2 naming Aleric only. Legion is estate owner and ban-exempt.
+**The same two handle IDs**, re-read:
+
+| Handle | Display | `excluded_entries` | epoch | `last_mode` |
+|---|---|---|---|---|
+| `7164843412038165` | Aleric | **1** | **72** | **`add`** |
+| `2541861752414627` | Legion | **1** | **72** | **`add`** |
+
+**By ear:** neither avatar could hear the other.
+
+`last_mode: add` at an advanced epoch on a running room establishes a live delta, not
+a bootstrap snapshot. Because the handle IDs are unchanged from O.1, this is a genuine
+before-and-after pair on identical sessions rather than a comparison across
+reconnects — the evidential gap in §K.
+
+#### O.3 Third avatar, off the banning parcel — per-listener culling
+
+Truly Bazar (`a7d2ff2e…`) joined Ebony on parcel 1, unbanned. Legion talking:
+
+| Display | `rtp_in` | `rtp_out` | `frames_mixed` | `excluded_entries` |
+|---|---|---|---|---|
+| Aleric | 367 | 0 | 0 | 1 |
+| Legion | 829 | 0 | 0 | 1 |
+| Truly | 0 | **109** | **109** | 0 |
+
+One room, one talker set, opposite outcomes per listener. Aleric transmits 367 packets
+and receives nothing; Truly receives 109 mixed frames. This is per-listener culling,
+and it rules out the room having gone silent.
+
+#### O.4 Third avatar moved onto the banning parcel — scope and live transition
+
+Truly walked onto parcel 2, standing with Legion. Legion talking:
+
+| Display | `rtp_in` | `rtp_out` | `frames_mixed` | `excluded_entries` |
+|---|---|---|---|---|
+| Aleric | 745 | 0 | 0 | **2** |
+| Legion | 1049 | 39 | 39 | **1** |
+| Truly | 122 | 158 | 158 | **1** |
+
+`EXCL` 1/2/1 summing to 4 — two unordered excluded pairs,
+`{Legion↔Aleric, Truly↔Aleric}`. Aleric is excluded from **both** occupants of the
+banning parcel; Legion and Truly are excluded only from Aleric and hear each other
+normally.
+
+**By ear, all three directions:** Truly hears Legion; Truly and Aleric are mutually
+silent; Legion and Aleric are mutually silent.
+
+This verifies §I's observed parcel-ban scope against a known commit, and reproduces the
+figures §I recorded from the unattributable instrumented build exactly — retroactively
+corroborating that reading rather than merely replacing it.
+
+**Live parcel-transition re-derivation — first record.** Truly's `excluded_entries`
+went `0` (O.3, parcel 1) to `1` (O.4, parcel 2) with no change to the ban entry. The
+feeder re-derived on avatar movement across a parcel boundary, not only on a
+land-state change. Nothing in §H–§N covers this.
+
+#### O.5 Neighbour room
+
+Throughout O.1–O.4 all present avatars simultaneously held handles in Transylvania's
+room `1578726032`, which read `excluded_entries: 0` on every handle at epochs 53 and
+59 — unchanged across Ebony's transitions through epochs 69, 72, 78 and 79.
+
+Consistent with §L and with Reading 1 of §G (ban is land-scoped) as the current
+implementation's behaviour. **§G remains UNRESOLVED**: it asks what the semantics
+*should* be, which this does not answer.
+
+#### O.6 What this establishes
+
+Every acceptance claim previously resting on the unattributable instrumented build now
+has an attributable equivalent: symmetric enforcement, live `add` delta emission,
+per-listener culling, and the parcel-ban scope — all against `8e52212b0f`, Debug,
+with the deployed artifact hashes recorded above.
+
+**Not established here:** anything at or beyond the mixer's participant resolution
+under a duplicate display (§M), which this run deliberately avoided by confirming one
+handle per avatar before starting.
