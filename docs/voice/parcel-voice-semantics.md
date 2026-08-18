@@ -753,3 +753,97 @@ the feeder/sender must be **enabled in every loaded region**. Because each regio
 room, a region whose emission is disabled leaves its room — including any neighbour room an adjacent
 region's avatars occupy — as an **unenforced path**: exclusions computed elsewhere never reach it.
 Per-region emission is therefore a coverage requirement, not a per-region convenience.
+
+---
+
+## ADDENDUM 2 — Phase 3a live verification (2026-08-17)
+
+**Scope.** Records live in-world observations from the Phase 3a acceptance run. It does **not**
+rewrite the body or the 2026-08-16 addendum, and resolves no open question. Subsection letters
+continue the A–G sequence of the first addendum so that bare-letter references (`§F`, `§H`) remain
+unambiguous.
+
+| | |
+|---|---|
+| Tree | `D:\tranquillity-develop` |
+| Branch | `feature/voice-visibility-matrix` |
+| Commit | `6935d941f8` (post-merge of `fix/visibility-emission-stall`) |
+| Build configuration | **Debug** — load-bearing; the `Debug.Assert` tick-thread guard (`VoiceStateFeeder.cs:112`) compiles out in Release |
+| Mixer | `legion-voice-mixer-janus-1`, plugin 0.7.0 |
+| Region | Ebony `c44606b1-43e1-45fb-8ae8-201545dc2f6a`, estate room `226001844` |
+
+> Note: a §I "neighbour-room data point" was drafted for this addendum and **deleted before
+> recording** — at the 15:35 reading Aleric was present only in Ebony's room (`226001844`), not in
+> Transylvania's (`1578726032`), so Legion's neighbour-room `excluded_entries=0` was trivially
+> expected and said nothing about §G. §G remains UNRESOLVED. Subsections were renumbered so H/I/J
+> stay contiguous.
+
+### H. Ban-derived exclusion is applied symmetrically end-to-end — OBSERVED (2026-08-17)
+
+**This does not verify §F Decision 1b.** Decision 1b concerns `SeeAVs` hiding, and its pending item
+is *stock SL* behaviour. That remains unverified; observing our own symmetric implementation behave
+symmetrically is not evidence about SL. The observation below is on the **ban/restrict** path and
+confirms only that symmetry computed in the feeder survives serialization and mixer application.
+
+**Conditions.** Ban entry added on Ebony parcel `LocalLandID 2` naming Aleric Fenwood only. Legion
+Hienrichs is estate owner and therefore ban-exempt via the §1.1 exemption preamble; no reciprocal
+entry existed or could exist.
+
+**Evidence chain, one continuous sequence:**
+
+```
+feeder: seq=2170 @ 15:35:12,848  listeners=2 exclPairs=2 delta=+2/-0
+sender:          @ 15:35:12,852  path=delta op=add result=Ok entries=2
+mixer:           @ 15:35:57      excluded_entries=1 on BOTH Ebony handles
+                                 room 226001844, last_mode=add, epoch 47
+```
+
+`last_mode=add` establishes a live delta on a running room rather than a bootstrap snapshot. The room
+number matches `CalcRoomNumber(Ebony)`, which closes the §3.3.1 false-positive loophole in which an
+unknown room returns `applied` regardless.
+
+**Confirmed by ear:** mutual silence, two machines on separate network paths, stock Firestorm 7.2.2
+both sides.
+
+**What is established:** a one-sided ban entry yields exclusion on both listeners' handles. A pipeline
+that computed symmetric pairs but applied only one direction at the mixer would have shown
+`excluded_entries=1` on one handle and `0` on the other.
+
+### I. Parcel-ban scope — observed behaviour (2026-08-17)
+
+A parcel ban excludes the banned avatar from **all occupants of that parcel**, not only from the
+parcel/estate owner who added the entry.
+
+**Evidence.** A third avatar (unbanned, voice on) entered Ebony and stood on the banning parcel while
+the §H ban was in force:
+
+| Listener | Result |
+|---|---|
+| Third avatar | `frames_mixed=96 / rtp_out=96` — receiving Legion's audio |
+| Aleric (banned) | `frames_mixed=0 / rtp_out=0` — same talker, same room |
+
+One speaker, two listeners, different outcomes: per-listener culling demonstrated, and not a room that
+has gone dead.
+
+Resulting topology: pair set `{Legion↔Aleric, third↔Aleric}`, `exclPairs=4`, per-listener `EXCL`
+1/2/1.
+
+This follows from §F Decision 2b evaluating ban-list **membership** per listener pair rather than per
+ban-entry author, and is internally consistent with symmetric exclusion. Stated here as observed
+behaviour; it is **not** promoted to a normative rule. If it should be normative, that belongs in the
+body under a revision.
+
+### J. Instrument notes
+
+- **`exclPairs` counts directed pairs.** §H's single unordered pair reads as `2`; §I's two unordered
+  pairs read as `4`. Confirmed by §I's per-listener `EXCL` 1/2/1 summing to 4. Do not read it as a
+  count of ban entries.
+- **`excluded_entries` on a mixer handle is the visibility-exclusion signal.** `peer_ctl_entries` is
+  the viewer mute/gain set and is **not** a visibility exclusion. Conflating the two has cost time.
+- **`last_mode`:** `add`/`remove` = live delta; `replace` = snapshot (bootstrap or join-resync).
+- **`frames_mixed`/`rtp_out` are cumulative** and advance only while someone is actually talking. A
+  static counter during silence is indistinguishable from a broken path. N=1 rooms mix to silence by
+  design.
+- **`Ok` ≠ applied.** An unknown room returns `{"slvoice":"applied"}` with `entries` = the *parsed*
+  count. Application is confirmable only via `excluded_entries` on a live handle whose room matches
+  `CalcRoomNumber`.
