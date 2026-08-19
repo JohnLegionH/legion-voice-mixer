@@ -256,3 +256,22 @@ Amendment 1 pinned per-(listener, source) state as a flat, UUID-keyed array size
 - **First tick a pair is seen:** plain threshold at the cutoff, no hysteresis band. Hysteresis governs transitions, and there is no prior state to hold.
 
 ---
+
+## AMENDMENT 3 — the config surface does not exist as the body assumes (2026-08-18)
+
+Recon for slice one item 3 surfaced a conflict between the body and the mixer's architecture.
+
+The body's attenuation section specifies configuration as "plugin jcfg, per-region, expressed in metres." **There is no per-region config channel in the mixer.** `janus_slvoice_init` reads a single process-wide `janus.plugin.slvoice.jcfg`, extracts exactly two things — static rooms and `general.echo_autostart` — and then frees the config without retaining a settings struct. Rooms are created dynamically, so nothing associates configuration with a region.
+
+Adding `general.*` items would therefore ship **process-wide** configuration while the body claims per-region, which is worse than shipping neither.
+
+**Decision:** spatial constants remain compile-time `#define`s through slice one, matching the leash, cutoff, and re-add constants already there. The per-region config surface is deferred to a dedicated item, which must first reconcile per-region intent against a one-jcfg, dynamically-created-room mixer. The body's "per-region" wording stands as intent, not as a description of what slice one ships.
+
+**Also recorded from the same recon:**
+
+- **The attenuation curve is settled:** a single monotonic falloff, `gain *= (t)^p` where `t = (cutoff − d) / (cutoff − reference)`, with reference distance 10 m (1000 stored) and shaping exponent `p` starting at 2.0. Equals 1 at the reference, exactly 0 at the cutoff, no fade window and no seam.
+- **Attenuation composes into `gains[j]`, never replaces it.** The array defaults to 1.0 and carries the viewer gain (`ug/220`, clamped to 4.0) when set. The final mix is clamped by `slv_mix_clamp`, so the product cannot overshoot.
+- **Cost is accepted.** The distance is reused from item 2's cull, so attenuation adds only one `pow` per pair in the falloff band plus the per-sample multiply — worst case ~4096 `pow` per tick, roughly 0.8% of the 20 ms budget. Inside the reference and beyond the cutoff there is no `pow` at all.
+- **Items 2 and 3 reinforce each other as predicted:** because the curve reaches ~0 at the cutoff, a source inside the hysteresis band is either culled or rendered at near-zero gain — inaudible either way, so the cull boundary has no audible seam.
+
+---
