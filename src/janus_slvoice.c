@@ -136,6 +136,14 @@
 #define SLV_GEOM_SCALE      100.0   /* stored unit = metres × 100 */
 #define SLV_LEASH_DIST_M    50.0    /* §7.1 camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
 #define SLV_LEASH_DIST      (SLV_LEASH_DIST_M * SLV_GEOM_SCALE)   /* 5000, stored ×100 unit */
+/* Distance cull thresholds (Phase 3b item 2). Attenuation is item 3 — until then a
+ * source is either in the mix at full gain or dropped, nothing quieter with distance.
+ * Hysteresis: cull past the cutoff, re-add only inside the shorter distance, so a
+ * talker at the boundary does not chatter the active set. metres->stored ONCE here. */
+#define SLV_CUTOFF_DIST_M   60.0    /* audible cutoff: a source beyond this is culled */
+#define SLV_READD_DIST_M    58.0    /* hysteresis re-add: un-cull only inside this (< cutoff) */
+#define SLV_CUTOFF_DIST     (SLV_CUTOFF_DIST_M * SLV_GEOM_SCALE)   /* 6000, stored ×100 unit */
+#define SLV_READD_DIST      (SLV_READD_DIST_M * SLV_GEOM_SCALE)    /* 5800, stored ×100 unit */
 
 /* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
@@ -266,6 +274,17 @@ typedef struct slv_peer_ctl {
 	float gain;              /* linear gain (ug/220), clamped */
 } slv_peer_ctl;
 
+/* Per-listener distance-cull hysteresis for one OTHER participant, keyed by that
+ * participant's agent UUID (Phase 3b item 2). A PARALLEL structure to peer_ctl: it
+ * covers every audible source, not just viewer-adjusted ones, so it is sized to the
+ * participant cap and LRU-evicts the least-recently-seen slot when full (brief
+ * Amendment 1 pins UUID-keyed + SLV_MAX_MIX-sized; Amendment 2 pins the eviction). */
+typedef struct slv_cull_hyst {
+	char uuid[SLV_UUID_LEN]; /* source participant agent UUID */
+	gboolean culled;         /* current cull state (the hysteresis latch) */
+	guint64 seen_tick;       /* room tick_seq when last matched (LRU stamp) */
+} slv_cull_hyst;
+
 typedef struct janus_slvoice_session {
 	janus_plugin_session *handle;
 	guint64 user_id;             /* participant id; 0 until joined */
@@ -310,6 +329,11 @@ typedef struct janus_slvoice_session {
 	slv_vec3 snap_lp;            /* listener (camera) position, leash-clamped, ×100 */
 	slv_quat snap_lh;            /* listener heading/orientation, ×100 (identity if absent) */
 	gboolean snap_valid;         /* sp AND lp present this tick -> snap usable for distance */
+	/* Phase 3b item 2: per-listener distance-cull hysteresis, keyed by source UUID,
+	 * sized to the participant cap, LRU-evicted (brief Amendments 1 & 2). Inline, no
+	 * allocation — a parallel to peer_ctl above; touched only in pass 2 under mutex. */
+	slv_cull_hyst cull_hyst[SLV_MAX_MIX];
+	int n_cull_hyst;
 	/* 500ms echo delay ring (per-listener echo override) + encode scratch. */
 	float *ring;                 /* SLV_RING_SAMPLES * SLV_CHANNELS */
 	int ring_wpos;               /* write cursor, per-channel sample index */
@@ -1983,6 +2007,48 @@ static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
 		s->snap_lp = slv_vec3_madd(s->snap_sp, SLV_LEASH_DIST / d, off);
 }
 
+/* Phase 3b item 2: per-listener distance cull with hysteresis. Returns TRUE if the
+ * source `uuid`, at distance `d` from this listener (stored ×100 unit), must be
+ * dropped from the mix. Maintains the per-listener hysteresis latch keyed by source
+ * UUID: find-or-create the slot, LRU-evicting the oldest seen_tick when full (brief
+ * Amendment 2 proves any displaced slot is a departed UUID), stamp it this tick, and
+ * latch — an audible pair culls only past SLV_CUTOFF_DIST, a culled pair un-culls only
+ * inside SLV_READD_DIST. A pair seen for the first time has no prior state, so it uses
+ * a plain threshold at the cutoff (no band). s->mutex held; writes only the listener's
+ * own hysteresis table (never s->active / audible / decode). */
+static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
+		const char *uuid, double d, guint64 now_tick) {
+	slv_cull_hyst *slot = NULL;
+	for(int k = 0; k < s->n_cull_hyst; k++) {
+		if(strcmp(s->cull_hyst[k].uuid, uuid) == 0) {
+			slot = &s->cull_hyst[k];
+			break;
+		}
+	}
+	if(slot == NULL) {
+		if(s->n_cull_hyst < SLV_MAX_MIX) {
+			slot = &s->cull_hyst[s->n_cull_hyst++];
+		} else {
+			/* Table full: evict the least-recently-seen slot (Amendment 2). */
+			slot = &s->cull_hyst[0];
+			for(int k = 1; k < s->n_cull_hyst; k++)
+				if(s->cull_hyst[k].seen_tick < slot->seen_tick)
+					slot = &s->cull_hyst[k];
+		}
+		memset(slot, 0, sizeof(*slot));
+		g_strlcpy(slot->uuid, uuid, SLV_UUID_LEN);
+		slot->culled = (d > SLV_CUTOFF_DIST);   /* first sight: plain threshold, no band */
+	} else if(slot->culled) {
+		if(d < SLV_READD_DIST)
+			slot->culled = FALSE;
+	} else {
+		if(d > SLV_CUTOFF_DIST)
+			slot->culled = TRUE;
+	}
+	slot->seen_tick = now_tick;
+	return slot->culled;
+}
+
 static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	gint64 t0 = janus_get_monotonic_time();
 	janus_mutex_lock(&room->mutex);
@@ -2053,6 +2119,18 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			 * spatial DSP, alongside the per-source mute and the VAD/DTX cull. Reads
 			 * the SAME set the roster/presence path uses (single source of truth). */
 			if(slv_roster_excludes(s->excluded, disp))
+				mutes[j] = 1;
+			/* Phase 3b item 2: per-listener distance cull (spatial stage — after
+			 * exclusion/mute/gain). Skip pairs already dropped (no distance math,
+			 * no hysteresis churn) and pairs without geometry (leave in the flat
+			 * mix). Writes mutes[j] and the hysteresis slot only — never the global
+			 * active/audible/decode state. Attenuation is item 3; this only drops. */
+			if(mutes[j])
+				continue;
+			if(!s->snap_valid || !sess[j]->snap_valid)
+				continue;
+			double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, sess[j]->snap_sp));
+			if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq))
 				mutes[j] = 1;
 		}
 
