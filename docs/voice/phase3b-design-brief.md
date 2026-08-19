@@ -293,3 +293,23 @@ Recon for slice one item 4 found that none of the conventions panning depends on
 **Verification is numeric, not aural.** Listening tests are not available for this work. The azimuth unit tests are the acceptance criteria for item 4, not a supplement to them. Per-channel output level is to be exposed as a diagnostic alongside `last_mix_rms`, which sums both channels and therefore cannot detect a left/right swap.
 
 ---
+
+## AMENDMENT 5 — pan law and the stereo mix path (2026-08-18)
+
+Recon for the item 4 wiring settled two decisions the body did not anticipate.
+
+**The mix core cannot pan as written.** `slv_mix_nminus1` takes one scalar gain per source (`mix.c:33`) applied uniformly to every sample (`:40`-`:42`), so it cannot produce different left and right levels. Pre-scaling a source's `decbuf` is not an option — that buffer is tick-owned and shared read-only across every listener's mix (`janus_slvoice.c:324`-`:325`), so scaling it for one listener corrupts the others. Panning the summed frame is not an option either: by then the per-source direction is gone.
+
+**Decision:** add a per-channel stereo core and make the existing `slv_mix_nminus1` a thin wrapper that calls it with equal left and right gains. This keeps the 26 existing `test_mix` checks green and makes the equivalence self-evident, rather than changing the signature and updating 8 test call sites.
+
+**Pan law — `sin(azimuth)` as the pan signal.** Constant power, `p = (sin(az) + 1) / 2`, `gainL = cos(p·π/2)`, `gainR = sin(p·π/2)`, so `gainL² + gainR² = 1`.
+
+Mapping azimuth linearly to pan position would be **discontinuous at ±π**: a source drifting across directly-behind would snap between pan extremes, and `+π` and `−π` — the same direction — would map to opposite sides. `sin(az)` is continuous everywhere and needs no clamping.
+
+**A source directly behind renders centred, and this is correct.** `sin(±π) = 0`, so behind maps to centre — present at full level, not lateralised. Amplitude panning fundamentally cannot express front versus back; that is what the deferred HRTF and ITD are for. This is the honest limit of the technique, not a defect, and should not be "fixed" by anyone later reading it as one.
+
+**No geometry, no pan.** When either snapshot is invalid the pan is skipped entirely and both channel gains equal the scalar gain — the same guard the cull and attenuation already use.
+
+**Per-channel diagnostic.** `slv_mix_rms` operates on contiguous samples (`mix.h:55`-`:58`) and cannot address a strided channel, so left and right RMS are computed inline in the tick rather than by extending the unit-tested core. `last_mix_rms` sums both channels and cannot detect a left/right swap; `last_mix_rms_l` and `last_mix_rms_r` are the swap detector Amendment 4 requires.
+
+---
