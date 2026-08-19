@@ -22,6 +22,9 @@
 #ifndef M_PI_2
 #define M_PI_2 1.57079632679489661923
 #endif
+#ifndef M_PI_4
+#define M_PI_4 0.78539816339744830962
+#endif
 
 /* ---- Pan sign convention (Amendment 4), asserted explicitly ---------------
  * DECIDED in Amendment 4: a source to the listener's RIGHT is louder in the
@@ -126,9 +129,33 @@ static void test_pitch_independent(void) {
 	 * about +Y is {0, sin15, 0, cos15}. */
 	double s15 = sin(M_PI / 12.0), c15 = cos(M_PI / 12.0);
 	slv_quat pitched = q4(0.0, s15, 0.0, c15);
-	double az_flat    = slv_azimuth(v3(0,0,0), IDENTITY, v3(0,-10,0));   /* hard right, level */
-	double az_pitched = slv_azimuth(v3(0,0,0), pitched, v3(0,-10,0));    /* same source, pitched */
+	/* Off-axis (45 deg to the right) and LEVEL. Off-axis matters: a hard-right
+	 * source sits at dot==0, where atan2 is magnitude-insensitive and would absorb
+	 * a leaked term; at 45 deg the leak moves the result instead. */
+	double az_flat    = slv_azimuth(v3(0,0,0), IDENTITY, v3(10,-10,0));
+	double az_pitched = slv_azimuth(v3(0,0,0), pitched, v3(10,-10,0));   /* same source, pitched */
 	CHECK(approx(az_pitched, az_flat), "pitch does not change azimuth (heading only)");
+}
+
+/* ---- elevated source + tilted listener: the horizontal projection ---------
+ * The combination no other case exercises: every other source is level (d.z==0),
+ * and the one overhead source is read with an identity listener (forward has no
+ * vertical component). A dropped horizontal projection — e.g. a full 3D dot that
+ * folds forward.z * source.z into the angle — leaks the vertical here. */
+static void test_elevated_source(void) {
+	printf("test_elevated_source\n");
+	double s15 = sin(M_PI / 12.0), c15 = cos(M_PI / 12.0);
+	slv_quat pitched = q4(0.0, s15, 0.0, c15);   /* +30 deg about +Y, still faces east */
+	/* Ahead-and-above: horizontally directly ahead, so azimuth 0. Weak on its own
+	 * (an ahead source has cross==0, so atan2(0,dot) stays 0 whatever the dot); kept
+	 * as a plain correctness assertion that elevation of an ahead source is ignored. */
+	CHECK(approx(slv_azimuth(v3(0,0,0), pitched, v3(10,0,5)), 0.0),
+		"ahead-and-above -> azimuth 0");
+	/* Off-axis AND above: horizontally 45 deg to the right; elevation must not
+	 * change it, so azimuth = +pi/4. Here cross != 0, so a vertical leak SHIFTS the
+	 * angle off pi/4 -- THIS case has teeth against a dropped horizontal projection. */
+	CHECK(approx(slv_azimuth(v3(0,0,0), pitched, v3(10,-10,5)), AZ_RIGHT_SIGN * M_PI_4),
+		"off-axis-and-above -> +pi/4 (heading only, elevation ignored)");
 }
 
 int main(void) {
@@ -140,6 +167,7 @@ int main(void) {
 	test_truncated_quat();
 	test_degenerate();
 	test_pitch_independent();
+	test_elevated_source();
 	printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	if(g_failures) {
 		fprintf(stderr, "FAILED\n");
