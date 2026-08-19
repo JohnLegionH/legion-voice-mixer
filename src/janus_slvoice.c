@@ -65,6 +65,8 @@
 #include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
+#include "mixer/azimuth.h" /* Phase 3b item 4: horizontal azimuth of a source (pan input) */
+#include "mixer/pan.h"     /* Phase 3b item 4: constant-power stereo pan gains */
 
 /* Plugin information */
 #define JANUS_SLVOICE_VERSION         8
@@ -384,6 +386,11 @@ typedef struct janus_slvoice_session {
 	double last_mix_rms;         /* RMS of this listener's most recent MIXED OUTPUT frame
 	                              * (0..1): the N-1 mix (or echo) relayed to it, NOT the
 	                              * inbound talker level in last_rms. Diagnostic-only. */
+	double last_mix_rms_l;       /* Phase 3b item 4: RMS of the LEFT channel of that same
+	                              * frame (even interleaved samples). Diagnostic-only. */
+	double last_mix_rms_r;       /* Phase 3b item 4: RMS of the RIGHT channel (odd samples).
+	                              * last_mix_rms sums both and cannot detect an L/R swap;
+	                              * these two can (Amendment 4/5). Diagnostic-only. */
 	volatile gint power_p;       /* RMS*128 clamped 0..127 (for the SLData batch) */
 	volatile gint vad;           /* simple energy VAD 0/1 (for the SLData batch) */
 	guint64 data_msgs_received;  /* SLData messages received on the data channel */
@@ -859,6 +866,8 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "echo_active", g_atomic_int_get(&session->echo_active) ? json_true() : json_false());
 	json_object_set_new(info, "last_rms", json_real(session->last_rms));
 	json_object_set_new(info, "last_mix_rms", json_real(session->last_mix_rms));   /* listener's mixed-OUTPUT level (vs last_rms = inbound talker input) */
+	json_object_set_new(info, "last_mix_rms_l", json_real(session->last_mix_rms_l)); /* per-channel output level (Phase 3b item 4 pan diagnostic; L/R swap detector) */
+	json_object_set_new(info, "last_mix_rms_r", json_real(session->last_mix_rms_r));
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
 	json_object_set_new(info, "excluded_entries",
 		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
@@ -1783,6 +1792,8 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	s->silent_ticks = 0;
 	s->last_rms = 0.0;
 	s->last_mix_rms = 0.0;
+	s->last_mix_rms_l = 0.0;
+	s->last_mix_rms_r = 0.0;
 	s->decode_ok = FALSE;
 	g_atomic_int_set(&s->power_p, 0);
 	g_atomic_int_set(&s->vad, 0);
@@ -2107,11 +2118,19 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		 * path. Order is room->mutex -> session->mutex throughout. */
 		int mutes[SLV_MAX_MIX];
 		float gains[SLV_MAX_MIX];
+		/* Phase 3b item 4: per-channel gains for the stereo (panned) mix. Same
+		 * sizing and lifetime as gains[] — stack, rebuilt each tick, no allocation.
+		 * They DERIVE from gains[] (which still carries peer gain * attenuation);
+		 * the pan below splits that scalar into L/R, or leaves both equal to it. */
+		float gainsL[SLV_MAX_MIX];
+		float gainsR[SLV_MAX_MIX];
 		janus_mutex_lock(&s->mutex);
 		gboolean echo = g_atomic_int_get(&s->echo_active);
 		for(int j = 0; j < count; j++) {
 			mutes[j] = 0;
 			gains[j] = 1.0f;
+			gainsL[j] = 1.0f;   /* item 4: default to the same unity gains[] starts at, so */
+			gainsR[j] = 1.0f;   /* a source with no geometry / no pan behaves as pre-3b. */
 			if(j == i)
 				continue;
 			const char *disp = sess[j]->display;
@@ -2139,6 +2158,13 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			 * active/audible/decode state. Attenuation is item 3; this only drops. */
 			if(mutes[j])
 				continue;
+			/* Item 4 no-geometry fallback: both channel gains equal the scalar gain
+			 * gains[j] (peer gain resolved above; attenuation cannot apply without
+			 * geometry). If the snapshot is invalid the pan below is skipped and these
+			 * values stand — a flat, centred, pre-3b mix. The pan overwrites them only
+			 * when geometry is valid on both sides. */
+			gainsL[j] = gains[j];
+			gainsR[j] = gains[j];
 			if(!s->snap_valid || !sess[j]->snap_valid)
 				continue;
 			double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, sess[j]->snap_sp));
@@ -2154,6 +2180,18 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 				double t = (SLV_CUTOFF_DIST - dcull) / (SLV_CUTOFF_DIST - SLV_REF_DIST);
 				gains[j] *= (float)pow(t, SLV_FALLOFF_EXP);
 			}
+			/* Phase 3b item 4: constant-power azimuth pan. Runs after attenuation, on
+			 * the SAME guard the cull/attenuation use (geometry valid on both sides),
+			 * for sources the cull did NOT drop (mutes[j] still 0). Splits the final
+			 * scalar gains[j] into L/R by the horizontal azimuth of the source in this
+			 * listener's head frame; behind renders centred (Amendment 5). */
+			if(!mutes[j]) {
+				double az = slv_azimuth(s->snap_lp, s->snap_lh, sess[j]->snap_sp);
+				float pl = 1.0f, pr = 1.0f;
+				slv_pan(az, &pl, &pr);
+				gainsL[j] = gains[j] * pl;
+				gainsR[j] = gains[j] * pr;
+			}
 		}
 
 		float frame[SLV_FRAME_TOTAL];
@@ -2161,8 +2199,8 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		if(echo) {
 			janus_slvoice_build_echo(s, frame, SLV_FRAME_SAMPLES);
 		} else {
-			summed = slv_mix_nminus1(frame, SLV_FRAME_TOTAL, srcbuf, audible,
-				mutes, gains, count, i);
+			summed = slv_mix_nminus1_stereo(frame, SLV_FRAME_TOTAL, srcbuf, audible,
+				mutes, gainsL, gainsR, count, i);
 			slv_mix_clamp(frame, SLV_FRAME_TOTAL);
 		}
 		/* RMS of the finalized output frame relayed to this listener. slv_mix_is_silent
@@ -2173,6 +2211,19 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		 * identical. DIAGNOSTIC-ONLY — last_mix_rms drives nothing. */
 		double out_rms = slv_mix_rms(frame, SLV_FRAME_TOTAL);
 		s->last_mix_rms = out_rms;
+		/* Phase 3b item 4: per-channel RMS of the interleaved output (even = left,
+		 * odd = right). Computed inline because slv_mix_rms strides contiguously and
+		 * cannot address one channel (mix.h). DIAGNOSTIC-ONLY: it reads the finished
+		 * frame and feeds nothing back — out_rms, the silence test, the encode-skip
+		 * decision, and everything audible below are untouched. */
+		double sumsq_l = 0.0, sumsq_r = 0.0;
+		for(int t = 0; t + 1 < SLV_FRAME_TOTAL; t += 2) {
+			double l = (double)frame[t], r = (double)frame[t + 1];
+			sumsq_l += l * l;
+			sumsq_r += r * r;
+		}
+		s->last_mix_rms_l = sqrt(sumsq_l / (double)SLV_FRAME_SAMPLES);
+		s->last_mix_rms_r = sqrt(sumsq_r / (double)SLV_FRAME_SAMPLES);
 		gboolean silence = (summed == 0) || (out_rms <= SLV_VAD_RMS);
 		if(!silence)
 			s->frames_mixed++;
