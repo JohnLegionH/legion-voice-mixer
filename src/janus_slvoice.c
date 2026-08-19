@@ -69,9 +69,9 @@
 #include "mixer/pan.h"     /* Phase 3b item 4: constant-power stereo pan gains */
 
 /* Plugin information */
-#define JANUS_SLVOICE_VERSION         8
-#define JANUS_SLVOICE_VERSION_STRING  "0.8.0"
-#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 3b: per-room N-minus-one mixing with DTX/VAD cull, per-source mute/gain and encode-skip; sim-authoritative per-listener visibility exclusion; distance culling with hysteresis and distance attenuation from viewer geometry, with a camera-position leash; monaural for now -- no panning or HRTF yet; echo remains a per-participant diagnostic override)."
+#define JANUS_SLVOICE_VERSION         9
+#define JANUS_SLVOICE_VERSION_STRING  "0.9.0"
+#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 3b: per-room N-minus-one mixing with DTX/VAD cull, per-source mute/gain and encode-skip; sim-authoritative per-listener visibility exclusion; distance culling with hysteresis, distance attenuation and constant-power azimuth panning from viewer geometry, with a camera-position leash; no HRTF, ITD, distance tiers or azimuth binning yet; echo remains a per-participant diagnostic override)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
 #define JANUS_SLVOICE_PACKAGE         "janus.plugin.slvoice"
