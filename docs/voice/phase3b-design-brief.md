@@ -236,3 +236,23 @@ It also cannot reuse `peer_ctl`: that array is `SLV_MAX_PEER_ADJ` = 32 (`sldata.
 - The repo has **no** vector or quaternion math helpers (`sldata.h:60`, `:63` define the types as plain aggregates; no `vec3_`/`quat_`/dot/cross/normalize exists anywhere). Slice one writes the first ones: subtract, magnitude, and scaled-add for the leash projection.
 
 ---
+
+## AMENDMENT 2 — per-pair state requires LRU eviction (2026-08-18)
+
+Recon for slice one item 2 surfaced a gap Amendment 1 did not address.
+
+Amendment 1 pinned per-(listener, source) state as a flat, UUID-keyed array sized `SLV_MAX_MIX` (64). It did not specify behaviour when the number of *distinct* UUIDs seen over a session exceeds the slot count, which join/leave/rejoin churn guarantees.
+
+**`peer_ctl`'s approach is wrong here.** That array drops new entries when full (`janus_slvoice.c:2155`-`:2156`), which is tolerable for an adjustment cap — a 33rd explicit mute simply falls back to default gain. For hysteresis it is not: a present source denied a slot has no persistent state, re-decides its cull from scratch every tick, and chatters at the boundary — defeating the purpose of the hysteresis entirely.
+
+**Per-pair state must therefore evict**, by least-recently-seen tick stamp.
+
+**Eviction is provably safe.** The room is hard-capped at `SLV_MAX_MIX` = 64 concurrent participants, so at most 63 live *other* sources exist for any listener — strictly fewer than the 64 slots. Any slot displaced on a full append is therefore necessarily a departed UUID. No cross-check against the live participant set is needed; a stale stamp is sufficient evidence.
+
+**Also recorded from the same recon:**
+
+- **Scan cost is accepted as specified.** Worst case at 64 participants is 64 listeners × 64 sources × up to 64 UUID compares = ~262,000 strcmp per tick, roughly doubling the existing `peer_ctl` load. At the occupancy §6 describes as typical — single-digit active talkers — it is ~512 per tick. UUIDs diverge in their first bytes, so compares are cheap. The flat linear scan stands; a hash table would be a deviation from Amendment 1 and is not warranted. The tick histogram catches an overrun if reality disagrees.
+- **The cull writes `mutes[j]` only.** `s->active` (`janus_slvoice.c:301`, set at `:1842`-`:1846`) and `audible[]` (`:2012`) are global and distance-agnostic; a per-listener cull must never touch them, the decode path, or the power/VAD reporting. Consequence: sources are decoded in pass 1 regardless of distance, so a per-listener cull saves no decode CPU. Shedding far-field talkers from decode is §5's separate global degradation lever, not part of this.
+- **First tick a pair is seen:** plain threshold at the cutoff, no hysteresis band. Hysteresis governs transitions, and there is no prior state to hold.
+
+---
