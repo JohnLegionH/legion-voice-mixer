@@ -67,6 +67,8 @@ TEST_VISBATCH_BIN  := tests/test_visbatch
 TEST_VISBATCH_SRCS := tests/test_visbatch.c src/visbatch.c
 TEST_ROSTER_BIN    := tests/test_roster
 TEST_ROSTER_SRCS   := tests/test_roster.c
+TEST_AZIMUTH_BIN   := tests/test_azimuth
+TEST_AZIMUTH_SRCS  := tests/test_azimuth.c
 TEST_CFLAGS  := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
 TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 # roster.h is glib-only (no jansson/Janus); its test links glib.
@@ -85,11 +87,12 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
 	./$(TEST_ROSTER_BIN)
+	./$(TEST_AZIMUTH_BIN)
 
 $(TEST_SLDATA_BIN): $(TEST_SLDATA_SRCS)
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_SLDATA_SRCS) $(TEST_LIBS)
@@ -103,9 +106,13 @@ $(TEST_ROSTER_BIN): $(TEST_ROSTER_SRCS)
 $(TEST_MIX_BIN): $(TEST_MIX_SRCS)
 	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_MIX_SRCS) -lm
 
+# test_azimuth: the horizontal azimuth maths (header-only azimuth.h; libm only).
+$(TEST_AZIMUTH_BIN): $(TEST_AZIMUTH_SRCS)
+	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_AZIMUTH_SRCS) -lm
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PLUGINDIR)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN)
