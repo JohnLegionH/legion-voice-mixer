@@ -275,3 +275,21 @@ Adding `general.*` items would therefore ship **process-wide** configuration whi
 - **Items 2 and 3 reinforce each other as predicted:** because the curve reaches ~0 at the cutoff, a source inside the hysteresis band is either culled or rendered at near-zero gain — inaudible either way, so the cull boundary has no audible seam.
 
 ---
+
+## AMENDMENT 4 — panning conventions, pinned (2026-08-18)
+
+Recon for slice one item 4 found that none of the conventions panning depends on are established anywhere in the repo. They are pinned here so the implementation cannot settle them by accident.
+
+**Stereo pan sign — DECIDED:** a source to the listener's **right** is louder in the **right** output channel. Nothing in the repo, the viewer, or the docs fixed this; it is chosen here explicitly.
+
+**Frame:** `sp` and `lp` are region-local (`sldata.h:59`), ×100. Axis semantics are SL/OpenSim convention, external to this repo: X east, Y north, Z up, right-handed. Azimuth uses `S.sp − L.lp`, so the origin is immaterial and only axis directions matter.
+
+**Orientation:** `lh` is the listener/camera orientation, set from `setListenerPosition`'s rot (`llvoicewebrtc.cpp:1156`, `:1168`); `sh` is the avatar's (`:1173`, `:1193`). `slv_quat{x,y,z,w}` maps to `LLQuaternion (x,y,z,w)`, confirmed by the viewer's serialization order (`:1260`-`:1263`). Forward is local +X rotated by the orientation — at identity, forward is +X (east). Positive rotation about +Z is counter-clockwise viewed from above. These are external SL conventions, not repo-established.
+
+**`lh` IS NOT A UNIT QUATERNION.** It arrives ×100 and int-truncated (`llvoicewebrtc.cpp:1260`-`:1263`), so a 90° rotation about Z arrives as `{0,0,70,70}`, magnitude ≈ 99. **The azimuth function must normalize `lh` before rotating.** Failing to do so does not crash — it produces a plausible-looking but wrong azimuth, which is the hardest class of bug to notice. A unit test using the wire-realistic truncated form is mandatory.
+
+**Frame layout:** interleaved float PCM is firmly established (`mix.h:12`-`:14`, `janus_slvoice.c:100`, `:103`). Even index = channel 0, odd = channel 1. That index 0 is "left" is convention, not documented — panning is the first code to distinguish the channels.
+
+**Verification is numeric, not aural.** Listening tests are not available for this work. The azimuth unit tests are the acceptance criteria for item 4, not a supplement to them. Per-channel output level is to be exposed as a diagnostic alongside `last_mix_rms`, which sums both channels and therefore cannot detect a left/right swap.
+
+---
