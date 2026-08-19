@@ -69,6 +69,8 @@ TEST_ROSTER_BIN    := tests/test_roster
 TEST_ROSTER_SRCS   := tests/test_roster.c
 TEST_AZIMUTH_BIN   := tests/test_azimuth
 TEST_AZIMUTH_SRCS  := tests/test_azimuth.c
+TEST_PAN_BIN       := tests/test_pan
+TEST_PAN_SRCS      := tests/test_pan.c
 TEST_CFLAGS  := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
 TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 # roster.h is glib-only (no jansson/Janus); its test links glib.
@@ -87,12 +89,13 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
 	./$(TEST_ROSTER_BIN)
 	./$(TEST_AZIMUTH_BIN)
+	./$(TEST_PAN_BIN)
 
 $(TEST_SLDATA_BIN): $(TEST_SLDATA_SRCS)
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_SLDATA_SRCS) $(TEST_LIBS)
@@ -110,9 +113,13 @@ $(TEST_MIX_BIN): $(TEST_MIX_SRCS)
 $(TEST_AZIMUTH_BIN): $(TEST_AZIMUTH_SRCS)
 	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_AZIMUTH_SRCS) -lm
 
+# test_pan: the constant-power stereo pan law (header-only pan.h; libm only).
+$(TEST_PAN_BIN): $(TEST_PAN_SRCS)
+	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_PAN_SRCS) -lm
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PLUGINDIR)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN)

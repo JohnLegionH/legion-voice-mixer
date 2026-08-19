@@ -144,6 +144,45 @@ static void test_rms_silence(void) {
 	CHECK(slv_mix_rms(NULL, 0) == 0.0, "empty buffer RMS is 0");
 }
 
+/* ---- stereo path: per-channel gains, and wrapper equivalence (Amendment 5) -
+ * New in Phase 3b item 4. Does NOT touch the 26 checks above. Verifies (a) that
+ * the stereo core pans (gainL != gainR -> L != R in the interleaved output), and
+ * (b) that slv_mix_nminus1 is a faithful thin wrapper: identical output to the
+ * stereo core called with gainsL == gainsR == gains. */
+static void test_stereo_path(void) {
+	printf("test_stereo_path\n");
+	enum { N = 8 };   /* 4 stereo frames */
+	float s0[N], out[N];
+	fill(s0, N, 0.5f);
+	const float *srcs[1] = { s0 };
+	int active[1] = { 1 };
+	/* Pan toward the right: gL != gR must produce L != R, per channel. */
+	float gL[1] = { 0.25f };
+	float gR[1] = { 1.0f };
+	int summed = slv_mix_nminus1_stereo(out, N, srcs, active, NULL, gL, gR, 1, -1);
+	CHECK(summed == 1, "stereo: one source summed");
+	CHECK(approx(out[0], 0.125f), "stereo: even (left) sample scaled by gainL");
+	CHECK(approx(out[1], 0.5f), "stereo: odd (right) sample scaled by gainR");
+	CHECK(!approx(out[0], out[1]), "stereo: gainL != gainR yields L != R");
+
+	/* Wrapper equivalence: run a non-trivial mix (self-exclusion + mute + varied
+	 * gains) through both entry points; every sample must match. */
+	enum { M = 8 };
+	float a[M], b[M], c[M], ow[M], os[M];
+	fill(a, M, 0.3f); fill(b, M, 0.2f); fill(c, M, 0.1f);
+	const float *s3[3] = { a, b, c };
+	int act3[3] = { 1, 1, 1 };
+	int mut3[3] = { 0, 1, 0 };          /* listener muted source 1 */
+	float g3[3] = { 0.5f, 1.0f, 0.75f };
+	int sw = slv_mix_nminus1(ow, M, s3, act3, mut3, g3, 3, -1);
+	int ss = slv_mix_nminus1_stereo(os, M, s3, act3, mut3, g3, g3, 3, -1);
+	CHECK(sw == ss, "wrapper and stereo core sum the same source count");
+	int identical = 1;
+	for(int i = 0; i < M; i++)
+		if(!approx(ow[i], os[i])) identical = 0;
+	CHECK(identical, "wrapper output identical to stereo core with gainsL==gainsR");
+}
+
 int main(void) {
 	printf("== test_mix ==\n");
 	test_nminus1_excludes_self();
@@ -152,6 +191,7 @@ int main(void) {
 	test_gain();
 	test_clamp();
 	test_rms_silence();
+	test_stereo_path();
 	printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	if(g_failures) {
 		fprintf(stderr, "FAILED\n");
