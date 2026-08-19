@@ -217,3 +217,22 @@ spatialisation needs a region-offset transform regardless. This is a second
 independent reason cross-region and child-agent spatial belongs with the sim-position
 feed, and it confirms same-region-two-avatars as the right first cut — it sidesteps
 both the frame transform and the child-position gap.
+
+---
+
+## AMENDMENT 1 — per-pair state must be UUID-keyed (2026-08-18)
+
+Recon for slice one item 1 surfaced a constraint the body does not pin.
+
+The Constraints section requires per-(listener, source) state in "flat preallocated arrays sized at setup." That wording permits, and a naive reading suggests, an array indexed by source position in the tick's `sess[]` array. **That would be wrong.** `sess[]` is populated from `room->participants` hash iteration (`janus_slvoice.c:1946`-`:1960`), whose order changes across ticks as participants join and leave, so a position-indexed slot refers to a different pair each tick.
+
+**Per-(listener, source) state must be keyed by source UUID**, as `peer_ctl` is (`janus_slvoice.c:309`, keyed at `:252`, scanned at `:1996`-`:2004`).
+
+It also cannot reuse `peer_ctl`: that array is `SLV_MAX_PEER_ADJ` = 32 (`sldata.h:39`) against a participant cap of `SLV_MAX_MIX` = 64 (`janus_slvoice.c:125`), and is sparse by design — only viewer-adjusted pairs exist. Cull hysteresis needs a slot for every audible pair. It is therefore a parallel per-listener UUID-keyed array sized to `SLV_MAX_MIX`.
+
+**Also recorded from the same recon:**
+
+- The geometry snapshot is inline struct fields on the session, not a heap buffer. This is stronger than the `decbuf` pattern the body names — zero allocation ever, rather than allocation at join — and adds nothing to `media_alloc_locked`.
+- The repo has **no** vector or quaternion math helpers (`sldata.h:60`, `:63` define the types as plain aggregates; no `vec3_`/`quat_`/dot/cross/normalize exists anywhere). Slice one writes the first ones: subtract, magnitude, and scaled-add for the leash projection.
+
+---
