@@ -313,3 +313,15 @@ Mapping azimuth linearly to pan position would be **discontinuous at ±π**: a s
 **Per-channel diagnostic.** `slv_mix_rms` operates on contiguous samples (`mix.h:55`-`:58`) and cannot address a strided channel, so left and right RMS are computed inline in the tick rather than by extending the unit-tested core. `last_mix_rms` sums both channels and cannot detect a left/right swap; `last_mix_rms_l` and `last_mix_rms_r` are the swap detector Amendment 4 requires.
 
 ---
+
+## AMENDMENT 6 — slice one complete; the constant-power level change (2026-08-18)
+
+Slice one is built, deployed, and verified: geometry snapshot with the §7.1 camera leash, distance culling with hysteresis, distance attenuation, and constant-power amplitude panning.
+
+**Verification was numeric throughout, per Amendment 4.** Attenuation was confirmed by `last_mix_rms` falling from 0.19 to 0.027 as the listener moved to roughly 40 m from a fixed talker, against a predicted gain of 0.16. Panning was confirmed by rotating a stationary listener through a full circle beside a fixed talker and observing `last_mix_rms_l` / `last_mix_rms_r` sweep from a ratio of ~200:1 (hard left) through parity to ~1:9000 (hard right) and back. No listening test was used at any point.
+
+**A centred source is approximately 3 dB quieter than before slice one.** Previously both channels received the full scalar gain, so a source contributed `2g²` of power. Under constant-power panning a centred source contributes `2(0.707g)² = g²`. This is inherent to any constant-power pan law — the previous behaviour was double-mono, which is 3 dB hot relative to a correct pan — and must **not** be "corrected" by scaling the pan gains, which would break the `L² + R² = 1` property `tests/test_pan.c` asserts. If overall level needs raising, that is a separate output-gain decision, not a pan-law change.
+
+**Mutation testing found a decorative test.** `test_pitch_independent` as originally written could not fail: its source was level and on the pitch axis, so a dropped horizontal projection left it passing. Review by hand had not caught this. Where unit tests are the acceptance criteria, verifying that they can fail is part of writing them.
+
+---
