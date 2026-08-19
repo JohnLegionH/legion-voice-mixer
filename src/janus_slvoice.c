@@ -1018,70 +1018,121 @@ static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 
 	for(int i = 0; i < vb->n_entries; i++) {
 		const slv_vis_entry *e = &vb->entries[i];
-		janus_slvoice_session *L = g_hash_table_lookup(by_display, e->listener);
-		if(L == NULL)
-			continue;   /* listener not in this room right now */
+		/* Fan-out (Amendment 7): an exclusion entry names an AVATAR — the listener's
+		 * agent UUID (= display), the only identifier the feed carries (visbatch.h) —
+		 * not a specific handle. It therefore applies to EVERY session in the room
+		 * whose display matches, not to whichever one a single-value map happens to
+		 * keep (that would depend on undefined GLib iteration order; §M). Scan
+		 * room->participants; each match merges into ITS OWN excluded table. by_display
+		 * is retained only as the O(1) present-set for the source-side transition gate
+		 * below — a key-membership test, unaffected by listener duplicates. */
+		int nmatch = 0;
+		guint64 match_ids[SLV_MAX_MIX];
+		GHashTableIter lit;
+		gpointer lv;
+		g_hash_table_iter_init(&lit, room->participants);
+		while(g_hash_table_iter_next(&lit, NULL, &lv)) {
+			janus_slvoice_session *L = lv;
+			if(L->display == NULL || strcmp(L->display, e->listener) != 0)
+				continue;   /* not this listener avatar */
+			if(nmatch < SLV_MAX_MIX)
+				match_ids[nmatch] = L->user_id;
+			nmatch++;
 
-		/* Transitions to emit AFTER releasing L->mutex. Bounded by set sizes; an
-		 * overflow only delays a dot flip by one sender tick (~100ms backstop). */
-		char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
-		gboolean trans_join[SLV_VIS_MAX_EXCL * 2];
-		int ntrans = 0;
+			/* Transitions to emit AFTER releasing L->mutex. Bounded by set sizes; an
+			 * overflow only delays a dot flip by one sender tick (~100ms backstop). */
+			char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
+			gboolean trans_join[SLV_VIS_MAX_EXCL * 2];
+			int ntrans = 0;
 
-		janus_mutex_lock(&L->mutex);
-		if(vb->op == SLV_VIS_OP_ADD) {
-			for(int k = 0; k < e->n_excl; k++) {
-				const char *s = e->excl[k];
-				if(!g_hash_table_contains(L->excluded, s)) {
-					g_hash_table_add(L->excluded, g_strdup(s));
-					if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
-						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
-						trans_join[ntrans++] = FALSE;   /* newly excluded -> leave */
+			/* Each matching session merges into its OWN L->excluded — never a shared
+			 * table pointer. L->excluded is destroyed per session at teardown (:570)
+			 * and destroyed-and-replaced wholesale by the REPLACE branch below
+			 * (:1078-:1079), so sharing one pointer across sessions would double-free. */
+			janus_mutex_lock(&L->mutex);
+			if(vb->op == SLV_VIS_OP_ADD) {
+				for(int k = 0; k < e->n_excl; k++) {
+					const char *s = e->excl[k];
+					if(!g_hash_table_contains(L->excluded, s)) {
+						g_hash_table_add(L->excluded, g_strdup(s));
+						if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+							g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+							trans_join[ntrans++] = FALSE;   /* newly excluded -> leave */
+						}
 					}
 				}
-			}
-		} else if(vb->op == SLV_VIS_OP_REMOVE) {
-			for(int k = 0; k < e->n_excl; k++) {
-				const char *s = e->excl[k];
-				if(g_hash_table_remove(L->excluded, s)) {
-					if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
-						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
-						trans_join[ntrans++] = TRUE;   /* un-excluded -> join */
+			} else if(vb->op == SLV_VIS_OP_REMOVE) {
+				for(int k = 0; k < e->n_excl; k++) {
+					const char *s = e->excl[k];
+					if(g_hash_table_remove(L->excluded, s)) {
+						if(ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+							g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+							trans_join[ntrans++] = TRUE;   /* un-excluded -> join */
+						}
 					}
 				}
-			}
-		} else {   /* SLV_VIS_OP_REPLACE: set exactly; diff old vs new for transitions */
-			GHashTable *newset = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-			for(int k = 0; k < e->n_excl; k++)
-				g_hash_table_add(newset, g_strdup(e->excl[k]));
-			/* removed = old \ new -> join (if present) */
-			GHashTableIter oit;
-			gpointer ok;
-			g_hash_table_iter_init(&oit, L->excluded);
-			while(g_hash_table_iter_next(&oit, &ok, NULL)) {
-				const char *s = ok;
-				if(!g_hash_table_contains(newset, s)
-						&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
-					g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
-					trans_join[ntrans++] = TRUE;
+			} else {   /* SLV_VIS_OP_REPLACE: set exactly; diff old vs new for transitions */
+				GHashTable *newset = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+				for(int k = 0; k < e->n_excl; k++)
+					g_hash_table_add(newset, g_strdup(e->excl[k]));
+				/* removed = old \ new -> join (if present) */
+				GHashTableIter oit;
+				gpointer ok;
+				g_hash_table_iter_init(&oit, L->excluded);
+				while(g_hash_table_iter_next(&oit, &ok, NULL)) {
+					const char *s = ok;
+					if(!g_hash_table_contains(newset, s)
+							&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+						trans_join[ntrans++] = TRUE;
+					}
 				}
-			}
-			/* added = new \ old -> leave (if present) */
-			for(int k = 0; k < e->n_excl; k++) {
-				const char *s = e->excl[k];
-				if(!g_hash_table_contains(L->excluded, s)
-						&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
-					g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
-					trans_join[ntrans++] = FALSE;
+				/* added = new \ old -> leave (if present) */
+				for(int k = 0; k < e->n_excl; k++) {
+					const char *s = e->excl[k];
+					if(!g_hash_table_contains(L->excluded, s)
+							&& ntrans < SLV_VIS_MAX_EXCL * 2 && g_hash_table_contains(by_display, s)) {
+						g_strlcpy(trans_uuid[ntrans], s, SLV_UUID_LEN);
+						trans_join[ntrans++] = FALSE;
+					}
 				}
+				g_hash_table_destroy(L->excluded);
+				L->excluded = newset;
 			}
-			g_hash_table_destroy(L->excluded);
-			L->excluded = newset;
+			janus_mutex_unlock(&L->mutex);
+
+			/* Presence transitions are keyed by the SOURCE display (agent UUID), so a
+			 * duplicated source still emits ONE dot per avatar (the gate above is a
+			 * by_display membership test). But each matching LISTENER session is a
+			 * distinct WebRTC connection and must be told separately, so we emit here,
+			 * inside the per-session loop — once per (matching listener, source avatar). */
+			for(int t = 0; t < ntrans; t++)
+				janus_slvoice_relay_presence_one(L, trans_uuid[t], trans_join[t]);
 		}
-		janus_mutex_unlock(&L->mutex);
 
-		for(int t = 0; t < ntrans; t++)
-			janus_slvoice_relay_presence_one(L, trans_uuid[t], trans_join[t]);
+		/* nmatch == 0 means this listener avatar is not in the room right now — the
+		 * scan applied nothing and the loop moves to the next entry (this is the old
+		 * L==NULL skip, now implicit). Only a genuine collision is worth a log. */
+		if(nmatch > 1) {
+			/* Amendment 7 / §M: this resolution was silent before — every counter read
+			 * healthy while one handle got the exclusion and the other silently did not.
+			 * Name the display and the colliding user_ids now that we apply to all. The
+			 * merge above already fanned out to ALL nmatch sessions; match_ids only holds
+			 * the first SLV_MAX_MIX for this log line (room->participants is not capped at
+			 * join, so nmatch > cap, while pathological, is not impossible), so the id
+			 * list is flagged truncated when that bound is exceeded. */
+			char ids[SLV_MAX_MIX * 24];   /* 24 > max digits(guint64) 20 + comma; holds all cap ids */
+			int off = 0;
+			for(int m = 0; m < nmatch && m < SLV_MAX_MIX; m++)
+				off += g_snprintf(ids + off, sizeof(ids) - (gsize)off, "%s%"PRIu64,
+					m ? "," : "", match_ids[m]);
+			JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch listener %s (op=%s, room %"PRId64") "
+				"matched %d sessions (user_ids: %s%s) — duplicate display; applied to all "
+				"(parcel-voice-semantics.md §M)\n",
+				JANUS_SLVOICE_PACKAGE, e->listener, slv_vis_op_str(vb->op),
+				(int64_t)vb->room, nmatch, ids,
+				nmatch > SLV_MAX_MIX ? " (user_ids truncated)" : "");
+		}
 	}
 
 	g_hash_table_destroy(by_display);
