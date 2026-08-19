@@ -144,6 +144,13 @@
 #define SLV_READD_DIST_M    58.0    /* hysteresis re-add: un-cull only inside this (< cutoff) */
 #define SLV_CUTOFF_DIST     (SLV_CUTOFF_DIST_M * SLV_GEOM_SCALE)   /* 6000, stored ×100 unit */
 #define SLV_READD_DIST      (SLV_READD_DIST_M * SLV_GEOM_SCALE)    /* 5800, stored ×100 unit */
+/* Distance attenuation (Phase 3b item 3). Full volume within the reference distance,
+ * then a normalized falloff to exactly zero at the cutoff (item 2 owns beyond it).
+ * SLV_REF_DIST is metres->stored ONCE here, as above. SLV_FALLOFF_EXP shapes the
+ * curve and is DIMENSIONLESS — a pure exponent, NOT a distance; do not scale it. */
+#define SLV_REF_DIST_M      10.0    /* full volume within this radius */
+#define SLV_REF_DIST        (SLV_REF_DIST_M * SLV_GEOM_SCALE)   /* 1000, stored ×100 unit */
+#define SLV_FALLOFF_EXP     2.0     /* falloff shaping exponent (dimensionless; no unit) */
 
 /* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
@@ -2130,8 +2137,18 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			if(!s->snap_valid || !sess[j]->snap_valid)
 				continue;
 			double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, sess[j]->snap_sp));
-			if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq))
+			if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq)) {
 				mutes[j] = 1;
+			} else if(dcull > SLV_REF_DIST) {
+				/* Phase 3b item 3: distance attenuation — the else of the cull, on the
+				 * SAME dcull (no second distance). Non-culled and past the reference:
+				 * normalized falloff, exactly 1 at the reference and exactly 0 at the
+				 * cutoff (the cull owns d >= cutoff). Multiplies into gains[j] — which
+				 * holds 1.0 or the viewer gain — never replaces. Inside the reference:
+				 * full volume, no pow. Mono still; panning is item 4. */
+				double t = (SLV_CUTOFF_DIST - dcull) / (SLV_CUTOFF_DIST - SLV_REF_DIST);
+				gains[j] *= (float)pow(t, SLV_FALLOFF_EXP);
+			}
 		}
 
 		float frame[SLV_FRAME_TOTAL];
