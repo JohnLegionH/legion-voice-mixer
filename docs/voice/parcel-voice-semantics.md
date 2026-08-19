@@ -990,15 +990,19 @@ full avatar relog.
 
 **Mechanism.** `janus_slvoice_apply_visbatch` indexes the room into a temporary
 `by_display` table keyed on `p->display`
-(`D:\legion-voice-mixer\src\janus_slvoice.c:945`–`:953`) and resolves each entry's
-listener against it (`:957`). `display` is the avatar UUID string (`:262`), which is
-**not** the participant identity — `room->participants` is keyed on `user_id` (`:219`,
-`:260`). The exclusion path resolves through a value not guaranteed unique within a
+(`D:\legion-voice-mixer\src\janus_slvoice.c:1009`–`:1017`) and resolves each entry's
+listener against it (`:1021`). `display` is the avatar UUID string (`:301`), which is
+**not** the participant identity — `room->participants` is keyed on `user_id` (`:247`,
+`:299`). The exclusion path resolves through a value not guaranteed unique within a
 room. `g_hash_table_insert` replaces on duplicate key, so two sessions sharing a
 `display` collapse to one; the other silently receives nothing. Which survives is last
-insert wins in GLib hash-iteration order, **which GLib does not define**.
+insert wins in GLib hash-iteration order, **which GLib does not define**. The same
+collapse exists independently in the power/VAD dot batch (`janus_slvoice.c:1671`), where
+a jansson object keyed by `display` likewise replaces on duplicate; there one dot per
+avatar UUID is arguably the intended semantics, so it is recorded here rather than
+flagged as a defect.
 
-**Why it is silent.** The overwrite during index build (`:952`) emits no log, and the
+**Why it is silent.** The overwrite during index build (`:1016`) emits no log, and the
 surviving entry is applied and counted normally — `excluded_entries` advances on a
 handle and every counter reads healthy. Nothing distinguishes "applied to the right
 handle" from "applied to the wrong one."
@@ -1022,7 +1026,7 @@ corroborates the origin. Treat as a pointer, not a finding.
 
 **Suggested first step.** Decide whether the wire format should carry participant
 identity rather than display, or whether an entry should apply to **all** participants
-matching a display. At minimum, detect the collision at `janus_slvoice.c:952` and log
+matching a display. At minimum, detect the collision at `janus_slvoice.c:1016` and log
 it — a silent overwrite in an enforcement path should never be silent.
 
 ### N. Instrument note — `epoch`

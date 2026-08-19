@@ -325,3 +325,19 @@ Slice one is built, deployed, and verified: geometry snapshot with the §7.1 cam
 **Mutation testing found a decorative test.** `test_pitch_independent` as originally written could not fail: its source was level and on the pitch axis, so a dropped horizontal projection left it passing. Review by hand had not caught this. Where unit tests are the acceptance criteria, verifying that they can fail is part of writing them.
 
 ---
+
+## AMENDMENT 7 — the exclusion feed names avatars, not handles (2026-08-18)
+
+Recon for the §M collision fix established the boundary that decides its design.
+
+**Agent UUID is the only identifier either feed carries.** The visibility batch is keyed purely by agent UUID (`visbatch.h:16`-`:17`, `:58`-`:60`), and the viewer's peer_ctl feed likewise (`sldata.h:74`-`:80`). Neither carries a handle, session, or connection id.
+
+**Therefore an exclusion entry means "this avatar," never "this handle."** Applying an entry to every session matching the display is not a workaround for missing information — it is the faithful reading of what the sim sent. Resolving to a single session, as the current single-value `by_display` map does, is the incorrect behaviour, and which session survives depends on undefined GLib iteration order.
+
+**Lifetime constraint:** each session owns its own `excluded` table, destroyed at teardown (`janus_slvoice.c:570`) and destroyed-and-replaced wholesale in the REPLACE branch (`:1078`-`:1079`). A fan-out fix must replicate the merge into each owner's set. Sharing one table pointer across sessions would double-free.
+
+**The root cause is separate.** The duplicate arises because the join path performs no display-uniqueness check (`janus_slvoice.c:1406`, `:1434`, `:1449`-`:1451`) and the plugin assigns a fresh `user_id` per join, so an orphaned handle coexists with its replacement. Evicting a stale same-display handle at join would collapse every display-keyed hazard at once, including the independent dot-batch collapse at `:1671`. That is a more invasive change — it tears down a live session on a heuristic — and is deferred to its own recon rather than folded in here.
+
+The exclusion fan-out treats the symptom correctly. The join-time uniqueness gate treats the disease.
+
+---
