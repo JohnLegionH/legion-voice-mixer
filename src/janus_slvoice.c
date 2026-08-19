@@ -67,9 +67,9 @@
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
 
 /* Plugin information */
-#define JANUS_SLVOICE_VERSION         7
-#define JANUS_SLVOICE_VERSION_STRING  "0.7.0"
-#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 2: real per-room flat N-minus-one conference mixing with DTX/VAD cull, per-source mute/gain, and encode-skip; echo remains as a per-participant diagnostic override; no spatialization yet)."
+#define JANUS_SLVOICE_VERSION         8
+#define JANUS_SLVOICE_VERSION_STRING  "0.8.0"
+#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 3b: per-room N-minus-one mixing with DTX/VAD cull, per-source mute/gain and encode-skip; sim-authoritative per-listener visibility exclusion; distance culling with hysteresis and distance attenuation from viewer geometry, with a camera-position leash; monaural for now -- no panning or HRTF yet; echo remains a per-participant diagnostic override)."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
 #define JANUS_SLVOICE_PACKAGE         "janus.plugin.slvoice"
