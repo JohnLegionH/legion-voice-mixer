@@ -381,6 +381,9 @@ typedef struct janus_slvoice_session {
 	double rtp_out_rate;         /* outbound RTP packets/sec */
 	gint64 rate_ts;              /* monotonic us of the last rate update */
 	double last_rms;             /* RMS of the most recent decoded frame (0..1) */
+	double last_mix_rms;         /* RMS of this listener's most recent MIXED OUTPUT frame
+	                              * (0..1): the N-1 mix (or echo) relayed to it, NOT the
+	                              * inbound talker level in last_rms. Diagnostic-only. */
 	volatile gint power_p;       /* RMS*128 clamped 0..127 (for the SLData batch) */
 	volatile gint vad;           /* simple energy VAD 0/1 (for the SLData batch) */
 	guint64 data_msgs_received;  /* SLData messages received on the data channel */
@@ -855,6 +858,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "frames_mixed", json_integer((json_int_t)session->frames_mixed));
 	json_object_set_new(info, "echo_active", g_atomic_int_get(&session->echo_active) ? json_true() : json_false());
 	json_object_set_new(info, "last_rms", json_real(session->last_rms));
+	json_object_set_new(info, "last_mix_rms", json_real(session->last_mix_rms));   /* listener's mixed-OUTPUT level (vs last_rms = inbound talker input) */
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
 	json_object_set_new(info, "excluded_entries",
 		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
@@ -1778,6 +1782,7 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	s->rtp_out_count = 0;
 	s->silent_ticks = 0;
 	s->last_rms = 0.0;
+	s->last_mix_rms = 0.0;
 	s->decode_ok = FALSE;
 	g_atomic_int_set(&s->power_p, 0);
 	g_atomic_int_set(&s->vad, 0);
@@ -2152,16 +2157,23 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		}
 
 		float frame[SLV_FRAME_TOTAL];
-		gboolean silence;
+		int summed = 1;   /* echo relays the participant's own frame (no N-1 sum) */
 		if(echo) {
 			janus_slvoice_build_echo(s, frame, SLV_FRAME_SAMPLES);
-			silence = slv_mix_is_silent(frame, SLV_FRAME_TOTAL, SLV_VAD_RMS);
 		} else {
-			int summed = slv_mix_nminus1(frame, SLV_FRAME_TOTAL, srcbuf, audible,
+			summed = slv_mix_nminus1(frame, SLV_FRAME_TOTAL, srcbuf, audible,
 				mutes, gains, count, i);
 			slv_mix_clamp(frame, SLV_FRAME_TOTAL);
-			silence = (summed == 0) || slv_mix_is_silent(frame, SLV_FRAME_TOTAL, SLV_VAD_RMS);
 		}
+		/* RMS of the finalized output frame relayed to this listener. slv_mix_is_silent
+		 * used to compute this and throw it away; compute it once via the same public
+		 * slv_mix_rms and RETAIN it for query_session (last_mix_rms). The silence test
+		 * below is byte-for-byte the same as slv_mix_is_silent (<= SLV_VAD_RMS), so the
+		 * encode-skip decision, the threshold, the mix, and everything audible are
+		 * identical. DIAGNOSTIC-ONLY — last_mix_rms drives nothing. */
+		double out_rms = slv_mix_rms(frame, SLV_FRAME_TOTAL);
+		s->last_mix_rms = out_rms;
+		gboolean silence = (summed == 0) || (out_rms <= SLV_VAD_RMS);
 		if(!silence)
 			s->frames_mixed++;
 		janus_slvoice_encode_relay(s, frame, SLV_FRAME_SAMPLES, silence);
