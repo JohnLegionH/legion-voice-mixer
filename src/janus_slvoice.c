@@ -64,6 +64,7 @@
 #include "visbatch.h"    /* Phase 3a: server-to-server visibility batch parser (unit-tested) */
 #include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
+#include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
 
 /* Plugin information */
 #define JANUS_SLVOICE_VERSION         7
@@ -125,6 +126,16 @@
 #define SLV_MAX_MIX         64
 /* Warn if a single tick takes longer than this (spec §4.1 mix-deadline). */
 #define SLV_TICK_WARN_MS    15.0
+
+/* ---- Phase 3b spatial constants (geometry snapshot / §7.1 camera leash) ----
+ * Viewer geometry (sp/sh/lp/lh) arrives scaled ×100 — an int of value×100 — so a
+ * stored coordinate is centimetres (docs/voice/phase3b-design-brief.md "Resolved:
+ * the geometry unit"; viewer llvoicewebrtc.cpp:1239-1266). Distances below are
+ * therefore in the ×100 unit; the metres->stored conversion is done ONCE here,
+ * never inline at a use site (the brief's unit-discipline rule). */
+#define SLV_GEOM_SCALE      100.0   /* stored unit = metres × 100 */
+#define SLV_LEASH_DIST_M    50.0    /* §7.1 camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
+#define SLV_LEASH_DIST      (SLV_LEASH_DIST_M * SLV_GEOM_SCALE)   /* 5000, stored ×100 unit */
 
 /* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
@@ -290,6 +301,15 @@ typedef struct janus_slvoice_session {
 	volatile gint active;        /* DTX/VAD cull: in the active talker set (150ms release hold) */
 	gint64 last_rtp_us;          /* monotonic us of the last inbound RTP (for the cull) */
 	gboolean decode_ok;          /* last decode attempt succeeded */
+	/* Phase 3b geometry snapshot (tick-owned: written only by the tick's pass 1
+	 * under s->mutex, read by pass 2's per-listener DSP — no lock needed there,
+	 * the same discipline as decbuf above). Copied from last_data each tick and,
+	 * for lp, leash-clamped once here so no listener ever reads an unclamped
+	 * camera. Nothing consumes these yet (Phase 3b slice one is snapshot-only). */
+	slv_vec3 snap_sp;            /* self (avatar) position, stored ×100 (cm) */
+	slv_vec3 snap_lp;            /* listener (camera) position, leash-clamped, ×100 */
+	slv_quat snap_lh;            /* listener heading/orientation, ×100 (identity if absent) */
+	gboolean snap_valid;         /* sp AND lp present this tick -> snap usable for distance */
 	/* 500ms echo delay ring (per-listener echo override) + encode scratch. */
 	float *ring;                 /* SLV_RING_SAMPLES * SLV_CHANNELS */
 	int ring_wpos;               /* write cursor, per-channel sample index */
@@ -1938,6 +1958,31 @@ static void janus_slvoice_encode_relay(janus_slvoice_session *s, float *frame, i
  * listener's per-source mutes/gains), encode, and relay. An echoed participant
  * hears its own delayed audio instead. Holds room->mutex for the whole tick so
  * membership is frozen and no participant's media is freed mid-tick. */
+/* Phase 3b: snapshot this participant's geometry for the tick. Runs in pass 1
+ * under s->mutex — the SAME lock last_data is written under by
+ * janus_slvoice_incoming_data — so pass 2 reads the snapshot lock-free, exactly
+ * as it reads decbuf. Copies sp/lp/lh from the last SLData gated on presence,
+ * then applies the §7.1 server-side camera leash to lp (the client clamp at
+ * llvoicewebrtc.cpp:1203-1220 is spoofable, so we re-apply it here). Leaves the
+ * snapshot marked invalid when the two positions are absent. Snapshot-only:
+ * nothing reads snap_* yet (Phase 3b slice one). */
+static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
+	unsigned f = s->last_data_fields;
+	s->snap_valid = ((f & SLV_FIELD_SP) != 0) && ((f & SLV_FIELD_LP) != 0);
+	if(!s->snap_valid)
+		return;   /* no usable geometry this tick; the mix stays flat */
+	s->snap_sp = s->last_data.sp;
+	s->snap_lp = s->last_data.lp;
+	s->snap_lh = (f & SLV_FIELD_LH) ? s->last_data.lh
+	                                : (slv_quat){ 0.0, 0.0, 0.0, 1.0 };   /* identity if no heading */
+	/* §7.1 camera leash: clamp lp onto the SLV_LEASH_DIST sphere around sp when it
+	 * exceeds it. Projection lifted from llvoicewebrtc.cpp:1213, in the ×100 unit. */
+	slv_vec3 off = slv_vec3_sub(s->snap_lp, s->snap_sp);
+	double d = slv_vec3_mag(off);
+	if(d > SLV_LEASH_DIST)
+		s->snap_lp = slv_vec3_madd(s->snap_sp, SLV_LEASH_DIST / d, off);
+}
+
 static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	gint64 t0 = janus_get_monotonic_time();
 	janus_mutex_lock(&room->mutex);
@@ -1966,6 +2011,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		janus_slvoice_tick_decode_locked(s, t0);
 		audible[i] = (s->dec_samples > 0) ? 1 : 0;
 		srcbuf[i] = s->decbuf;   /* tick-owned; stable for the rest of this tick */
+		janus_slvoice_snapshot_geometry_locked(s);   /* Phase 3b: geometry + §7.1 leash (tick-owned) */
 		janus_mutex_unlock(&s->mutex);
 	}
 
