@@ -90,6 +90,11 @@
 #define JANUS_SLVOICE_ERROR_NOT_JOINED      487
 #define JANUS_SLVOICE_ERROR_ALREADY_JOINED  491
 #define JANUS_SLVOICE_ERROR_INVALID_SDP     493
+/* Room at capacity (SLV_MAX_MIX). 495 is free in audiobridge's scheme (it tops out at
+ * 494), so this is unambiguously ours — the sim connector keys on it to return HTTP
+ * 409 Conflict, which the viewer maps to ERROR_CHANNEL_FULL. Distinct from every other
+ * join failure so an unrelated error never reads as "room full". */
+#define JANUS_SLVOICE_ERROR_ROOM_FULL       495
 #define JANUS_SLVOICE_ERROR_UNKNOWN         499
 
 /* Mixer->client SLData power/VAD batch cadence (spec §9: ~100ms). */
@@ -124,12 +129,15 @@
  * (PEER_GAIN_CONVERSION_FACTOR in llvoicewebrtc.cpp), so linear = ug/220. */
 #define SLV_GAIN_FACTOR     220.0
 #define SLV_GAIN_MAX        4.0     /* clamp recovered per-source gain (sanity) */
-/* Hard cap on participants folded into one tick's mix (flat conference scope).
- * Overridable at build time with -DSLV_MAX_MIX=N for measurement builds; raising it
- * deliberately exposes the O(N) per-listener encode and O(N^2) per-listener setup
- * costs (see docs/voice/scaling-assessment.md). Production value stays 64. */
+/* Max participants folded into one tick's mix, AND the room admission ceiling
+ * (enforced at join — see the ROOM_FULL check). One number governs both: the mix
+ * arrays are sized to it, so admitting past it is exactly what the old silent tick-
+ * time truncation did. 110 matches Second Life's per-region limit; the measurement
+ * (docs/voice/scaling-assessment.md) shows it fits under realistic spread geometry,
+ * though NOT under all-audible clustering. Overridable with -DSLV_MAX_MIX=N for
+ * measurement builds; raising it exposes the O(N) encode and O(N^2) setup costs. */
 #ifndef SLV_MAX_MIX
-#define SLV_MAX_MIX         64
+#define SLV_MAX_MIX         110
 #endif
 /* Opus encoder tuning for the per-listener mix. Both are overridable at build time
  * (-DSLV_OPUS_COMPLEXITY=N / -DSLV_OPUS_BITRATE=N) for measurement builds that sweep
@@ -1492,6 +1500,30 @@ static void *janus_slvoice_handler(void *data) {
 				janus_refcount_decrease(&room->ref);
 				error_code = JANUS_SLVOICE_ERROR_INVALID_SDP;
 				g_snprintf(error_cause, 512, "join requires a JSEP offer");
+				goto respond;
+			}
+			/* Join-time capacity cap (item 1, docs/voice/scaling-assessment.md).
+			 * Reject the (cap+1)th joiner BEFORE negotiate/media_alloc so nothing needs
+			 * undoing. This REPLACES the old silent, non-deterministic tick-time
+			 * truncation (:2157): admission is now deterministic (first-come-first-served
+			 * by join order) and distinguishable (ROOM_FULL) so the sim connector can
+			 * surface it to the user.
+			 *
+			 * This is a SAFETY VALVE against unbounded participant growth, NOT a
+			 * performance guarantee. It bounds participant COUNT only. The all-audible
+			 * load case — every listener within earshot of a talker, ~SLV_MAX_MIX
+			 * encodes per tick, over the 20ms budget — is guarded by NOTHING yet. Those
+			 * are two different failure modes and only one has a guard: 110 fits under
+			 * realistic spread geometry but not under all-audible clustering, so no
+			 * single participant number is correct in both cases. */
+			janus_mutex_lock(&room->mutex);
+			guint room_pop = g_hash_table_size(room->participants);
+			janus_mutex_unlock(&room->mutex);
+			if(room_pop >= SLV_MAX_MIX) {
+				janus_refcount_decrease(&room->ref);
+				error_code = JANUS_SLVOICE_ERROR_ROOM_FULL;
+				g_snprintf(error_cause, 512, "Room %"PRIu64" is at capacity (%u/%d)",
+					room_id, room_pop, SLV_MAX_MIX);
 				goto respond;
 			}
 			char *answer_sdp = NULL;
