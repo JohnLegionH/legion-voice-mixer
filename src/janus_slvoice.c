@@ -926,6 +926,15 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 			memberships = 0;
 		json_object_set_new(info, "mix_memberships", json_integer(memberships));
 		json_object_set_new(info, "mix_sources", json_integer(active_others));
+		/* Room-level occupancy vs the join-time cap. DISTINCT from mix_memberships /
+		 * mix_sources above (those are per-session mix counts): room_participants is
+		 * this room's total membership, room_capacity is SLV_MAX_MIX, the ceiling the
+		 * join path rejects past (ROOM_FULL). Diagnostic only — lets a poller see how
+		 * close a room is to full proactively, rather than learning it reactively when a
+		 * provision is rejected. Reuses the g_hash_table_size already read under this
+		 * same qroom->mutex hold; no new lock, no effect on admission/tick/audio. */
+		json_object_set_new(info, "room_participants", json_integer((json_int_t)g_hash_table_size(qroom->participants)));
+		json_object_set_new(info, "room_capacity", json_integer(SLV_MAX_MIX));
 		json_t *hist = json_object();
 		json_object_set_new(hist, "lt5ms", json_integer((json_int_t)qroom->tick_hist[0]));
 		json_object_set_new(hist, "5to10ms", json_integer((json_int_t)qroom->tick_hist[1]));
