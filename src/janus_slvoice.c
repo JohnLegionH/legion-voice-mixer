@@ -124,8 +124,26 @@
  * (PEER_GAIN_CONVERSION_FACTOR in llvoicewebrtc.cpp), so linear = ug/220. */
 #define SLV_GAIN_FACTOR     220.0
 #define SLV_GAIN_MAX        4.0     /* clamp recovered per-source gain (sanity) */
-/* Hard cap on participants folded into one tick's mix (flat conference scope). */
+/* Hard cap on participants folded into one tick's mix (flat conference scope).
+ * Overridable at build time with -DSLV_MAX_MIX=N for measurement builds; raising it
+ * deliberately exposes the O(N) per-listener encode and O(N^2) per-listener setup
+ * costs (see docs/voice/scaling-assessment.md). Production value stays 64. */
+#ifndef SLV_MAX_MIX
 #define SLV_MAX_MIX         64
+#endif
+/* Opus encoder tuning for the per-listener mix. Both are overridable at build time
+ * (-DSLV_OPUS_COMPLEXITY=N / -DSLV_OPUS_BITRATE=N) for measurement builds that sweep
+ * encode cost, mirroring SLV_MAX_MIX; production values are unchanged. Complexity is
+ * the dominant CPU lever of the two (docs/voice/scaling-assessment.md). */
+#ifndef SLV_OPUS_COMPLEXITY
+#define SLV_OPUS_COMPLEXITY 9        /* 0..10; 10 is max. */
+#endif
+/* NUMERIC-ONLY: OPUS_SET_BITRATE also accepts the sentinels OPUS_AUTO and
+ * OPUS_BITRATE_MAX, which this integer define does NOT carry — do not expect them
+ * to work through it. */
+#ifndef SLV_OPUS_BITRATE
+#define SLV_OPUS_BITRATE    64000    /* bits/sec; spec §5: listener mix 64-96kbps stereo */
+#endif
 /* Warn if a single tick takes longer than this (spec §4.1 mix-deadline). */
 #define SLV_TICK_WARN_MS    15.0
 
@@ -1820,8 +1838,8 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	opus_encoder_ctl(s->enc, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
 	opus_encoder_ctl(s->enc, OPUS_SET_INBAND_FEC(1));
 	opus_encoder_ctl(s->enc, OPUS_SET_PACKET_LOSS_PERC(10));
-	opus_encoder_ctl(s->enc, OPUS_SET_COMPLEXITY(9));
-	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(64000));   /* spec §5: listener mix 64-96kbps stereo */
+	opus_encoder_ctl(s->enc, OPUS_SET_COMPLEXITY(SLV_OPUS_COMPLEXITY));
+	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(SLV_OPUS_BITRATE));   /* spec §5: listener mix 64-96kbps stereo */
 	opus_encoder_ctl(s->enc, OPUS_SET_DTX(1));            /* encode-skip: cheap comfort frames on silence */
 	/* Preallocate every buffer — nothing is allocated per packet or per tick. */
 	s->jb       = g_malloc0((gsize)SLV_JB_SLOTS * SLV_JB_PAYLOAD_MAX);
