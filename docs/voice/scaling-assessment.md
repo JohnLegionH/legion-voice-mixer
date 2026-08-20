@@ -195,3 +195,41 @@ the target is reachable.
 - **What is the measured cost curve, decomposed?** All timings here are estimates.
 - **Exactly one inbound track?** High-confidence inference, not literally cited.
   Resolvable from a live negotiated SDP answer.
+
+---
+
+## AMENDMENT 1 — measured: the binding variable is audible listeners, not population (2026-08-18)
+
+The body's cost figures were estimates. The `bench_tick` harness has now measured the tick directly, and the conclusion changes materially.
+
+**Measurements**, 500 measured ticks each, `SLV_MAX_MIX=128`, complexity 9, on an i7-12700KF:
+
+| Config | Encodes / N | p50 | vs 20 ms |
+|---|---|---|---|
+| N=110, A=4, clustered | 110 / 110 | 36.6 ms | over |
+| N=110, A=4, spread | 24 / 110 | 7.4 ms | fits |
+| N=110, A=16, spread | 92 / 110 | 21.4 ms | just over |
+| N=50, A=4, spread | ~25 / 50 | 6.8 ms | fits |
+| N=50, A=4, clustered | 50 / 50 † | 15.8 ms | fits |
+
+† The N=50 clustered encode count is geometry-derived, not counter-measured: that row predates the harness encode counter, so only its p50 was printed. 50/50 is certain by construction — clustered means every listener is audible, hence every listener encodes — but the count itself was never emitted by the counter.
+
+**The tick is encode-bound, confirmed two independent ways.** Under clustered geometry, cost is invariant to active-talker count — 36.6 / 36.3 / 37.1 ms at A = 4 / 8 / 16 — so decode is negligible. Under spread geometry, varying the audible count 24 → 92 scales the tick 7.4 → 21.4 ms, a slope of ~0.21 ms per encode.
+
+**The binding variable is the audible-listener count, not N.** Break-even at complexity 9 is roughly **85 simultaneously-audible listeners**, essentially independent of population. A 110-avatar region of quiet spectators around a few talkers fits comfortably; a region where everyone can hear everyone does not.
+
+**This supersedes the body's fit conclusion.** The body reasoned from an encode-per-listener wall and concluded ~110 was out of reach. That holds only for the pathological all-audible case. Under realistic spread geometry with single-digit talkers, 110 fits with large margin — because listeners whose entire audible set is culled produce a silent mix and skip encode entirely.
+
+**Culling helps on two fronts, not one.** Clustered at 110 encodes costs 36.6 ms; spread extrapolated to 110 encodes is ~25 ms. The difference is the O(N²) spatial setup, which clustering also maximises because nothing culls. A spread region is therefore cheaper than its encode count alone predicts. The body acknowledged that all-silent listeners skip encode but underweighted how much geometry actually silences. Measured, the effect is large: realistic spread culls most listeners' entire audible set, so the encode count falls to a fraction of N.
+
+**The complexity knob, measured.** c9 → c6 reduces the clustered N=110 tick by 25% (36.6 → 27.4 ms), still over. c9 → c3 reduces it by 57% (36.6 → 15.8 ms), bringing even the clustered worst case under budget — but at a large quality cost, and with max grazing 20.1 ms.
+
+**Hardware caveat, unchanged and important.** All figures are from a fast desktop CPU. A commodity region host is typically 1.5–3× slower single-threaded. The favourable spread case at 7.4 ms would be roughly 22 ms at 3×, which is at the edge. **These numbers are a best case for deployment hardware, not a representative one.**
+
+**What this means for the open questions:**
+
+- **Pass-2 parallelism** is no longer the primary blocker for realistic load. It remains relevant for the all-audible case and for slower hardware, and stays open rather than closed.
+- **The practical capacity rule** is "fewer than ~85 audible listeners per tick at c9," which is more useful than a participant cap and should inform whatever replaces the non-deterministic truncation.
+- **The deferred DSP** still adds per-pair and per-listener cost, but the margin under realistic load is larger than the body assumed. That changes the weight of the argument for waiting, not its direction.
+
+**Measurement caveats.** The harness is single-threaded with no lock contention and no transport, so real cost is higher; the synthetic tone makes borderline listeners flicker across the silence floor, which is partly real behaviour and partly artifact. See `tests/bench_tick.c` for the full list of differences from the real tick.
