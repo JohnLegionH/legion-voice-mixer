@@ -124,8 +124,12 @@ static void bench_gen_frames(void) {
 	opus_encoder_destroy(enc);
 }
 
+/* ---- Geometry modes ------------------------------------------------------- */
+typedef enum { GEO_CLUSTER = 0, GEO_SPREAD = 1 } bench_geo;
+#define BENCH_REGION_M 256.0   /* one SL region footprint (x100 units => 25600) */
+
 /* ---- Session construction ------------------------------------------------- */
-static janus_slvoice_session *bench_make_session(janus_slvoice_room *room, int i, int n) {
+static janus_slvoice_session *bench_make_session(janus_slvoice_room *room, int i, int n, bench_geo mode) {
 	janus_slvoice_session *s = g_malloc0(sizeof(janus_slvoice_session));
 	s->handle  = (janus_plugin_session *)(uintptr_t)(0x1000 + i);   /* non-NULL sentinel; never dereferenced */
 	s->user_id = (guint64)(i + 1);
@@ -139,13 +143,28 @@ static janus_slvoice_session *bench_make_session(janus_slvoice_room *room, int i
 	janus_mutex_unlock(&s->mutex);
 	g_atomic_int_set(&s->webrtc_up, 1);   /* pass-2 listener gate (setup_media in prod) */
 
-	/* Geometry: a ring cluster of radius 10 m (x100 units), all within the cull
-	 * cutoff (60 m) so no pair is culled — every pair runs azimuth+pan (max setup)
-	 * and every listener hears every active source (max encode). Distinct
-	 * directions => distinct azimuths. Camera at the avatar; identity heading. */
-	double th = 2.0 * M_PI * (double)i / (double)n;
-	double r  = 1000.0;
-	s->last_data.sp.x = r * cos(th); s->last_data.sp.y = r * sin(th); s->last_data.sp.z = 0.0;
+	/* Geometry. Camera at the avatar (lp=sp, so no §7.1 leash effect); identity
+	 * heading (azimuth then varies with relative position). x100 units throughout. */
+	if(mode == GEO_SPREAD) {
+		/* Distribute across one 256x256 m region on a near-square row-major grid, so
+		 * a realistic fraction of listener-source pairs exceed the 60 m cull cutoff
+		 * (a 60 m radius is ~17% of the region area). A far listener's talkers get
+		 * culled or attenuated below the silence floor, so its mix goes silent and
+		 * encode is skipped — the whole point of this mode. */
+		int cols = (int)ceil(sqrt((double)n));
+		if(cols < 1) cols = 1;
+		double spacing = BENCH_REGION_M / (double)cols;              /* metres/cell */
+		double x_m = (double)(i % cols) * spacing + 0.5 * spacing;
+		double y_m = (double)(i / cols) * spacing + 0.5 * spacing;
+		s->last_data.sp.x = x_m * 100.0; s->last_data.sp.y = y_m * 100.0; s->last_data.sp.z = 0.0;
+	} else {
+		/* CLUSTER (default, reproduces prior numbers): a 10 m-radius ring, all inside
+		 * the cutoff, so no pair is culled — every pair runs azimuth+pan (max setup)
+		 * and every listener hears every active source (max encode). */
+		double th = 2.0 * M_PI * (double)i / (double)n;
+		double r  = 1000.0;
+		s->last_data.sp.x = r * cos(th); s->last_data.sp.y = r * sin(th); s->last_data.sp.z = 0.0;
+	}
 	s->last_data.lp   = s->last_data.sp;
 	s->last_data.lh.x = 0.0; s->last_data.lh.y = 0.0; s->last_data.lh.z = 0.0; s->last_data.lh.w = 100.0;
 	s->last_data_fields = SLV_FIELD_SP | SLV_FIELD_LP | SLV_FIELD_LH;
@@ -165,6 +184,8 @@ int main(int argc, char **argv) {
 	int N     = (argc > 1) ? atoi(argv[1]) : 8;
 	int A     = (argc > 2) ? atoi(argv[2]) : 4;
 	int iters = (argc > 3) ? atoi(argv[3]) : 500;
+	/* argv[4]: geometry mode, default "cluster" so prior numbers stay reproducible. */
+	bench_geo mode = (argc > 4 && strcmp(argv[4], "spread") == 0) ? GEO_SPREAD : GEO_CLUSTER;
 	if(N < 1) N = 1;
 	if(A < 0) A = 0;
 	if(A > N) A = N;
@@ -183,15 +204,26 @@ int main(int argc, char **argv) {
 
 	janus_slvoice_session **sess = g_malloc0((gsize)N * sizeof(*sess));
 	for(int i = 0; i < N; i++)
-		sess[i] = bench_make_session(room, i, N);
+		sess[i] = bench_make_session(room, i, N, mode);
 
-	/* Prime the A active sources: enough increasing-seq frames to cross the fixed
-	 * lag so jb_pull yields SLV_JB_FRAME on the first measured tick. */
-	for(int i = 0; i < A; i++) {
-		janus_mutex_lock(&sess[i]->mutex);
+	/* The A talkers are evenly index-strided, so in spread mode they land on distinct
+	 * grid rows across the region (distributed "crowd chatter"), NOT clustered in one
+	 * spot. Chosen deliberately: distributed talkers put more listeners near SOME
+	 * talker than a clustered panel would, so this is the CONSERVATIVE spread case
+	 * (more listeners encode); a panel-in-a-corner would encode even fewer. In cluster
+	 * mode all are inside the cutoff, so the choice does not change the result. */
+	int *talkers = g_malloc0((gsize)(A > 0 ? A : 1) * sizeof(int));
+	for(int k = 0; k < A; k++)
+		talkers[k] = (int)(((long)k * (long)N) / (long)A);
+
+	/* Prime each talker: enough increasing-seq frames to cross the fixed lag so
+	 * jb_pull yields SLV_JB_FRAME on the first measured tick. */
+	for(int k = 0; k < A; k++) {
+		janus_slvoice_session *ts = sess[talkers[k]];
+		janus_mutex_lock(&ts->mutex);
 		for(int seq = 0; seq <= SLV_JB_LAG + 1; seq++)
-			janus_slvoice_jb_insert(sess[i], (uint16_t)seq, bench_frame[seq % BENCH_NFRAMES], bench_frame_len[seq % BENCH_NFRAMES]);
-		janus_mutex_unlock(&sess[i]->mutex);
+			janus_slvoice_jb_insert(ts, (uint16_t)seq, bench_frame[seq % BENCH_NFRAMES], bench_frame_len[seq % BENCH_NFRAMES]);
+		janus_mutex_unlock(&ts->mutex);
 	}
 	uint16_t next_seq = (uint16_t)(SLV_JB_LAG + 2);
 
@@ -200,12 +232,18 @@ int main(int argc, char **argv) {
 	double *samples = g_malloc0((gsize)iters * sizeof(double));
 	int nsamp = 0;
 	for(int it = 0; it < iters + WARMUP; it++) {
+		/* At the warmup boundary, zero each session's real-encode counter so the sum
+		 * after the loop is exactly the encodes over the `iters` measured ticks. This
+		 * reads/writes a session field the harness owns — NO production code changes. */
+		if(it == WARMUP)
+			for(int i = 0; i < N; i++) sess[i]->frames_encoded = 0;
 		gint64 now = janus_get_monotonic_time();
-		for(int i = 0; i < A; i++) {
-			janus_mutex_lock(&sess[i]->mutex);
-			sess[i]->last_rtp_us = now;   /* keep in the active set (<=150ms) */
-			janus_slvoice_jb_insert(sess[i], next_seq, bench_frame[next_seq % BENCH_NFRAMES], bench_frame_len[next_seq % BENCH_NFRAMES]);
-			janus_mutex_unlock(&sess[i]->mutex);
+		for(int k = 0; k < A; k++) {
+			janus_slvoice_session *ts = sess[talkers[k]];
+			janus_mutex_lock(&ts->mutex);
+			ts->last_rtp_us = now;   /* keep in the active set (<=150ms) */
+			janus_slvoice_jb_insert(ts, next_seq, bench_frame[next_seq % BENCH_NFRAMES], bench_frame_len[next_seq % BENCH_NFRAMES]);
+			janus_mutex_unlock(&ts->mutex);
 		}
 		next_seq++;
 		gint64 t0 = janus_get_monotonic_time();
@@ -214,6 +252,12 @@ int main(int argc, char **argv) {
 		if(it >= WARMUP)
 			samples[nsamp++] = (double)(t1 - t0) / 1000.0;   /* ms */
 	}
+	/* frames_encoded (guint64, janus_slvoice.c:396) is incremented in encode_relay
+	 * only on a real Opus packet (silence/DTX skips it), so the sum is the true
+	 * per-tick encode count — the O(N) cost centre made visible. */
+	guint64 total_enc = 0;
+	for(int i = 0; i < N; i++) total_enc += sess[i]->frames_encoded;
+	double enc_per_tick = (double)total_enc / (double)nsamp;
 
 	/* Stats over the measured ticks. */
 	double sum = 0.0, mn = 1e18, mx = 0.0;
@@ -226,7 +270,10 @@ int main(int argc, char **argv) {
 	printf("== bench_tick ==\n");
 	printf("build: SLV_MAX_MIX=%d SLV_OPUS_COMPLEXITY=%d SLV_OPUS_BITRATE=%d\n",
 		SLV_MAX_MIX, SLV_OPUS_COMPLEXITY, SLV_OPUS_BITRATE);
-	printf("load:  N=%d listeners, A=%d active talkers, iters=%d (+%d warmup)\n", N, A, iters, WARMUP);
+	printf("load:  N=%d listeners, A=%d active talkers, iters=%d (+%d warmup), geometry=%s\n",
+		N, A, iters, WARMUP, mode == GEO_SPREAD ? "spread(256x256m grid)" : "cluster(10m ring)");
+	printf("encodes: %.1f of %d listeners encoded per tick (real Opus packets; silent/culled mixes skipped)\n",
+		enc_per_tick, N);
 	printf("tick wall time (external clock), ms:\n");
 	printf("  min=%.3f  p50=%.3f  mean=%.3f  p95=%.3f  max=%.3f\n", mn, p50, mean, p95, mx);
 	printf("  20ms budget: p50 %s, p95 %s, max %s\n",
@@ -259,10 +306,13 @@ int main(int argc, char **argv) {
  *  5. Synthetic audio: sources decode a repeating 440 Hz sine (amp 0.5), not speech.
  *     Decode CPU is representative but content-dependent; source frames use the
  *     plugin's bitrate/complexity.
- *  6. Worst-case geometry: a static ring cluster inside the cull cutoff, so NO pair
- *     is culled — every pair runs azimuth+pan (max setup) and every listener mixes
- *     every active source (max encode). Real spreads cull some pairs, lowering cost.
- *     Positions never move, so the cull hysteresis never flaps.
+ *  6. Geometry is selectable (argv[4]). CLUSTER (default): a static ring inside the
+ *     cutoff, NO pair culled — every pair runs azimuth+pan (max setup) and every
+ *     listener mixes every active source (max encode). This is the UPPER BOUND.
+ *     SPREAD: a 256x256 m grid, so far pairs are culled/attenuated to silence and
+ *     their encode is skipped — the tick's real silent-mix skip, so spread is MORE
+ *     representative, not less. Either way positions never move, so the cull
+ *     hysteresis never flaps and there is no VAD/join churn (see #7).
  *  7. Fixed active set: A talkers, no VAD churn, no join/leave, no DTX transitions;
  *     the decode count is constant tick to tick.
  *  8. Warm cache / steady state: repeated identical ticks; real ticks compete with
