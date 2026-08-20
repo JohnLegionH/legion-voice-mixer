@@ -71,13 +71,24 @@ TEST_AZIMUTH_BIN   := tests/test_azimuth
 TEST_AZIMUTH_SRCS  := tests/test_azimuth.c
 TEST_PAN_BIN       := tests/test_pan
 TEST_PAN_SRCS      := tests/test_pan.c
+# bench_tick is a load HARNESS, not a unit test — deliberately NOT in `test:`.
+# bench_tick.c #includes janus_slvoice.c to reach the static tick, so the plugin
+# .c is NOT listed here (it would double-define); the other pure .c deps are.
+BENCH_TICK_BIN     := tests/bench_tick
+BENCH_TICK_SRCS    := tests/bench_tick.c src/sldata.c src/visbatch.c src/mixer/mix.c
+BENCH_CFLAGS       := $(CFLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -I$(JANUS_PREFIX)/include $(PKG_CFLAGS) $(EXTRA_CFLAGS)
+# --unresolved-symbols=ignore-all: janus_slvoice.c compiles in init (janus_config_*)
+# and negotiate (janus_sdp_*), which the harness NEVER calls; leaving them undefined
+# avoids 14 fragile signature-matched stubs. Safe because those paths are never
+# invoked at runtime — a bad assumption would segfault the run immediately.
+BENCH_LIBS         := $(PKG_LIBS) -pthread -Wl,--unresolved-symbols=ignore-all
 TEST_CFLAGS  := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
 TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 # roster.h is glib-only (no jansson/Janus); its test links glib.
 TEST_GLIB_CFLAGS := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags glib-2.0 2>/dev/null)
 TEST_GLIB_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 2>/dev/null)
 
-.PHONY: all install clean test
+.PHONY: all install clean test bench_tick
 
 all: $(TARGET)
 
@@ -117,9 +128,16 @@ $(TEST_AZIMUTH_BIN): $(TEST_AZIMUTH_SRCS)
 $(TEST_PAN_BIN): $(TEST_PAN_SRCS)
 	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_PAN_SRCS) -lm
 
+# bench_tick: tick-cost load harness (docs/voice/scaling-assessment.md). Built ONLY
+# on demand (`make bench_tick`), never by `make test`. Sweep tuning via EXTRA_CFLAGS,
+# e.g. `make bench_tick EXTRA_CFLAGS='-DSLV_MAX_MIX=128 -DSLV_OPUS_COMPLEXITY=6'`.
+bench_tick: $(BENCH_TICK_BIN)
+$(BENCH_TICK_BIN): $(BENCH_TICK_SRCS) src/janus_slvoice.c
+	$(CC) $(BENCH_CFLAGS) -o $@ $(BENCH_TICK_SRCS) $(BENCH_LIBS)
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PLUGINDIR)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(BENCH_TICK_BIN)
