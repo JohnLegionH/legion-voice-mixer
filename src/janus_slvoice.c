@@ -1882,11 +1882,13 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	opus_encoder_ctl(s->enc, OPUS_SET_COMPLEXITY(SLV_OPUS_COMPLEXITY));
 	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(SLV_OPUS_BITRATE));   /* spec §5: listener mix 64-96kbps stereo */
 	opus_encoder_ctl(s->enc, OPUS_SET_DTX(1));            /* encode-skip: cheap comfort frames on silence */
-	/* Preallocate every buffer — nothing is allocated per packet or per tick. */
+	/* Preallocate every buffer used by the tick — nothing is allocated per packet
+	 * or per tick. The 240KB echo delay ring is the ONE exception: it is used only
+	 * by build_echo on the echo path, so it is allocated lazily on first echo enable
+	 * (see janus_slvoice_echo_start_locked) rather than for every session here. */
 	s->jb       = g_malloc0((gsize)SLV_JB_SLOTS * SLV_JB_PAYLOAD_MAX);
 	s->jb_seq   = g_malloc0((gsize)SLV_JB_SLOTS * sizeof(uint16_t));
 	s->jb_len   = g_malloc0((gsize)SLV_JB_SLOTS * sizeof(int));
-	s->ring     = g_malloc0((gsize)SLV_RING_SAMPLES * SLV_CHANNELS * sizeof(float));
 	s->decbuf   = g_malloc0((gsize)SLV_DECODE_MAX * SLV_CHANNELS * sizeof(float));
 	s->framebuf = g_malloc0((gsize)SLV_FRAME_SAMPLES * SLV_CHANNELS * sizeof(float));
 	s->outbuf   = g_malloc0(SLV_RTP_OUT_MAX);
@@ -1915,12 +1917,24 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	return TRUE;
 }
 
-/* Echo is now a per-listener OUTPUT override, not a resource owner: start/stop
- * just flip the flag and clear the delay ring (buffers live for the session).
+/* Echo is a per-listener OUTPUT override, not a resource owner: start/stop flip
+ * the flag and clear the delay ring. The ring itself is allocated lazily here on
+ * first enable (it is 240KB and used only on the echo path); it then lives for
+ * the rest of the session and is freed only at teardown in media_free_locked.
  * session->mutex held. */
 static void janus_slvoice_echo_start_locked(janus_slvoice_session *s) {
 	if(!s->media_ready)
 		janus_slvoice_media_alloc_locked(s);
+	/* Lazy ring allocation. Safe because this runs under session->mutex — the SAME
+	 * lock build_echo holds in the tick's Pass 2 (:2237). So the ring can never be
+	 * allocated while build_echo reads it, and the tick observing echo_active set
+	 * (:2238) implies this allocation already completed under the lock, so build_echo
+	 * never sees s->ring == NULL. The enable path (incoming_data / setup_media) takes
+	 * ONLY session->mutex, never room->mutex, so it cannot invert the tick's
+	 * room->mutex -> session->mutex order. Off the tick path, so it does not break the
+	 * tick's allocation-free discipline. */
+	if(s->ring == NULL)
+		s->ring = g_malloc0((gsize)SLV_RING_SAMPLES * SLV_CHANNELS * sizeof(float));
 	if(s->ring)
 		memset(s->ring, 0, (gsize)SLV_RING_SAMPLES * SLV_CHANNELS * sizeof(float));
 	s->ring_wpos = 0;

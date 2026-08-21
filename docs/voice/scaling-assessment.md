@@ -128,7 +128,7 @@ argument holds for decode and quiet rooms, and not for the two terms that break 
 scale.
 
 **Memory.** ~540 KB per participant, of which the 500 ms echo delay ring is 240 KB
-(`:1830`) — allocated for every session though echo is a rarely-used diagnostic
+(`:1889`) — allocated for every session though echo is a rarely-used diagnostic
 override (`:1859`–`:1860`). Not the binding constraint, but ~45% of per-session memory
 is unused in normal operation.
 
