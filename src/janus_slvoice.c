@@ -155,30 +155,46 @@
 /* Warn if a single tick takes longer than this (spec §4.1 mix-deadline). */
 #define SLV_TICK_WARN_MS    15.0
 
-/* ---- Phase 3b spatial constants (geometry snapshot / §7.1 camera leash) ----
+/* ---- Phase 3b spatial constants — DEFAULTS ONLY (Amendment 8) ---------------
  * Viewer geometry (sp/sh/lp/lh) arrives scaled ×100 — an int of value×100 — so a
  * stored coordinate is centimetres (docs/voice/phase3b-design-brief.md "Resolved:
- * the geometry unit"; viewer llvoicewebrtc.cpp:1239-1266). Distances below are
- * therefore in the ×100 unit; the metres->stored conversion is done ONCE here,
- * never inline at a use site (the brief's unit-discipline rule). */
-#define SLV_GEOM_SCALE      100.0   /* stored unit = metres × 100 */
-#define SLV_LEASH_DIST_M    50.0    /* §7.1 camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
-#define SLV_LEASH_DIST      (SLV_LEASH_DIST_M * SLV_GEOM_SCALE)   /* 5000, stored ×100 unit */
-/* Distance cull thresholds (Phase 3b item 2). Attenuation is item 3 — until then a
- * source is either in the mix at full gain or dropped, nothing quieter with distance.
- * Hysteresis: cull past the cutoff, re-add only inside the shorter distance, so a
- * talker at the boundary does not chatter the active set. metres->stored ONCE here. */
-#define SLV_CUTOFF_DIST_M   60.0    /* audible cutoff: a source beyond this is culled */
-#define SLV_READD_DIST_M    58.0    /* hysteresis re-add: un-cull only inside this (< cutoff) */
-#define SLV_CUTOFF_DIST     (SLV_CUTOFF_DIST_M * SLV_GEOM_SCALE)   /* 6000, stored ×100 unit */
-#define SLV_READD_DIST      (SLV_READD_DIST_M * SLV_GEOM_SCALE)    /* 5800, stored ×100 unit */
-/* Distance attenuation (Phase 3b item 3). Full volume within the reference distance,
- * then a normalized falloff to exactly zero at the cutoff (item 2 owns beyond it).
- * SLV_REF_DIST is metres->stored ONCE here, as above. SLV_FALLOFF_EXP shapes the
- * curve and is DIMENSIONLESS — a pure exponent, NOT a distance; do not scale it. */
-#define SLV_REF_DIST_M      10.0    /* full volume within this radius */
-#define SLV_REF_DIST        (SLV_REF_DIST_M * SLV_GEOM_SCALE)   /* 1000, stored ×100 unit */
-#define SLV_FALLOFF_EXP     2.0     /* falloff shaping exponent (dimensionless; no unit) */
+ * the geometry unit"; viewer llvoicewebrtc.cpp:1239-1266). The DSP works in that
+ * ×100 stored unit.
+ *
+ * These five values are now RUNTIME-configurable via process-wide [general] jcfg
+ * keys (parsed in janus_slvoice_init). The macros below are DEFAULTS ONLY: given in
+ * metres, consumed in exactly two places — the slv_spatial static initialiser and
+ * janus_slvoice_load_spatial_settings — and NEVER at a tick use site. The tick reads
+ * slv_spatial.* (stored units); the metres->stored conversion happens ONCE, at parse.
+ * There is deliberately NO stored-unit macro any more: its removal makes it a COMPILE
+ * ERROR, not a silent unit bug, for the tick to read a constant instead of the setting. */
+#define SLV_GEOM_SCALE           100.0   /* stored unit = metres × 100 */
+#define SLV_LEASH_DIST_M         50.0    /* §7.1 camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
+#define SLV_CUTOFF_DIST_M        60.0    /* audible cutoff: a source beyond this is culled */
+#define SLV_READD_DIST_M         58.0    /* hysteresis re-add: un-cull only inside this (< cutoff) */
+#define SLV_REF_DIST_M           10.0    /* full volume within this radius */
+#define SLV_FALLOFF_EXP_DEFAULT  2.0     /* falloff shaping exponent (dimensionless; do not scale) */
+
+/* Runtime-configurable spatial DSP settings (Amendment 8). The tick reads THIS
+ * struct, never a macro. The four distances are in stored units (metres ×
+ * SLV_GEOM_SCALE); falloff_exp is dimensionless. Pre-initialised to the compiled
+ * defaults, so with no config file — or no spatial keys — every value is
+ * byte-identical to the previous build. Overwritten only by
+ * janus_slvoice_load_spatial_settings, and only when the whole set validates. */
+typedef struct slv_spatial_settings {
+	double leash_dist;    /* stored: §7.1 camera-leash radius */
+	double cutoff_dist;   /* stored: cull cutoff */
+	double readd_dist;    /* stored: hysteresis re-add (must be < cutoff) */
+	double ref_dist;      /* stored: attenuation reference (must be < cutoff) */
+	double falloff_exp;   /* dimensionless: attenuation shaping exponent (must be > 0) */
+} slv_spatial_settings;
+static slv_spatial_settings slv_spatial = {
+	.leash_dist  = SLV_LEASH_DIST_M  * SLV_GEOM_SCALE,   /* 5000 */
+	.cutoff_dist = SLV_CUTOFF_DIST_M * SLV_GEOM_SCALE,   /* 6000 */
+	.readd_dist  = SLV_READD_DIST_M  * SLV_GEOM_SCALE,   /* 5800 */
+	.ref_dist    = SLV_REF_DIST_M    * SLV_GEOM_SCALE,   /* 1000 */
+	.falloff_exp = SLV_FALLOFF_EXP_DEFAULT,              /* 2.0  */
+};
 
 /* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
@@ -666,6 +682,82 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 	g_list_free(cats);
 }
 
+/* Parse an optional [general] item as a C double. Returns FALSE if the key is
+ * absent (the caller keeps the default). On a present-but-nonnumeric value it sets
+ * *out to NAN and returns TRUE, so the validation below rejects the whole set. */
+static gboolean janus_slvoice_cfg_double(janus_config *config, janus_config_category *cat,
+		const char *name, double *out) {
+	const char *s = janus_slvoice_cfg_item(config, cat, name);
+	if(s == NULL)
+		return FALSE;
+	char *end = NULL;
+	double v = g_ascii_strtod(s, &end);
+	if(end == s || *end != '\0') {
+		JANUS_LOG(LOG_ERR, "[%s] Config %s=\"%s\" is not a number\n", JANUS_SLVOICE_PACKAGE, name, s);
+		*out = NAN;
+		return TRUE;
+	}
+	*out = v;
+	return TRUE;
+}
+
+/* Amendment 8: runtime spatial DSP config from the process-wide [general] jcfg
+ * section. Distances are given in METRES and converted to stored units ONCE here.
+ * The set is validated as a whole and applied all-or-nothing: any invalid value
+ * logs an error and leaves the compiled defaults (already in slv_spatial) untouched,
+ * so the tick never runs on nonsense. Absent keys keep the defaults, so an absent or
+ * spatial-key-free config leaves behaviour byte-identical to the previous build. */
+static void janus_slvoice_load_spatial_settings(janus_config *config) {
+	if(config == NULL)
+		return;
+	janus_config_category *general =
+		janus_config_get(config, NULL, janus_config_type_category, "general");
+	if(general == NULL)
+		return;
+
+	/* Seed from the compiled metre defaults; override only the keys present. */
+	double ref_m    = SLV_REF_DIST_M;
+	double cutoff_m = SLV_CUTOFF_DIST_M;
+	double readd_m  = SLV_READD_DIST_M;
+	double leash_m  = SLV_LEASH_DIST_M;
+	double falloff  = SLV_FALLOFF_EXP_DEFAULT;
+	gboolean any = FALSE;
+	any |= janus_slvoice_cfg_double(config, general, "spatial_reference_distance_m", &ref_m);
+	any |= janus_slvoice_cfg_double(config, general, "spatial_cutoff_distance_m",    &cutoff_m);
+	any |= janus_slvoice_cfg_double(config, general, "spatial_readd_distance_m",     &readd_m);
+	any |= janus_slvoice_cfg_double(config, general, "spatial_leash_distance_m",     &leash_m);
+	any |= janus_slvoice_cfg_double(config, general, "spatial_falloff_exp",          &falloff);
+	if(!any)
+		return;   /* no spatial keys present: defaults stand */
+
+	/* Validate the whole set. Distances must be finite and > 0; ref < cutoff (the
+	 * attenuation normaliser cutoff-ref must be > 0, else divide-by-zero / inversion);
+	 * readd < cutoff (else the hysteresis band inverts); exponent > 0 (0 => no falloff,
+	 * < 0 => +inf gain at the cutoff). */
+	const char *bad = NULL;
+	if(!(isfinite(ref_m)    && ref_m    > 0.0))      bad = "spatial_reference_distance_m must be > 0";
+	else if(!(isfinite(cutoff_m) && cutoff_m > 0.0)) bad = "spatial_cutoff_distance_m must be > 0";
+	else if(!(isfinite(readd_m)  && readd_m  > 0.0)) bad = "spatial_readd_distance_m must be > 0";
+	else if(!(isfinite(leash_m)  && leash_m  > 0.0)) bad = "spatial_leash_distance_m must be > 0";
+	else if(!(isfinite(falloff)  && falloff  > 0.0)) bad = "spatial_falloff_exp must be > 0";
+	else if(!(ref_m   < cutoff_m))                   bad = "reference distance must be < cutoff (attenuation normaliser)";
+	else if(!(readd_m < cutoff_m))                   bad = "re-add distance must be < cutoff (hysteresis band)";
+	if(bad != NULL) {
+		JANUS_LOG(LOG_ERR, "[%s] Invalid spatial config: %s; keeping compiled defaults\n",
+			JANUS_SLVOICE_PACKAGE, bad);
+		return;
+	}
+
+	/* Commit: metres -> stored units ONCE, here and nowhere else. */
+	slv_spatial.ref_dist    = ref_m    * SLV_GEOM_SCALE;
+	slv_spatial.cutoff_dist = cutoff_m * SLV_GEOM_SCALE;
+	slv_spatial.readd_dist  = readd_m  * SLV_GEOM_SCALE;
+	slv_spatial.leash_dist  = leash_m  * SLV_GEOM_SCALE;
+	slv_spatial.falloff_exp = falloff;
+	JANUS_LOG(LOG_INFO, "[%s] Spatial config applied: ref=%.1fm cutoff=%.1fm readd=%.1fm leash=%.1fm falloff_exp=%.2f\n",
+		JANUS_SLVOICE_PACKAGE, ref_m, cutoff_m, readd_m, leash_m, falloff);
+}
+
 /* ---- Plugin lifecycle ---------------------------------------------------- */
 
 int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
@@ -711,6 +803,11 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 	if(echo_autostart)
 		JANUS_LOG(LOG_INFO, "[%s] SLV_ECHO_AUTOSTART enabled — echo starts automatically on connect\n",
 			JANUS_SLVOICE_PACKAGE);
+
+	/* Amendment 8: runtime spatial DSP overrides from [general]; metres->stored
+	 * converted once here, validated, defaults kept on any bad value. Must run
+	 * BEFORE janus_config_destroy, which frees the parsed config. */
+	janus_slvoice_load_spatial_settings(config);
 
 	if(config != NULL)
 		janus_config_destroy(config);
@@ -2146,12 +2243,12 @@ static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
 	s->snap_lp = s->last_data.lp;
 	s->snap_lh = (f & SLV_FIELD_LH) ? s->last_data.lh
 	                                : (slv_quat){ 0.0, 0.0, 0.0, 1.0 };   /* identity if no heading */
-	/* §7.1 camera leash: clamp lp onto the SLV_LEASH_DIST sphere around sp when it
-	 * exceeds it. Projection lifted from llvoicewebrtc.cpp:1213, in the ×100 unit. */
+	/* §7.1 camera leash: clamp lp onto the slv_spatial.leash_dist sphere around sp
+	 * when it exceeds it. Projection lifted from llvoicewebrtc.cpp:1213, ×100 unit. */
 	slv_vec3 off = slv_vec3_sub(s->snap_lp, s->snap_sp);
 	double d = slv_vec3_mag(off);
-	if(d > SLV_LEASH_DIST)
-		s->snap_lp = slv_vec3_madd(s->snap_sp, SLV_LEASH_DIST / d, off);
+	if(d > slv_spatial.leash_dist)
+		s->snap_lp = slv_vec3_madd(s->snap_sp, slv_spatial.leash_dist / d, off);
 }
 
 /* Phase 3b item 2: per-listener distance cull with hysteresis. Returns TRUE if the
@@ -2159,8 +2256,9 @@ static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
  * dropped from the mix. Maintains the per-listener hysteresis latch keyed by source
  * UUID: find-or-create the slot, LRU-evicting the oldest seen_tick when full (brief
  * Amendment 2 proves any displaced slot is a departed UUID), stamp it this tick, and
- * latch — an audible pair culls only past SLV_CUTOFF_DIST, a culled pair un-culls only
- * inside SLV_READD_DIST. A pair seen for the first time has no prior state, so it uses
+ * latch — an audible pair culls only past the cutoff (slv_spatial.cutoff_dist), a culled
+ * pair un-culls only inside the re-add distance (slv_spatial.readd_dist). A pair seen for
+ * the first time has no prior state, so it uses
  * a plain threshold at the cutoff (no band). s->mutex held; writes only the listener's
  * own hysteresis table (never s->active / audible / decode). */
 static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
@@ -2184,12 +2282,12 @@ static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
 		}
 		memset(slot, 0, sizeof(*slot));
 		g_strlcpy(slot->uuid, uuid, SLV_UUID_LEN);
-		slot->culled = (d > SLV_CUTOFF_DIST);   /* first sight: plain threshold, no band */
+		slot->culled = (d > slv_spatial.cutoff_dist);   /* first sight: plain threshold, no band */
 	} else if(slot->culled) {
-		if(d < SLV_READD_DIST)
+		if(d < slv_spatial.readd_dist)
 			slot->culled = FALSE;
 	} else {
-		if(d > SLV_CUTOFF_DIST)
+		if(d > slv_spatial.cutoff_dist)
 			slot->culled = TRUE;
 	}
 	slot->seen_tick = now_tick;
@@ -2294,15 +2392,15 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, sess[j]->snap_sp));
 			if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq)) {
 				mutes[j] = 1;
-			} else if(dcull > SLV_REF_DIST) {
+			} else if(dcull > slv_spatial.ref_dist) {
 				/* Phase 3b item 3: distance attenuation — the else of the cull, on the
 				 * SAME dcull (no second distance). Non-culled and past the reference:
 				 * normalized falloff, exactly 1 at the reference and exactly 0 at the
 				 * cutoff (the cull owns d >= cutoff). Multiplies into gains[j] — which
 				 * holds 1.0 or the viewer gain — never replaces. Inside the reference:
 				 * full volume, no pow. Mono still; panning is item 4. */
-				double t = (SLV_CUTOFF_DIST - dcull) / (SLV_CUTOFF_DIST - SLV_REF_DIST);
-				gains[j] *= (float)pow(t, SLV_FALLOFF_EXP);
+				double t = (slv_spatial.cutoff_dist - dcull) / (slv_spatial.cutoff_dist - slv_spatial.ref_dist);
+				gains[j] *= (float)pow(t, slv_spatial.falloff_exp);
 			}
 			/* Phase 3b item 4: constant-power azimuth pan. Runs after attenuation, on
 			 * the SAME guard the cull/attenuation use (geometry valid on both sides),
