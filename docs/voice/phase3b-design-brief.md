@@ -341,3 +341,15 @@ Recon for the §M collision fix established the boundary that decides its design
 The exclusion fan-out treats the symptom correctly. The join-time uniqueness gate treats the disease.
 
 ---
+
+## AMENDMENT 8 — the config surface exists after all; process-wide jcfg decided (2026-08-21)
+
+Recon for the spatial config item revisited Amendment 3 and found it overstated the obstacle. This corrects it and records the decision. **It supersedes Amendment 3's decision** that the spatial constants "remain compile-time `#define`s… deferred."
+
+**Amendment 3 was wrong that "nothing associates configuration with a region."** The room struct already retains per-room settings — `room_id`, `description`, `is_private`, `sampling_rate`, `spatial_audio`, `permanent` (`room_create`, `janus_slvoice.c:474`-`:479`) — and both the static jcfg loader (`:642`-`:654`) and the dynamic create request (`:1402`-`:1407`) populate it. The sim controls room identity: it derives the room number and sends `create` with it (`:1400`-`:1401`, and the "every region that hashes to the same room number" contract at `:1412`-`:1414`). **So a per-region config channel does exist.** What is missing is only that the five DSP distances are not among the retained fields — a much smaller gap than "the config surface does not exist."
+
+**Decision: the spatial constants become process-wide jcfg keys retained in a settings struct**, following the pattern `echo_autostart` already uses (`:260`, parsed at `:698`-`:703`). They are parsed in `janus_slvoice_init` **before** `janus_config_destroy` (`:716`), converted metres→stored units **exactly once at parse**, with the current `#define` values as defaults so an absent key leaves behaviour unchanged. `SLV_FALLOFF_EXP` is dimensionless and takes no conversion.
+
+**Per-region is deferred, not rejected.** It is real machinery — room-struct fields plus create-request keys on **both** the mixer and the C# sim — justified only when regions genuinely need *different* distances. Nothing in the current deployment shows that need. Because the room struct and the create channel already exist (above), per-region can be layered on later as global defaults with an optional per-room override, converting once in `room_create`, **without redoing the process-wide work**.
+
+**`peer_ctl_batch` is the wrong carrier, structurally.** It is a delta feed applied repeatedly per batch (`apply_visbatch`, `:1206`), so configuration riding it would be re-converted on every application — breaking the convert-once discipline by construction, not by carelessness. `mixer-feed-protocol.md`'s additive-field claim (§6, `:420`-`:440`) is about optional **per-source** fields flowing at movement cadence, not room-level config; it does not license config on this channel.
