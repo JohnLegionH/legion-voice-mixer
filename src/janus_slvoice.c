@@ -1664,6 +1664,31 @@ static void *janus_slvoice_handler(void *data) {
 				janus_slvoice_session *p = value;
 				if(p == session)
 					continue;
+				/* Join-time duplicate-display detection (§M / KnownDefects teardown
+				 * ordering item 1, approach (a)+): a display (avatar UUID) already in
+				 * the room means an orphaned handle or a relog overlap. DETECTION
+				 * ONLY — the joiner is admitted and nothing is evicted (the plugin
+				 * cannot notify an evicted viewer, so evicting a live session is an
+				 * unrecoverable outage). Mirrors the fan-out collision WARN
+				 * (apply_visbatch), which only fires when a batch names the avatar
+				 * as listener; this one fires at the moment the duplicate is born.
+				 * The liveness triple (webrtc_up, rtp_in_count, idle) plus age is
+				 * logged to build the evidence for whether a future CONDITIONED
+				 * eviction (webrtc_up==0 && old) would ever have hit a live session.
+				 * Runs under room->mutex, already held; webrtc_up is an atomic and
+				 * created_ts is immutable after create; rtp_in_count/last_rtp_us are
+				 * unlocked diagnostic reads (torn values only garble a log line). */
+				if(display != NULL && p->display != NULL && !strcmp(p->display, display)) {
+					gint64 dnow = janus_get_monotonic_time();
+					JANUS_LOG(LOG_WARN, "[%s] join: display %s already in room %"PRIu64
+						" — duplicate display; admitted anyway, no eviction. new user_id %"PRIu64
+						", existing user_id %"PRIu64" (webrtc_up=%d, rtp_in_count=%"PRIu64
+						", rtp_idle=%.1fs, age=%.1fs) (parcel-voice-semantics.md §M)\n",
+						JANUS_SLVOICE_PACKAGE, display, room_id, user_id, p->user_id,
+						g_atomic_int_get(&p->webrtc_up) ? 1 : 0, p->rtp_in_count,
+						p->last_rtp_us ? (double)(dnow - p->last_rtp_us) / (double)G_USEC_PER_SEC : -1.0,
+						(double)(dnow - p->created_ts) / (double)G_USEC_PER_SEC);
+				}
 				/* Phase 3a: the initial roster (join-backlog) a newly-connecting
 				 * listener receives is filtered by the SAME exclusion predicate the
 				 * live join/leave, power batch, and mix cull use — a speaker this
@@ -1851,6 +1876,18 @@ static void *janus_slvoice_sender(void *data) {
 			 * consumed, so the speaking state never lit. */
 			gint64 now = janus_get_monotonic_time();
 			json_t *batch = json_object();
+			/* §M dot-batch collapse fix: `batch` is keyed by display, and jansson
+			 * replaces on duplicate key — so two same-display sessions (orphan +
+			 * live after a relog) used to collapse LAST-WRITE-WINS in undefined
+			 * GLib iteration order, and an orphan's {p:0,v:false} could darken a
+			 * speaking avatar's indicator. Deterministic merge instead: a
+			 * webrtc_up handle always beats a downed one (the observed failure is
+			 * precisely a downed orphan winning); among handles of EQUAL liveness
+			 * take max power and OR the VAD, which is order-independent for the
+			 * brief both-live relog overlap. dot_up tracks the current winner's
+			 * liveness per display (borrowed keys — display strings are owned by
+			 * sessions and stable under room->mutex, held here). */
+			GHashTable *dot_up = g_hash_table_new(g_str_hash, g_str_equal);
 			GHashTableIter piter;
 			gpointer pvalue;
 			g_hash_table_iter_init(&piter, room->participants);
@@ -1872,11 +1909,36 @@ static void *janus_slvoice_sender(void *data) {
 				janus_mutex_unlock(&p->mutex);
 				if(p->display == NULL)
 					continue;
-				json_t *pv = json_object();
-				json_object_set_new(pv, "p", json_integer(g_atomic_int_get(&p->power_p)));  /* level*128 */
-				json_object_set_new(pv, "v", g_atomic_int_get(&p->vad) ? json_true() : json_false());
-				json_object_set_new(batch, p->display, pv);
+				int ppow = g_atomic_int_get(&p->power_p);          /* level*128 */
+				gboolean pvad = g_atomic_int_get(&p->vad) ? TRUE : FALSE;
+				gboolean pup = g_atomic_int_get(&p->webrtc_up) ? TRUE : FALSE;
+				json_t *prev = json_object_get(batch, p->display);
+				if(prev == NULL) {
+					json_t *pv = json_object();
+					json_object_set_new(pv, "p", json_integer(ppow));
+					json_object_set_new(pv, "v", pvad ? json_true() : json_false());
+					json_object_set_new(batch, p->display, pv);
+					g_hash_table_insert(dot_up, p->display, GINT_TO_POINTER(pup ? 1 : 0));
+				} else {
+					gboolean wup = GPOINTER_TO_INT(g_hash_table_lookup(dot_up, p->display)) ? TRUE : FALSE;
+					if(pup && !wup) {
+						/* A live handle replaces a downed winner outright. */
+						json_t *pv = json_object();
+						json_object_set_new(pv, "p", json_integer(ppow));
+						json_object_set_new(pv, "v", pvad ? json_true() : json_false());
+						json_object_set_new(batch, p->display, pv);
+						g_hash_table_insert(dot_up, p->display, GINT_TO_POINTER(1));
+					} else if(pup == wup) {
+						/* Equal liveness: max power, OR vad — order-independent. */
+						if((json_int_t)ppow > json_integer_value(json_object_get(prev, "p")))
+							json_object_set_new(prev, "p", json_integer(ppow));
+						if(pvad)
+							json_object_set_new(prev, "v", json_true());
+					}
+					/* pup < wup: a downed handle never overwrites a live one. */
+				}
 			}
+			g_hash_table_destroy(dot_up);
 			/* Send per listener. A listener with NO exclusions gets the shared full
 			 * batch (fast path — the common case). A listener with exclusions gets a
 			 * filtered copy omitting excluded sources' {p,v} dots — roster omission
