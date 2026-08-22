@@ -155,3 +155,66 @@ first slice is blocked on Q1, not merely informed by it.
    region-local opt-in, possibly refusing region-local voice for HG visitors — becomes more
    pointed if region operators can also attach recorders. Worth deciding together rather
    than separately.
+
+---
+
+**AMENDMENT 1 — connector identity resolved: NPC presence plus policy record (2026-08-22)**
+
+Q1 asked which UUID a connector should use. An external review reframed it: a connector
+must be a first-class principal with an explicit policy record, so that the sim's exclusion
+authority holds by construction rather than by whichever identity scheme is chosen. Recon
+then established what the tree can support.
+
+**The matrix needs less than expected.** VisibilityRules reads two things from an
+AgentView — the Id and the god flag (SeeAVs exemption) — plus two separately resolved
+parcel views and one estate view. Position is used solely to resolve a parcel and is then
+discarded; the root/child flag only selects which way the parcel is resolved. So a
+connector needs an identity, a parcel it resolves to, and a root/child disposition
+determining how that resolution happens; everything else is incidental.
+
+**NPCs already satisfy almost all of it.** NPCModule creates a real ScenePresence with a
+real position via a full circuit and client-view path (NPCAvatar is an IClientAPI). It is
+enumerated by SnapshotAgents, resolves a parcel, and produces a matrix row with no feeder
+code change — after one registration step: the feeder's voice-participant filter admits
+only agents holding a registered voice session in the region, so the connector's provision
+step must register one for the NPC's identity. That registration is the entire integration
+delta. IsNPC / PresenceType is never consulted anywhere in the voice path.
+
+**But an NPC alone is the wrong model.** An NPC is an avatar to every subsystem. A
+recorder would appear in radar, be clickable, be bannable, and be indistinguishable from a
+person. That inherits an identity model built for something else and makes the connector's
+nature invisible where it matters.
+
+**Decision: hybrid.** An NPC-backed presence supplies the matrix row; a separate policy
+record makes the connector a first-class principal.
+
+- The presence gives parcel resolution, position, and a matrix row at zero cost.
+- The policy record carries what the presence cannot: whether the connector may inject,
+  its authorised scope, who authorised it, whether it is disclosed, and its nature as a
+  connector rather than an avatar.
+
+**Disclosure, now decidable.** The body records that no SLData field can signal a tap.
+That remains true, but an NPC-backed connector is visible through existing channels —
+radar, the Nearby Voice participant list, and the mixer roster. Disclosure is therefore
+achievable without a protocol change. Whether roster visibility is sufficient, or the
+policy record should also carry an explicit disclosure obligation, is recorded as open
+question 6 below.
+
+**What the policy record needs.** Recon found no existing per-entity policy template in
+the tree; estate and parcel permissions are per-avatar-per-land, not per-entity. It must
+be built. Minimum fields: connector identity, authorised scope, may-inject flag,
+authorising principal, disclosure state.
+
+**What this does not solve:**
+
+- **Injection semantics.** A connector that speaks is a source, and sources are excluded
+  by the same rules. An injected voice with a parcel row is constrained correctly; the
+  policy record must gate whether injection is permitted at all.
+- **Authorisation.** Nothing gates connector attachment today. The policy record is where
+  that gate lives, but the mechanism — who creates records, and how — is unspecified.
+- **Downstream sensitivity.** A transcript is a durable record of a conversation that was
+  subject to per-listener exclusions. Nothing in this design constrains what happens to
+  connector output once it leaves the mixer.
+
+**Open question 6:** is roster visibility sufficient disclosure, or must the policy record
+carry an explicit obligation — and if so, what enforces it?
