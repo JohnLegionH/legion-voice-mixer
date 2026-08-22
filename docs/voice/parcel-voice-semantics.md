@@ -1029,6 +1029,30 @@ identity rather than display, or whether an entry should apply to **all** partic
 matching a display. At minimum, detect the collision at `janus_slvoice.c:1016` and log
 it — a silent overwrite in an enforcement path should never be silent.
 
+**ADDENDUM (2026-08-22) — other duplicate artifacts, recorded as consequences, not
+as defects to fix separately.** The exclusion fan-out and the dot-batch merge address
+the two paths where a duplicate display corrupted what a HEALTHY participant
+experienced. A recon pass found the remaining artifacts of the duplicate itself:
+
+- **Capacity.** An orphan holds a room slot — the join-time cap counts
+  `room->participants` — so duplicates burn capacity and can cause a spurious
+  `ROOM_FULL` rejection of a legitimate joiner.
+- **Leave-dot ghosting.** An explicit `leave` of one same-display session broadcasts a
+  leave dot for the display while its twin is still present, dropping a connected
+  avatar from viewers' rosters. Whether the periodic power/VAD batch resurrects the
+  participant viewer-side is viewer behaviour, unverified.
+- **No dot on detach.** `destroy_session` removes membership without pushing any leave
+  dot at all — a roster ghost independent of duplicates, noted here because orphan
+  cleanup via detach is the case where it bites.
+- **Self-audio in a both-live overlap.** The N-1 mix excludes self by slot index, not
+  display, so a relog overlap in which BOTH handles send RTP would let an avatar hear
+  itself. **Inferred and unobserved** — every observed orphan had `rtp_in_count = 0`
+  and contributed silence, so this window has not been seen live.
+
+All of these dissolve when the orphan does. None is worth fixing individually: the
+sim-side teardown work (KnownDefects.md, OnRemovePresence entry, revised ordering) is
+the fix, and these are the reasons it matters beyond enforcement.
+
 ### N. Instrument note — `epoch`
 
 `epoch` on a handle's `visibility` block increments per applied batch and is the
