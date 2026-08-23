@@ -309,6 +309,14 @@ typedef struct janus_slvoice_room {
 	slv_vis_op vis_last_mode;      /* op of the last applied batch (add/remove/replace) */
 	gboolean vis_have_batch;       /* at least one batch applied */
 	guint64 vis_joins_since_snapshot; /* participant joins since the last REPLACE (re-derive lag) */
+	/* Dropped LISTENER ENTRIES: exclusion entries whose listener display matched no session in
+	 * the room (nmatch==0 in apply_visbatch), so the entry was skipped. ROOM-level and named
+	 * "..._listener_entries" precisely so it cannot be confused with the per-session
+	 * excluded_entries counter. A correct drop (the sim naming a listener who just left) and a
+	 * wrong one (a listener that IS here under a display the feed doesn't match) are
+	 * indistinguishable without this — the §M investigation's missing instrument. */
+	guint64 vis_dropped_listener_entries;      /* cumulative since room creation */
+	guint64 vis_last_batch_dropped_listeners;  /* drops in the most recently applied batch */
 
 	volatile gint destroyed;
 	janus_refcount ref;
@@ -1055,6 +1063,12 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		}
 		json_object_set_new(vis, "joins_since_snapshot",
 			json_integer((json_int_t)qroom->vis_joins_since_snapshot));
+		/* ROOM-level dropped-listener instrument (§M follow-up): entries whose listener
+		 * was not in the room. Distinct by name from the per-session excluded_entries. */
+		json_object_set_new(vis, "dropped_listener_entries",
+			json_integer((json_int_t)qroom->vis_dropped_listener_entries));
+		json_object_set_new(vis, "last_batch_dropped_listeners",
+			json_integer((json_int_t)qroom->vis_last_batch_dropped_listeners));
 		janus_mutex_unlock(&qroom->mutex);
 		json_object_set_new(info, "tick_histogram", hist);
 		json_object_set_new(info, "visibility", vis);
@@ -1135,6 +1149,8 @@ static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 		return;
 	}
 	janus_mutex_lock(&room->mutex);
+
+	guint64 dropped_this_batch = 0;   /* listener entries skipped (nmatch==0) in THIS batch */
 
 	/* Index the room once: display -> session (listener lookup) doubling as the
 	 * present-set for transition gating (emit join/leave only for present sources). */
@@ -1243,8 +1259,20 @@ static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 		}
 
 		/* nmatch == 0 means this listener avatar is not in the room right now — the
-		 * scan applied nothing and the loop moves to the next entry (this is the old
-		 * L==NULL skip, now implicit). Only a genuine collision is worth a log. */
+		 * scan applied nothing and the entry is skipped (this is the old L==NULL skip,
+		 * now implicit). COUNTED, not silent: a correct drop (listener just left, the
+		 * ~250ms feeder tick plus sender latency makes that routine around departures)
+		 * and a wrong one look identical without an instrument. LOG_VERB per drop only:
+		 * normal churn fires this a few times per departure, so a WARN would flood
+		 * during events; the counters carry the operational signal. */
+		if(nmatch == 0) {
+			room->vis_dropped_listener_entries++;
+			dropped_this_batch++;
+			JANUS_LOG(LOG_VERB, "[%s] peer_ctl_batch listener %s (op=%s, room %"PRId64") "
+				"not in room; entry dropped (dropped_listener_entries=%"PRIu64")\n",
+				JANUS_SLVOICE_PACKAGE, e->listener, slv_vis_op_str(vb->op),
+				(int64_t)vb->room, room->vis_dropped_listener_entries);
+		}
 		if(nmatch > 1) {
 			/* Amendment 7 / §M: this resolution was silent before — every counter read
 			 * healthy while one handle got the exclusion and the other silently did not.
@@ -1273,6 +1301,7 @@ static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 	room->vis_last_ts = janus_get_monotonic_time();
 	room->vis_last_mode = vb->op;
 	room->vis_have_batch = TRUE;
+	room->vis_last_batch_dropped_listeners = dropped_this_batch;
 	if(vb->op == SLV_VIS_OP_REPLACE)
 		room->vis_joins_since_snapshot = 0;   /* a fresh snapshot re-derives the roster */
 
