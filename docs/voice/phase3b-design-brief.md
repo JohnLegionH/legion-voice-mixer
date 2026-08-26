@@ -1,5 +1,30 @@
 # Design Brief — Phase 3b: Spatial DSP
 
+> **THIS DOCUMENT DESCRIBES A DESIGN THAT HAS SINCE SHIPPED. DO NOT READ IT AS CURRENT
+> STATE.**
+>
+> Phase 3b is **implemented** as of `janus.plugin.slvoice` **v0.9.0**
+> (`src/janus_slvoice.c:73`). Distance cull with hysteresis, distance attenuation and
+> constant-power azimuth panning all run in `janus_slvoice_room_tick`, driven by
+> viewer-supplied SLData geometry with the §7.1 camera leash applied in
+> `janus_slvoice_snapshot_geometry_locked`.
+>
+> The body below is the **pre-implementation** design, verified against
+> `legion-voice-mixer @ c03de3a` at the freeze point. Its status table, capability claims,
+> constants and line citations describe the code as it stood then, and several are now
+> false — notably "Done, **unused**" and "Zero spatialization runs today" under *What
+> already exists*; `SLV_MAX_MIX` = 64 at `:231` (it is 110, `janus_slvoice.c:140`); and
+> "the repo has **no** vector or quaternion math helpers" at `:236` (`src/mixer/vec3.h`,
+> `azimuth.h` and `pan.h` all exist).
+>
+> Note also that **AMENDMENT 3 is superseded by AMENDMENT 8** — a reader who stops at
+> AMENDMENT 3 will conclude the spatial constants are compile-time `#define`s, when they
+> are process-wide jcfg keys read at runtime.
+>
+> The body and its amendments are **frozen and stay frozen**; per this file's own rule,
+> corrections are appended as dated amendments and the body is not rewritten. This header
+> records staleness only. For current behaviour, read the source.
+
 **Status:** FROZEN. Amendments are appended as dated sections; the body is not
 rewritten.
 **Frozen:** 2026-08-18.

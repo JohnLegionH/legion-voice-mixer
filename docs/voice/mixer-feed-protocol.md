@@ -302,6 +302,13 @@ v1.1** rather than overloading the empty set.
 
 ### 3.3.1 Shipped-handler behaviour (v0.7.0)
 
+> **VERSION SCOPE - READ THIS FIRST.** The notes in this section were written against
+> `janus.plugin.slvoice` **v0.7.0**. The shipping mixer is **v0.9.0**. One property below
+> (the listener-drop bullet) was no longer true at v0.9.0 and has been corrected in place;
+> the other two still hold. Treat everything in this section as a version-pinned
+> observation of a shipped handler, never as a contract - re-verify against the plugin
+> source before relying on it.
+
 Three properties of the shipped `handle_admin_message` → `apply_visbatch` path that the wire format
 above leaves implicit. Verified against `janus.plugin.slvoice` v0.7.0 source and a `0.7.0-debug`
 container run. These are **descriptive** notes on the shipped handler; they add nothing normative
@@ -317,16 +324,25 @@ to the `op`/`room`/`excl` contract and do not change §3.2.
   empty list**; there is no room-wide reset op. (A full-room snapshot must therefore name every
   listener whose column changed, including those cleared to empty — omission is not a clear.)
 
-- **A batch entry whose listener is not currently in the room is dropped, silently.** If the listener
-  key resolves to no session, the entry is skipped and stored nowhere (`janus_slvoice.c:958`,
-  `if(L == NULL) continue`). There is **no log line** for this (unlike an unknown *room*), and the
-  admin response is **byte-identical to a fully applied batch**: `entries` counts *parsed* entries
-  (including the dropped one) and `skipped` counts **only parse-time malformed items**, not
-  application-time drops. A sender cannot observe a dropped listener at all. **This is precisely why
-  §3.2 makes the *feeder* responsible for sending a listener's full column (a `replace`) on that
-  listener's join/reassignment** — the mixer holds nothing for an absent listener, so the feeder must
-  re-send when it appears. The two halves are one contract; a reader of §3.2 alone cannot see that
-  the mixer-side drop is the reason the feeder-side snapshot is mandatory, not optional.
+- **A batch entry whose listener is not currently in the room is dropped.** If the listener
+  key matches no session in the room, the entry is skipped and stored nowhere.
+  **CORRECTED AT v0.9.0 - the drop is no longer silent.** The zero-match case increments two
+  room counters (`vis_dropped_listener_entries`, cumulative since room creation, and
+  `vis_last_batch_dropped_listeners`, this batch only) and emits a `LOG_VERB` line naming the
+  listener, the op and the room (`janus_slvoice.c:1268`-`:1275`). `LOG_VERB` rather than
+  `WARN` is deliberate: normal churn fires it a few times per departure, so the counters, not
+  the log, carry the operational signal. Both counters are readable without log access via
+  `query_session`, under the `visibility` object as `dropped_listener_entries` and
+  `last_batch_dropped_listeners` (`:1068`-`:1071`).
+  **What has NOT changed:** the admin *response* is still byte-identical to a fully applied
+  batch (`:1331`-`:1337`) - `entries` counts *parsed* entries (including dropped ones) and
+  `skipped` counts **only parse-time malformed items**, not application-time drops. A sender
+  still cannot observe a drop from the response alone; it must poll `query_session` or read
+  the log at VERB. **This is precisely why §3.2 makes the *feeder* responsible for sending a
+  listener's full column (a `replace`) on that listener's join/reassignment** - the mixer
+  holds nothing for an absent listener, so the feeder must re-send when it appears. The two
+  halves are one contract; a reader of §3.2 alone cannot see that the mixer-side drop is the
+  reason the feeder-side snapshot is mandatory, not optional.
 
 - **The "at most one batch per tick" bound is per-op, not per-wire-message.** A feeder tick that
   carries both additions and removals emits **at most one `add` message and one `remove` message**
@@ -360,8 +376,29 @@ No new per-listener structure. Extend the Phase-2 record
   touches only `has_vis`/`visible`; `replace` for a listener rewrites only that listener's vis
   dimension.
 
-This closes #11 (per-listener audibility), #13 (estate-channel ban — now enforced per-pair in the
-mix regardless of room sharing), and #5 (`SeeAVs` applied to voice), all from one feed.
+This closes #11 (per-listener audibility), #13 (estate-channel ban), and #5 (`SeeAVs` applied
+to voice) from one feed - **but only for agents that are in the room the feed is addressed
+to.** See the correction immediately below.
+
+> **CORRECTION - the "regardless of room sharing" claim was wrong.** Verified against mixer
+> v0.9.0 and `feature/voice-visibility-matrix`.
+>
+> `JanusPeerCtlBatchSink` computes its room **once, in its constructor**, hard-coded to the
+> region-wide `REGION_ROOM_ID` (-999), and stamps that number on every batch
+> (`JanusPeerCtlBatchSink.cs:38`-`:39`, `:49`). The feeder and `VisibilityBatchSender` are
+> deliberately room-agnostic, so this is the **only** room the matrix is ever delivered to.
+> An agent provisioned onto a per-parcel room (`UseEstateVoiceChan` clear) therefore receives
+> no exclusion batch at all: its column is computed and sent to a room it is not in, where
+> the mixer drops it as an absent listener (§3.3.1). **#11, #13 and #5 are closed by this
+> feed on the estate channel only.**
+>
+> #13 also had a second, independent half on the sim side that this feed never touched: the
+> provisioning ban/restrict check was chained as the `else` of the `UseEstateVoiceChan`
+> room-selection branch, so setting the estate-channel flag skipped it entirely. That half
+> was fixed by de-chaining the check in commit `ec3ad9b2f2`
+> (`WebRtcVoiceRegionModule.cs`), not by this feed. The `TaxFree` short-circuit in
+> `LandObject.IsBannedFromLand` remains a third, still-open problem (see
+> `parcel-voice-semantics.md` addendum §E).
 
 ---
 
