@@ -540,6 +540,17 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	janus_mutex_lock(&room->mutex);
 	g_hash_table_remove(room->participants, &uid);
 	janus_mutex_unlock(&room->mutex);
+	/* Clear the sim-sourced exclusion set. It is membership state for the room we
+	 * just left; a session that rejoins must not carry it into the next room.
+	 * Emptied, NOT destroyed: apply_visbatch dereferences L->excluded directly and
+	 * would crash on a NULL table, so only session_free frees it. remove_all runs
+	 * the g_free key destructor the table was created with, so no key leaks. Done
+	 * AFTER the participants removal so a batch mid-apply under room->mutex cannot
+	 * repopulate the set we just cleared. */
+	janus_mutex_lock(&session->mutex);
+	if(session->excluded != NULL)
+		g_hash_table_remove_all(session->excluded);
+	janus_mutex_unlock(&session->mutex);
 	janus_refcount_decrease(&room->ref);
 }
 
@@ -1140,13 +1151,17 @@ static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const cha
  * vs 20ms mix ticks the lock is held sub-millisecond and contention is negligible,
  * and the shared lock keeps every reader — tick, sender, presence — on one
  * discipline (room->mutex -> session->mutex). Per-listener mutation also takes
- * L->mutex so query_session (session->mutex) reads a consistent excluded size. */
-static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
+ * L->mutex so query_session (session->mutex) reads a consistent excluded size.
+ *
+ * Returns TRUE if the batch was applied, FALSE if vb->room named no room in this
+ * process — the caller turns that into an unknown_room error instead of reporting
+ * success for a batch that landed nowhere. */
+static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb->room);
 	if(room == NULL) {
 		JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch for unknown room %"PRId64" (op=%s); dropped\n",
 			JANUS_SLVOICE_PACKAGE, (int64_t)vb->room, slv_vis_op_str(vb->op));
-		return;
+		return FALSE;
 	}
 	janus_mutex_lock(&room->mutex);
 
@@ -1307,6 +1322,7 @@ static void janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 
 	janus_mutex_unlock(&room->mutex);
 	janus_refcount_decrease(&room->ref);
+	return TRUE;
 }
 
 json_t *janus_slvoice_handle_admin_message(json_t *message) {
@@ -1329,12 +1345,19 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 		if(buf != NULL)
 			free(buf);
 		if(st == SLV_VISBATCH_OK) {
-			janus_slvoice_apply_visbatch(&vb);
-			json_object_set_new(response, "slvoice", json_string("applied"));
-			json_object_set_new(response, "op", json_string(slv_vis_op_str(vb.op)));
-			json_object_set_new(response, "room", json_integer((json_int_t)vb.room));
-			json_object_set_new(response, "entries", json_integer(vb.n_entries));
-			json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
+			if(janus_slvoice_apply_visbatch(&vb)) {
+				json_object_set_new(response, "slvoice", json_string("applied"));
+				json_object_set_new(response, "op", json_string(slv_vis_op_str(vb.op)));
+				json_object_set_new(response, "room", json_integer((json_int_t)vb.room));
+				json_object_set_new(response, "entries", json_integer(vb.n_entries));
+				json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
+			} else {
+				/* Parsed fine but named no room in this process, so nothing was applied.
+				 * Same {slvoice:error, reason} shape as the parse failures below, so a
+				 * sender has one thing to test. apply_visbatch already logged the WARN. */
+				json_object_set_new(response, "slvoice", json_string("error"));
+				json_object_set_new(response, "reason", json_string("unknown_room"));
+			}
 		} else if(st == SLV_VISBATCH_EMPTY) {
 			json_object_set_new(response, "slvoice", json_string("empty"));
 			json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
@@ -1349,9 +1372,10 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 		return response;
 	}
 
-	JANUS_LOG(LOG_INFO, "[%s] handle_admin_message: request=\"%s\"\n",
+	JANUS_LOG(LOG_WARN, "[%s] handle_admin_message: unknown request \"%s\"; rejected\n",
 		JANUS_SLVOICE_PACKAGE, request_text ? request_text : "(none)");
-	json_object_set_new(response, "slvoice", json_string("ack"));
+	json_object_set_new(response, "slvoice", json_string("error"));
+	json_object_set_new(response, "reason", json_string("unknown_request"));
 	return response;
 }
 
