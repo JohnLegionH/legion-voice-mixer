@@ -621,6 +621,67 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 	json_decref(entry);
 }
 
+/* Join-backlog (docs/join-backlog-defect.md): when a listener's data channel
+ * becomes writable, send it a synthetic "j" for every OTHER participant already
+ * in its room, so an occupant who was present before this listener joined gets a
+ * participant row immediately instead of only on the next incidental transition
+ * (speech/movement/visibility-resync). push_presence tells the ROOM about a
+ * newcomer; it never tells a newcomer about the room. This closes that gap for
+ * the newcomer, at the earliest point relay_data is allowed (dc_open just set).
+ *
+ * Wire format is byte-identical to a live push_presence "j" ({who:{"j":{"p":true}}}),
+ * so the viewer cannot distinguish a backlog join from a live one. A backlog "j"
+ * that races a real transition "j" for the same source is a no-op at the viewer
+ * (addParticipantByID -> addParticipant is idempotent by UUID; a second "j" only
+ * re-notifies, never resets), so no mixer-side dedup is required.
+ *
+ * SECURITY: filtered by the LISTENER's own exclusion set via slv_roster_excludes
+ * -- the SAME predicate push_presence (:614), the join-time roster (:1751) and the
+ * tick dot-batch use. A source the listener's visibility column hides is omitted
+ * here identically to how it is omitted from live joins and dots; the backlog can
+ * reveal nothing the matrix has already hidden. Any exclusion-set lag (a batch not
+ * yet applied at data_ready) is corrected by apply_visbatch exactly as it corrects
+ * a live join (:1273) -- the backlog carries no exposure a live join does not.
+ *
+ * Locking: grab a room ref under session->mutex then release it before taking
+ * room->mutex (order is room->mutex -> session->mutex), mirroring query_session
+ * (:979-:991). Caller must NOT hold room->mutex. */
+static void janus_slvoice_send_join_backlog(janus_slvoice_session *listener) {
+	if(listener == NULL)
+		return;
+	janus_mutex_lock(&listener->mutex);
+	janus_slvoice_room *room = listener->room;
+	if(room != NULL && !g_atomic_int_get(&room->destroyed)) {
+		janus_refcount_increase(&room->ref);   /* macro expands to a block: braces required */
+	} else {
+		room = NULL;
+	}
+	janus_mutex_unlock(&listener->mutex);
+	if(room == NULL)
+		return;
+	janus_mutex_lock(&room->mutex);
+	GHashTableIter iter;
+	gpointer value;
+	g_hash_table_iter_init(&iter, room->participants);
+	while(g_hash_table_iter_next(&iter, NULL, &value)) {
+		janus_slvoice_session *p = value;
+		if(p == listener || p->display == NULL)
+			continue;   /* skip self and unnamed; empty/alone -> nothing sent */
+		if(slv_roster_excludes(listener->excluded, p->display))
+			continue;   /* same visibility rule as live joins / dots (single source of truth) */
+		json_t *entry = json_object();
+		json_t *sub = json_object();
+		json_t *jd = json_object();
+		json_object_set_new(jd, "p", json_true());   /* {"j":{"p":true}} -- identical to push_presence */
+		json_object_set_new(sub, "j", jd);
+		json_object_set_new(entry, p->display, sub);
+		janus_slvoice_relay_json(listener, entry);   /* guards on listener->dc_open (now 1) */
+		json_decref(entry);
+	}
+	janus_mutex_unlock(&room->mutex);
+	janus_refcount_decrease(&room->ref);
+}
+
 /* ---- Session helpers ----------------------------------------------------- */
 
 static void janus_slvoice_session_free(const janus_refcount *ref) {
@@ -2780,8 +2841,13 @@ void janus_slvoice_data_ready(janus_plugin_session *handle) {
 	if(session == NULL)
 		return;
 	/* Do not relay_data before this fires (janus_textroom.c:1491). */
-	if(g_atomic_int_compare_and_exchange(&session->dc_open, 0, 1))
+	if(g_atomic_int_compare_and_exchange(&session->dc_open, 0, 1)) {
 		JANUS_LOG(LOG_INFO, "[%s-%p] Data channel open (writable)\n", JANUS_SLVOICE_PACKAGE, handle);
+		/* First time writable: send the roster backlog so occupants already present
+		 * when this listener joined get a row now, not on the next transition
+		 * (docs/join-backlog-defect.md). The CAS above makes this fire exactly once. */
+		janus_slvoice_send_join_backlog(session);
+	}
 }
 
 void janus_slvoice_slow_link(janus_plugin_session *handle, int mindex, gboolean video, gboolean uplink) {
