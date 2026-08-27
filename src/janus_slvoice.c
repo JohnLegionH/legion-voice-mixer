@@ -328,7 +328,11 @@ typedef struct janus_slvoice_room {
  * prior gain, so this map lives on the session, not on the per-message parse. */
 typedef struct slv_peer_ctl {
 	char uuid[SLV_UUID_LEN]; /* target participant agent UUID */
-	gboolean muted;          /* this listener has muted the target */
+	gboolean muted;          /* this listener PERSONALLY muted the target (viewer SLData "m") */
+	gboolean mod_muted;      /* the SIM moderation-muted the target for this listener (mute channel,
+	                          * Option A). Kept SEPARATE from `muted` so clearing a moderation mute
+	                          * never wipes the viewer's own personal mute, and vice versa. The mix
+	                          * silences the source when EITHER is set. */
 	gboolean has_gain;       /* a per-source gain was set for the target */
 	float gain;              /* linear gain (ug/220), clamped */
 } slv_peer_ctl;
@@ -646,6 +650,18 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
  * Locking: grab a room ref under session->mutex then release it before taking
  * room->mutex (order is room->mutex -> session->mutex), mirroring query_session
  * (:979-:991). Caller must NOT hold room->mutex. */
+/* Does this listener currently moderation-mute the given source? Reads the listener's peer_ctl under
+ * L->mutex (its discipline). Caller may hold room->mutex (order room->mutex -> session->mutex). */
+static gboolean janus_slvoice_is_mod_muted(janus_slvoice_session *L, const char *uuid) {
+	gboolean r = FALSE;
+	janus_mutex_lock(&L->mutex);
+	for(int k = 0; k < L->n_peer_ctl; k++) {
+		if(strcmp(L->peer_ctl[k].uuid, uuid) == 0) { r = L->peer_ctl[k].mod_muted; break; }
+	}
+	janus_mutex_unlock(&L->mutex);
+	return r;
+}
+
 static void janus_slvoice_send_join_backlog(janus_slvoice_session *listener) {
 	if(listener == NULL)
 		return;
@@ -674,6 +690,13 @@ static void janus_slvoice_send_join_backlog(janus_slvoice_session *listener) {
 		json_t *jd = json_object();
 		json_object_set_new(jd, "p", json_true());   /* {"j":{"p":true}} -- identical to push_presence */
 		json_object_set_new(sub, "j", jd);
+		/* #8 sticky-mute inheritance: if the joining listener already moderation-mutes this source,
+		 * carry the flag IN the backlog "j" so the late joiner's row appears greyed from the start
+		 * ({"j":{...},"m":true} — the viewer reads both from one object). If the listener's mute has
+		 * not yet been applied at data_ready, the sim's per-listener mute replace greys it shortly
+		 * after; the end state is the same. */
+		if(janus_slvoice_is_mod_muted(listener, p->display))
+			json_object_set_new(sub, "m", json_true());
 		json_object_set_new(entry, p->display, sub);
 		janus_slvoice_relay_json(listener, entry);   /* guards on listener->dc_open (now 1) */
 		json_decref(entry);
@@ -1386,6 +1409,118 @@ static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 	return TRUE;
 }
 
+/* Build {who:{"m":true|false}} and relay it to one listener — the moderation-mute transition emit
+ * (Option A). Same field the viewer reads into mIsModeratorMuted: it KEEPS the row and greys it,
+ * never removes it (contrast the "l" leave). Caller must NOT hold L->mutex. */
+static void janus_slvoice_relay_mute_one(janus_slvoice_session *L, const char *who, gboolean muted) {
+	json_t *entry = json_object();
+	json_t *sub = json_object();
+	json_object_set_new(sub, "m", muted ? json_true() : json_false());
+	json_object_set_new(entry, who, sub);
+	janus_slvoice_relay_json(L, entry);
+	json_decref(entry);
+}
+
+/* Set/clear this listener's MODERATION mute for one source in its persistent peer_ctl map, creating
+ * the entry if needed. Returns TRUE iff mod_muted actually CHANGED (so the caller emits an "m"
+ * transition). L->mutex held. Never touches `muted` (the viewer's personal mute) or `gain`, so the
+ * two mute sources compose (the mix silences on either) and clearing one never wipes the other. */
+static gboolean janus_slvoice_set_mod_muted_locked(janus_slvoice_session *L, const char *uuid, gboolean muted) {
+	slv_peer_ctl *dst = NULL;
+	for(int k = 0; k < L->n_peer_ctl; k++) {
+		if(strcmp(L->peer_ctl[k].uuid, uuid) == 0) { dst = &L->peer_ctl[k]; break; }
+	}
+	if(dst == NULL) {
+		if(!muted)
+			return FALSE;   /* clearing a mute that was never set: no entry, no change */
+		if(L->n_peer_ctl >= SLV_MAX_PEER_ADJ)
+			return FALSE;   /* peer_ctl table full: drop (source stays audible; bounded) */
+		dst = &L->peer_ctl[L->n_peer_ctl++];
+		memset(dst, 0, sizeof(*dst));
+		g_strlcpy(dst->uuid, uuid, SLV_UUID_LEN);
+	}
+	if((dst->mod_muted ? TRUE : FALSE) == (muted ? TRUE : FALSE))
+		return FALSE;
+	dst->mod_muted = muted ? TRUE : FALSE;
+	return TRUE;
+}
+
+/* Apply the parsed MODERATION MUTE channel (Option A) to its room. PARALLEL to apply_visbatch and
+ * deliberately separate from it: a mute NEVER adds to L->excluded and NEVER synthesises a leave, so
+ * the source stays in the roster (push_presence / the dot batch / the backlog all key on L->excluded,
+ * which is untouched here). It sets the listener's per-source mod_muted (the mix silences it) and
+ * emits {source:{"m":bool}} on transitions so the viewer greys / un-greys the row. Ban precedence is
+ * upstream: VisibilityMatrix.Build never puts a source in BOTH channels (ban wins), so a removed
+ * source is not also here. Returns TRUE if applied, FALSE if the room is unknown (mirrors
+ * apply_visbatch so the caller reports unknown_room). No-op (TRUE) when there are no mute entries. */
+static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb) {
+	if(vb->n_mute_entries == 0)
+		return TRUE;
+	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb->room);
+	if(room == NULL) {
+		JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch mute for unknown room %"PRId64" (op=%s); dropped\n",
+			JANUS_SLVOICE_PACKAGE, (int64_t)vb->room, slv_vis_op_str(vb->op));
+		return FALSE;
+	}
+	janus_mutex_lock(&room->mutex);
+	for(int i = 0; i < vb->n_mute_entries; i++) {
+		const slv_vis_entry *e = &vb->mute_entries[i];
+		GHashTableIter lit;
+		gpointer lv;
+		g_hash_table_iter_init(&lit, room->participants);
+		while(g_hash_table_iter_next(&lit, NULL, &lv)) {
+			janus_slvoice_session *L = lv;
+			if(L->display == NULL || strcmp(L->display, e->listener) != 0)
+				continue;   /* fan-out to EVERY session matching the listener display (§M) */
+
+			char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
+			gboolean trans_mute[SLV_VIS_MAX_EXCL * 2];
+			int ntrans = 0;
+
+			janus_mutex_lock(&L->mutex);
+			if(vb->op == SLV_VIS_OP_REPLACE) {
+				/* Set the listener's mod-mute set EXACTLY: clear any currently-muted source not in
+				 * the new set, then set every source in the new set. */
+				for(int k = 0; k < L->n_peer_ctl; k++) {
+					if(!L->peer_ctl[k].mod_muted)
+						continue;
+					gboolean in_new = FALSE;
+					for(int m = 0; m < e->n_excl; m++)
+						if(strcmp(L->peer_ctl[k].uuid, e->excl[m]) == 0) { in_new = TRUE; break; }
+					if(!in_new) {
+						L->peer_ctl[k].mod_muted = FALSE;
+						if(ntrans < SLV_VIS_MAX_EXCL * 2) {
+							g_strlcpy(trans_uuid[ntrans], L->peer_ctl[k].uuid, SLV_UUID_LEN);
+							trans_mute[ntrans++] = FALSE;
+						}
+					}
+				}
+				for(int m = 0; m < e->n_excl; m++) {
+					if(janus_slvoice_set_mod_muted_locked(L, e->excl[m], TRUE) && ntrans < SLV_VIS_MAX_EXCL * 2) {
+						g_strlcpy(trans_uuid[ntrans], e->excl[m], SLV_UUID_LEN);
+						trans_mute[ntrans++] = TRUE;
+					}
+				}
+			} else {
+				gboolean want = (vb->op == SLV_VIS_OP_ADD) ? TRUE : FALSE;
+				for(int m = 0; m < e->n_excl; m++) {
+					if(janus_slvoice_set_mod_muted_locked(L, e->excl[m], want) && ntrans < SLV_VIS_MAX_EXCL * 2) {
+						g_strlcpy(trans_uuid[ntrans], e->excl[m], SLV_UUID_LEN);
+						trans_mute[ntrans++] = want;
+					}
+				}
+			}
+			janus_mutex_unlock(&L->mutex);
+
+			for(int t = 0; t < ntrans; t++)
+				janus_slvoice_relay_mute_one(L, trans_uuid[t], trans_mute[t]);
+		}
+	}
+	janus_mutex_unlock(&room->mutex);
+	janus_refcount_decrease(&room->ref);
+	return TRUE;
+}
+
 json_t *janus_slvoice_handle_admin_message(json_t *message) {
 	const char *request_text = NULL;
 	if(message != NULL && json_is_object(message)) {
@@ -1406,11 +1541,19 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 		if(buf != NULL)
 			free(buf);
 		if(st == SLV_VISBATCH_OK) {
-			if(janus_slvoice_apply_visbatch(&vb)) {
+			/* Apply the EXCLUSION channel first (ban/visibility -> leaves/removals), then the
+			 * ADDITIVE moderation MUTE channel (keeps the row, silences, greys). Same room and same
+			 * atomic contract; the two are independent per source (Build guarantees ban wins, so no
+			 * source is in both). Each is skipped when its channel is empty; a channel with entries
+			 * against an unknown room reports unknown_room, exactly as before. */
+			gboolean exclOk = (vb.n_entries > 0) ? janus_slvoice_apply_visbatch(&vb) : TRUE;
+			gboolean muteOk = (vb.n_mute_entries > 0) ? janus_slvoice_apply_mutebatch(&vb) : TRUE;
+			if(exclOk && muteOk) {
 				json_object_set_new(response, "slvoice", json_string("applied"));
 				json_object_set_new(response, "op", json_string(slv_vis_op_str(vb.op)));
 				json_object_set_new(response, "room", json_integer((json_int_t)vb.room));
 				json_object_set_new(response, "entries", json_integer(vb.n_entries));
+				json_object_set_new(response, "mute_entries", json_integer(vb.n_mute_entries));
 				json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
 			} else {
 				/* Parsed fine but named no room in this process, so nothing was applied.
@@ -2536,7 +2679,11 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 				continue;
 			for(int k = 0; k < s->n_peer_ctl; k++) {
 				if(strcmp(s->peer_ctl[k].uuid, disp) == 0) {
-					if(s->peer_ctl[k].muted)
+					/* Silence the source if the listener personally muted it OR the sim
+					 * moderation-muted it (Option A). mod_muted is the ONLY new term in the
+					 * mix; a moderation mute leaves the source in the roster (never in
+					 * L->excluded) and is silenced here instead of by the exclusion cull. */
+					if(s->peer_ctl[k].muted || s->peer_ctl[k].mod_muted)
 						mutes[j] = 1;
 					if(s->peer_ctl[k].has_gain)
 						gains[j] = s->peer_ctl[k].gain;

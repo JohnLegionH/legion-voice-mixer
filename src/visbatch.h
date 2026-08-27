@@ -64,9 +64,15 @@ typedef struct slv_vis_entry {
 typedef struct slv_visbatch {
 	slv_vis_op op;
 	int64_t room;                      /*!< target room number (matches the mixer room_id) */
-	slv_vis_entry *entries;            /*!< heap array of \c n_entries listener updates */
+	slv_vis_entry *entries;            /*!< heap array of \c n_entries EXCLUSION (ban/visibility) updates */
 	int n_entries;
-	int n_skipped;                     /*!< malformed listener/source items skipped */
+	/* ADDITIVE moderation MUTE channel (Option A). Same slv_vis_entry shape as `entries`, but a
+	 * source here is MUTED (row stays, greyed) rather than excluded (removed). Parsed from the
+	 * optional top-level "mute" object; an absent "mute" leaves this NULL/0 — today's behaviour
+	 * exactly. An older mixer that never reads this field is unaffected (skew-safe). */
+	slv_vis_entry *mute_entries;       /*!< heap array of \c n_mute_entries moderation-mute updates */
+	int n_mute_entries;
+	int n_skipped;                     /*!< malformed listener/source items skipped (both channels) */
 } slv_visbatch;
 
 /*! \brief Result of a parse attempt. */
