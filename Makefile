@@ -53,7 +53,7 @@ LDLIBS  += $(PKG_LIBS)
 
 # Phase 2 adds the per-room N-minus-one mixer; the pure mixing math lives in
 # src/mixer/mix.c (Janus/Opus-free) so it is shared with the unit test below.
-SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/mixer/mix.c
+SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
 OBJS := $(SRCS:.c=.o)
 
 # Unit tests. Both are plain C binaries with NO Janus link:
@@ -65,6 +65,9 @@ TEST_MIX_BIN     := tests/test_mix
 TEST_MIX_SRCS    := tests/test_mix.c src/mixer/mix.c
 TEST_VISBATCH_BIN  := tests/test_visbatch
 TEST_VISBATCH_SRCS := tests/test_visbatch.c src/visbatch.c
+# test_deferred: the per-room deferred visibility/mute store (libc only, no Janus/glib/jansson).
+TEST_DEFERRED_BIN  := tests/test_deferred
+TEST_DEFERRED_SRCS := tests/test_deferred.c src/deferred.c
 TEST_ROSTER_BIN    := tests/test_roster
 TEST_ROSTER_SRCS   := tests/test_roster.c
 TEST_AZIMUTH_BIN   := tests/test_azimuth
@@ -75,7 +78,7 @@ TEST_PAN_SRCS      := tests/test_pan.c
 # bench_tick.c #includes janus_slvoice.c to reach the static tick, so the plugin
 # .c is NOT listed here (it would double-define); the other pure .c deps are.
 BENCH_TICK_BIN     := tests/bench_tick
-BENCH_TICK_SRCS    := tests/bench_tick.c src/sldata.c src/visbatch.c src/mixer/mix.c
+BENCH_TICK_SRCS    := tests/bench_tick.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
 BENCH_CFLAGS       := $(CFLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -I$(JANUS_PREFIX)/include $(PKG_CFLAGS) $(EXTRA_CFLAGS)
 # --unresolved-symbols=ignore-all: janus_slvoice.c compiles in init (janus_config_*)
 # and negotiate (janus_sdp_*), which the harness NEVER calls; leaving them undefined
@@ -100,10 +103,11 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
+	./$(TEST_DEFERRED_BIN)
 	./$(TEST_ROSTER_BIN)
 	./$(TEST_AZIMUTH_BIN)
 	./$(TEST_PAN_BIN)
@@ -113,6 +117,10 @@ $(TEST_SLDATA_BIN): $(TEST_SLDATA_SRCS)
 
 $(TEST_VISBATCH_BIN): $(TEST_VISBATCH_SRCS)
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_VISBATCH_SRCS) $(TEST_LIBS)
+
+# test_deferred: libc only (deferred.c pulls no jansson/glib), like test_mix.
+$(TEST_DEFERRED_BIN): $(TEST_DEFERRED_SRCS)
+	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_DEFERRED_SRCS)
 
 $(TEST_ROSTER_BIN): $(TEST_ROSTER_SRCS)
 	$(CC) $(TEST_GLIB_CFLAGS) -o $@ $(TEST_ROSTER_SRCS) $(TEST_GLIB_LIBS)
@@ -140,4 +148,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(BENCH_TICK_BIN)

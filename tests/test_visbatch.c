@@ -47,6 +47,15 @@ static int has_src(const slv_vis_entry *e, const char *s) {
 	return 0;
 }
 
+/* Find a MUTE-channel entry by uuid; NULL if absent. The mute channel reuses slv_vis_entry
+ * (its sources live in the excl[]/n_excl fields), parsed from the top-level "mute" object. */
+static const slv_vis_entry *find_mute(const slv_visbatch *b, const char *listener) {
+	for(int i = 0; i < b->n_mute_entries; i++)
+		if(!strcmp(b->mute_entries[i].listener, listener))
+			return &b->mute_entries[i];
+	return NULL;
+}
+
 static void test_valid_add(void) {
 	slv_visbatch b;
 	slv_visbatch_status st = parse(
@@ -149,6 +158,52 @@ static void test_resilience(void) {
 	slv_visbatch_free(&b);
 }
 
+/* The ADDITIVE moderation MUTE channel (Option A): a top-level "mute" object parses into
+ * mute_entries, parallel to and independent of "excl". Basic coverage that was missing when
+ * the mute channel first landed. */
+static void test_mute_channel(void) {
+	slv_visbatch b;
+	slv_visbatch_status st = parse(
+		"{\"op\":\"add\",\"room\":3,\"excl\":{\"L1\":[\"S1\"]},\"mute\":{\"L1\":[\"S2\",\"S3\"]}}", &b);
+	CHECK(st == SLV_VISBATCH_OK, "excl+mute batch parses OK");
+	CHECK(b.n_entries == 1, "one excl entry");
+	CHECK(b.n_mute_entries == 1, "one mute entry");
+	const slv_vis_entry *m = find_mute(&b, "L1");
+	CHECK(m && m->n_excl == 2 && has_src(m, "S2") && has_src(m, "S3"), "L1 mutes S2,S3");
+	const slv_vis_entry *x = find(&b, "L1");
+	CHECK(x && x->n_excl == 1 && has_src(x, "S1"), "L1 still excludes S1 (channels independent)");
+	slv_visbatch_free(&b);
+}
+
+static void test_mute_only(void) {
+	/* A mute-ONLY batch (no excl, or empty excl) still applies: OK, zero excl entries. */
+	slv_visbatch b;
+	slv_visbatch_status st = parse("{\"op\":\"replace\",\"room\":4,\"mute\":{\"L\":[\"S\"]}}", &b);
+	CHECK(st == SLV_VISBATCH_OK, "mute-only batch parses OK");
+	CHECK(b.n_entries == 0, "no excl entries");
+	CHECK(b.n_mute_entries == 1 && find_mute(&b, "L") && find_mute(&b, "L")->n_excl == 1, "one mute entry for L");
+	slv_visbatch_free(&b);
+}
+
+static void test_mute_replace_clear(void) {
+	/* replace with an empty mute list clears the listener's mute set; the entry is kept. */
+	slv_visbatch b;
+	slv_visbatch_status st = parse("{\"op\":\"replace\",\"room\":4,\"mute\":{\"L\":[]}}", &b);
+	CHECK(st == SLV_VISBATCH_OK, "mute replace-clear parses OK");
+	const slv_vis_entry *m = find_mute(&b, "L");
+	CHECK(m && m->n_excl == 0, "L has an empty (cleared) mute set, entry retained");
+	slv_visbatch_free(&b);
+}
+
+static void test_mute_absent(void) {
+	/* No "mute" key -> zero mute entries (skew-safe: absent mute == no mutes). */
+	slv_visbatch b;
+	slv_visbatch_status st = parse("{\"op\":\"add\",\"room\":1,\"excl\":{\"L\":[\"S\"]}}", &b);
+	CHECK(st == SLV_VISBATCH_OK, "excl-only batch parses OK");
+	CHECK(b.n_mute_entries == 0, "absent mute -> no mute entries");
+	slv_visbatch_free(&b);
+}
+
 int main(void) {
 	test_valid_add();
 	test_ops();
@@ -158,6 +213,10 @@ int main(void) {
 	test_empty();
 	test_toobig();
 	test_resilience();
+	test_mute_channel();
+	test_mute_only();
+	test_mute_replace_clear();
+	test_mute_absent();
 
 	printf("test_visbatch: %d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;

@@ -62,6 +62,7 @@
 
 #include "sldata.h"
 #include "visbatch.h"    /* Phase 3a: server-to-server visibility batch parser (unit-tested) */
+#include "deferred.h"    /* join-window fix: per-room store of columns deferred for a not-yet-joined listener */
 #include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
@@ -318,6 +319,12 @@ typedef struct janus_slvoice_room {
 	guint64 vis_dropped_listener_entries;      /* cumulative since room creation */
 	guint64 vis_last_batch_dropped_listeners;  /* drops in the most recently applied batch */
 
+	/* Join-window fix (src/deferred.h): columns DEFERRED for a listener that named this
+	 * room in a batch but is not yet a participant (nmatch==0). Replayed and removed by
+	 * the join branch the instant that listener joins, before any presence derived from
+	 * them is revealed. Guarded by room->mutex, like the vis_* fields above. */
+	slv_deferred_store vis_deferred;
+
 	volatile gint destroyed;
 	janus_refcount ref;
 } janus_slvoice_room;
@@ -492,6 +499,7 @@ static void janus_slvoice_room_free(const janus_refcount *ref) {
 	JANUS_LOG(LOG_VERB, "[%s] Freeing room %"PRIu64"\n", JANUS_SLVOICE_PACKAGE, room->room_id);
 	if(room->participants)
 		g_hash_table_destroy(room->participants);
+	slv_deferred_free_all(&room->vis_deferred);   /* free any columns still deferred at teardown */
 	g_free(room->description);
 	g_free(room);
 }
@@ -509,6 +517,7 @@ static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *des
 	room->participants = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	janus_mutex_init(&room->mutex);
 	janus_refcount_init(&room->ref, janus_slvoice_room_free);
+	slv_deferred_init(&room->vis_deferred);   /* empty deferred store (g_malloc0 already zeroed it) */
 	/* Start the per-region 20ms mix tick thread (the mixer.h slv_region model). */
 	janus_slvoice_room_start(room);
 	return room;
@@ -1095,6 +1104,14 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "last_mix_rms_l", json_real(session->last_mix_rms_l)); /* per-channel output level (Phase 3b item 4 pan diagnostic; L/R swap detector) */
 	json_object_set_new(info, "last_mix_rms_r", json_real(session->last_mix_rms_r));
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
+	/* Deliverable 5: how many of this listener's peer_ctl entries are SIM moderation-muted
+	 * (the mix silences a source when mod_muted OR the viewer's own `muted` is set). The
+	 * moderation flag was previously invisible to the admin API. Read under session->mutex. */
+	int mod_muted_count = 0;
+	for(int mmk = 0; mmk < session->n_peer_ctl; mmk++)
+		if(session->peer_ctl[mmk].mod_muted)
+			mod_muted_count++;
+	json_object_set_new(info, "mod_muted_entries", json_integer(mod_muted_count));
 	json_object_set_new(info, "excluded_entries",
 		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
 	json_object_set_new(info, "data_msgs_received", json_integer((json_int_t)session->data_msgs_received));
@@ -1164,6 +1181,18 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 			json_integer((json_int_t)qroom->vis_dropped_listener_entries));
 		json_object_set_new(vis, "last_batch_dropped_listeners",
 			json_integer((json_int_t)qroom->vis_last_batch_dropped_listeners));
+		/* Join-window fix (src/deferred.h): the deferred store's counters -- columns held for
+		 * listeners not yet in the room, and their disposition (replayed on join / evicted). */
+		json_object_set_new(vis, "deferred_current",
+			json_integer((json_int_t)slv_deferred_count(&qroom->vis_deferred)));
+		json_object_set_new(vis, "deferred_adds",
+			json_integer((json_int_t)qroom->vis_deferred.adds));
+		json_object_set_new(vis, "deferred_replaced",
+			json_integer((json_int_t)qroom->vis_deferred.replaced));
+		json_object_set_new(vis, "deferred_replayed",
+			json_integer((json_int_t)qroom->vis_deferred.replayed));
+		json_object_set_new(vis, "deferred_evicted",
+			json_integer((json_int_t)qroom->vis_deferred.evicted));
 		janus_mutex_unlock(&qroom->mutex);
 		json_object_set_new(info, "tick_histogram", hist);
 		json_object_set_new(info, "visibility", vis);
@@ -1240,11 +1269,12 @@ static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const cha
  * Returns TRUE if the batch was applied, FALSE if vb->room named no room in this
  * process — the caller turns that into an unknown_room error instead of reporting
  * success for a batch that landed nowhere. */
-static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
+static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb, guint64 *out_deferred) {
 	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb->room);
 	if(room == NULL) {
 		JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch for unknown room %"PRId64" (op=%s); dropped\n",
 			JANUS_SLVOICE_PACKAGE, (int64_t)vb->room, slv_vis_op_str(vb->op));
+		if(out_deferred) *out_deferred = 0;
 		return FALSE;
 	}
 	janus_mutex_lock(&room->mutex);
@@ -1367,6 +1397,9 @@ static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 		if(nmatch == 0) {
 			room->vis_dropped_listener_entries++;
 			dropped_this_batch++;
+			/* Join-window fix: rather than lose it, DEFER this listener's exclusion column so
+			 * the join branch replays it when the listener finally joins the room. */
+			slv_deferred_put(&room->vis_deferred, e->listener, vb->op, e->excl, e->n_excl, 0);
 			JANUS_LOG(LOG_VERB, "[%s] peer_ctl_batch listener %s (op=%s, room %"PRId64") "
 				"not in room; entry dropped (dropped_listener_entries=%"PRIu64")\n",
 				JANUS_SLVOICE_PACKAGE, e->listener, slv_vis_op_str(vb->op),
@@ -1401,6 +1434,7 @@ static gboolean janus_slvoice_apply_visbatch(const slv_visbatch *vb) {
 	room->vis_last_mode = vb->op;
 	room->vis_have_batch = TRUE;
 	room->vis_last_batch_dropped_listeners = dropped_this_batch;
+	if(out_deferred) *out_deferred = dropped_this_batch;   /* == deferred this batch (each drop is now a defer) */
 	if(vb->op == SLV_VIS_OP_REPLACE)
 		room->vis_joins_since_snapshot = 0;   /* a fresh snapshot re-derives the roster */
 
@@ -1453,25 +1487,31 @@ static gboolean janus_slvoice_set_mod_muted_locked(janus_slvoice_session *L, con
  * upstream: VisibilityMatrix.Build never puts a source in BOTH channels (ban wins), so a removed
  * source is not also here. Returns TRUE if applied, FALSE if the room is unknown (mirrors
  * apply_visbatch so the caller reports unknown_room). No-op (TRUE) when there are no mute entries. */
-static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb) {
-	if(vb->n_mute_entries == 0)
+static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb, guint64 *out_deferred) {
+	if(vb->n_mute_entries == 0) {
+		if(out_deferred) *out_deferred = 0;
 		return TRUE;
+	}
 	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb->room);
 	if(room == NULL) {
 		JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch mute for unknown room %"PRId64" (op=%s); dropped\n",
 			JANUS_SLVOICE_PACKAGE, (int64_t)vb->room, slv_vis_op_str(vb->op));
+		if(out_deferred) *out_deferred = 0;
 		return FALSE;
 	}
 	janus_mutex_lock(&room->mutex);
+	guint64 deferred_this_batch = 0;
 	for(int i = 0; i < vb->n_mute_entries; i++) {
 		const slv_vis_entry *e = &vb->mute_entries[i];
 		GHashTableIter lit;
 		gpointer lv;
+		int nmatch = 0;
 		g_hash_table_iter_init(&lit, room->participants);
 		while(g_hash_table_iter_next(&lit, NULL, &lv)) {
 			janus_slvoice_session *L = lv;
 			if(L->display == NULL || strcmp(L->display, e->listener) != 0)
 				continue;   /* fan-out to EVERY session matching the listener display (§M) */
+			nmatch++;
 
 			char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
 			gboolean trans_mute[SLV_VIS_MAX_EXCL * 2];
@@ -1515,10 +1555,41 @@ static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb) {
 			for(int t = 0; t < ntrans; t++)
 				janus_slvoice_relay_mute_one(L, trans_uuid[t], trans_mute[t]);
 		}
+		if(nmatch == 0) {
+			/* Join-window fix: no session for this listener yet -- DEFER its MUTE column so the
+			 * join branch replays it (greyed row from the start) when it joins. */
+			slv_deferred_put(&room->vis_deferred, e->listener, vb->op, e->excl, e->n_excl, 1);
+			deferred_this_batch++;
+		}
 	}
+	if(out_deferred) *out_deferred = deferred_this_batch;
 	janus_mutex_unlock(&room->mutex);
 	janus_refcount_decrease(&room->ref);
 	return TRUE;
+}
+
+/* Replay any columns DEFERRED for `L` (its exclusion/mute set arrived before it joined) into its
+ * freshly-created session state, then remove the deferred record. Called from the join branch with
+ * room->mutex HELD and BEFORE the join roster is built / push_presence / the data_ready backlog, so
+ * the listener's exclusions and mod-mutes are in force before any presence derived from them is
+ * revealed. Takes L->mutex (order room->mutex -> session->mutex) to mutate L->excluded / peer_ctl. */
+static void janus_slvoice_room_replay_deferred_locked(janus_slvoice_room *room, janus_slvoice_session *L) {
+	if(L == NULL || L->display == NULL)
+		return;
+	const slv_deferred_entry *d = slv_deferred_get(&room->vis_deferred, L->display);
+	if(d == NULL)
+		return;
+	int ne = d->n_excl, nm = d->n_mute;   /* capture for the log before replay_done frees d */
+	janus_mutex_lock(&L->mutex);
+	for(int i = 0; i < d->n_excl; i++)
+		if(L->excluded != NULL && !g_hash_table_contains(L->excluded, d->excl[i]))
+			g_hash_table_add(L->excluded, g_strdup(d->excl[i]));
+	for(int i = 0; i < d->n_mute; i++)
+		janus_slvoice_set_mod_muted_locked(L, d->mute[i], TRUE);   /* greying rides the backlog "m" */
+	janus_mutex_unlock(&L->mutex);
+	slv_deferred_replay_done(&room->vis_deferred, L->display);   /* frees d; remove after successful replay */
+	JANUS_LOG(LOG_VERB, "[%s] replayed deferred columns for listener %s (excl=%d, mute=%d) on join to room %"PRIu64"\n",
+		JANUS_SLVOICE_PACKAGE, L->display, ne, nm, room->room_id);
 }
 
 json_t *janus_slvoice_handle_admin_message(json_t *message) {
@@ -1546,8 +1617,9 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 			 * atomic contract; the two are independent per source (Build guarantees ban wins, so no
 			 * source is in both). Each is skipped when its channel is empty; a channel with entries
 			 * against an unknown room reports unknown_room, exactly as before. */
-			gboolean exclOk = (vb.n_entries > 0) ? janus_slvoice_apply_visbatch(&vb) : TRUE;
-			gboolean muteOk = (vb.n_mute_entries > 0) ? janus_slvoice_apply_mutebatch(&vb) : TRUE;
+			guint64 excl_deferred = 0, mute_deferred = 0;
+			gboolean exclOk = (vb.n_entries > 0) ? janus_slvoice_apply_visbatch(&vb, &excl_deferred) : TRUE;
+			gboolean muteOk = (vb.n_mute_entries > 0) ? janus_slvoice_apply_mutebatch(&vb, &mute_deferred) : TRUE;
 			if(exclOk && muteOk) {
 				json_object_set_new(response, "slvoice", json_string("applied"));
 				json_object_set_new(response, "op", json_string(slv_vis_op_str(vb.op)));
@@ -1555,6 +1627,11 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 				json_object_set_new(response, "entries", json_integer(vb.n_entries));
 				json_object_set_new(response, "mute_entries", json_integer(vb.n_mute_entries));
 				json_object_set_new(response, "skipped", json_integer(vb.n_skipped));
+				/* ADDITIVE (join-window fix): listener entries DEFERRED this batch because the listener
+				 * has not joined yet -- the count a sim reads to know its entry was retained, not
+				 * silently dropped. An old sim ignores this extra key (skew-safe). */
+				json_object_set_new(response, "deferred_listeners",
+					json_integer((json_int_t)(excl_deferred + mute_deferred)));
 			} else {
 				/* Parsed fine but named no room in this process, so nothing was applied.
 				 * Same {slvoice:error, reason} shape as the parse failures below, so a
@@ -1826,6 +1903,7 @@ static void *janus_slvoice_handler(void *data) {
 			}
 			g_list_free(members);
 			g_hash_table_remove_all(room->participants);
+			slv_deferred_free_all(&room->vis_deferred);   /* drop deferred columns for this destroyed room */
 			janus_mutex_unlock(&room->mutex);
 			g_hash_table_remove(rooms, &room_id);
 			janus_mutex_unlock(&rooms_mutex);
@@ -1913,6 +1991,10 @@ static void *janus_slvoice_handler(void *data) {
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = user_id;
 			g_hash_table_insert(room->participants, key, session);
+			/* Join-window fix: replay any columns deferred for this listener BEFORE the join roster
+			 * below (and before push_presence / the data_ready backlog) reads its exclusion/mute
+			 * state, so a ban/mute that arrived pre-join is in force first. */
+			janus_slvoice_room_replay_deferred_locked(room, session);
 			json_t *list = json_array();
 			GHashTableIter iter;
 			gpointer value;

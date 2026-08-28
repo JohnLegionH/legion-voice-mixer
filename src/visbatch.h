@@ -44,6 +44,13 @@
 /*! \brief Max excluded sources parsed per listener (extras skipped+counted). */
 #define SLV_VIS_MAX_EXCL 128
 
+/*! \brief Max DEFERRED (provisioned-but-not-yet-joined) listeners retained per
+ * room by the deferred store (src/deferred.h). A fixed cap in the style of
+ * ::SLV_VIS_MAX_ENTRIES: on overflow the OLDEST deferred record is evicted and
+ * counted. A listener that never arrives is bounded by this cap plus room
+ * teardown — deliberately no TTL (a proven join took +8min). */
+#define SLV_VIS_MAX_DEFERRED 256
+
 /*! \brief Which merge the batch performs into each listener's exclusion set. */
 typedef enum slv_vis_op {
 	SLV_VIS_OP_ADD = 0,    /*!< add these (listener,source) exclusions */
