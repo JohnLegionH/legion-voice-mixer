@@ -413,6 +413,21 @@ silently dropped. `query_session`'s `visibility` object gains `deferred_current`
 sim ignores the extra reply key; an old mixer never emits it (a new sim must treat its absence as
 "no information").
 
+**(d) Presence delivery guarantee + counters (M-A2A-1, added 2026-08-30).** The joiner's `"j"` to
+already-present members (`push_presence`) and the roster backlog a newly-writable listener receives
+are now provably complementary: `data_ready` flips the recipient's `dc_open` and takes the
+join-backlog snapshot in ONE critical section under `room->mutex` — the same mutex every
+`push_presence` recipient-side `dc_open` read runs under — so for every (joiner, recipient) pair at
+least one of {live push, backlog} delivers the `"j"`, by mutual exclusion alone (the three orderings
+are enumerated at the fence in `janus_slvoice_data_ready`). A duplicate (fence between insert and
+push) is benign: a second `"j"` is idempotent at the viewer. This matters most for rooms that
+receive **no** `peer_ctl_batch` (the avatar-to-avatar rooms, room model (a)), where the
+visibility-transition repair path never runs and a dropped one-shot `"j"` used to be unrecoverable.
+`query_session` gains two additive per-session counters (this session as RECIPIENT):
+`presence_pushed` and `presence_dropped_dc_closed`; after the fence the dropped counter should only
+ever count a genuinely dead channel (PeerConnection down), never the join race. Old sims are
+unaffected; the fields are additive.
+
 ---
 
 ## 4. Mixer side — folding visibility into the existing per-listener map

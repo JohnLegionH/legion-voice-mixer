@@ -455,6 +455,14 @@ typedef struct janus_slvoice_session {
 	volatile gint power_p;       /* RMS*128 clamped 0..127 (for the SLData batch) */
 	volatile gint vad;           /* simple energy VAD 0/1 (for the SLData batch) */
 	guint64 data_msgs_received;  /* SLData messages received on the data channel */
+	guint64 presence_pushed;     /* M-A2A-1: presence/mute JSON objects relayed to THIS session as
+	                              * recipient (push_presence, join backlog, transition/mute emits). */
+	guint64 presence_dropped_dc_closed; /* M-A2A-1: presence objects DROPPED because this recipient's
+	                              * dc_open was 0. Post-fence this should only ever count a genuinely
+	                              * dead channel (hangup_media cleared dc_open), never the join race.
+	                              * Both counters incremented under room->mutex (every relay_json
+	                              * caller holds it); read unlocked by query_session like
+	                              * rtp_in_count (torn values only garble a diagnostic). */
 	slv_sldata last_data;        /* latest parsed SLData values */
 	unsigned last_data_fields;   /* fields_seen from the last SLData */
 
@@ -576,8 +584,15 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 static void janus_slvoice_relay_json(janus_slvoice_session *s, json_t *obj) {
 	if(s == NULL || obj == NULL || gateway == NULL)
 		return;
-	if(!g_atomic_int_get(&s->dc_open))
+	if(!g_atomic_int_get(&s->dc_open)) {
+		/* M-A2A-1: count the drop. Every caller holds room->mutex, and since the
+		 * data_ready fence (janus_slvoice_data_ready) sets dc_open under that same
+		 * mutex, a drop here can no longer be the join race — only a channel that
+		 * is genuinely not (or no longer) writable. */
+		s->presence_dropped_dc_closed++;
 		return;
+	}
+	s->presence_pushed++;
 	char *text = json_dumps(obj, JSON_COMPACT);
 	if(text == NULL)
 		return;
@@ -671,20 +686,10 @@ static gboolean janus_slvoice_is_mod_muted(janus_slvoice_session *L, const char 
 	return r;
 }
 
-static void janus_slvoice_send_join_backlog(janus_slvoice_session *listener) {
-	if(listener == NULL)
-		return;
-	janus_mutex_lock(&listener->mutex);
-	janus_slvoice_room *room = listener->room;
-	if(room != NULL && !g_atomic_int_get(&room->destroyed)) {
-		janus_refcount_increase(&room->ref);   /* macro expands to a block: braces required */
-	} else {
-		room = NULL;
-	}
-	janus_mutex_unlock(&listener->mutex);
-	if(room == NULL)
-		return;
-	janus_mutex_lock(&room->mutex);
+/* M-A2A-1: the snapshot+send body, with room->mutex HELD by the caller (the data_ready
+ * fence). Split out of janus_slvoice_send_join_backlog so the dc_open flip and this
+ * snapshot are one critical section — see the invariant proof at the fence. */
+static void janus_slvoice_send_join_backlog_locked(janus_slvoice_session *listener, janus_slvoice_room *room) {
 	GHashTableIter iter;
 	gpointer value;
 	g_hash_table_iter_init(&iter, room->participants);
@@ -710,8 +715,6 @@ static void janus_slvoice_send_join_backlog(janus_slvoice_session *listener) {
 		janus_slvoice_relay_json(listener, entry);   /* guards on listener->dc_open (now 1) */
 		json_decref(entry);
 	}
-	janus_mutex_unlock(&room->mutex);
-	janus_refcount_decrease(&room->ref);
 }
 
 /* ---- Session helpers ----------------------------------------------------- */
@@ -1115,6 +1118,11 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "excluded_entries",
 		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
 	json_object_set_new(info, "data_msgs_received", json_integer((json_int_t)session->data_msgs_received));
+	/* M-A2A-1: presence delivery observability (this session as RECIPIENT). After the
+	 * data_ready fence, presence_dropped_dc_closed counting up on a session whose
+	 * channel later opened would indicate a NEW bug, not the (closed) join race. */
+	json_object_set_new(info, "presence_pushed", json_integer((json_int_t)session->presence_pushed));
+	json_object_set_new(info, "presence_dropped_dc_closed", json_integer((json_int_t)session->presence_dropped_dc_closed));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
 	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));
@@ -3070,12 +3078,47 @@ void janus_slvoice_data_ready(janus_plugin_session *handle) {
 	if(session == NULL)
 		return;
 	/* Do not relay_data before this fires (janus_textroom.c:1491). */
+	/* M-A2A-1 PRESENCE FENCE (O-42b): the dc_open flip and the join-backlog snapshot
+	 * are ONE critical section under room->mutex, and push_presence's per-recipient
+	 * dc_open read (inside relay_json) already runs under the SAME mutex. So for every
+	 * (joiner J, recipient R) pair, order the three room->mutex sections — I = J's
+	 * participant insert, P = the push to R (reads R->dc_open), F = THIS fence
+	 * (R->dc_open := 1, then snapshot; I precedes P by program order):
+	 *   F < I < P : snapshot misses J, but P reads dc_open==1 -> the push delivers.
+	 *   I < F < P : snapshot includes J -> the backlog delivers (P may deliver too).
+	 *   I < P < F : P reads dc_open==0 and drops, but the snapshot includes J -> the
+	 *               backlog delivers.
+	 * At least one of {push, backlog} delivers in every ordering, by mutual exclusion
+	 * alone — no memory-model reasoning required. The I<F<P duplicate is benign and
+	 * pre-existing: a second "j" is idempotent at the viewer (addParticipantByID by
+	 * UUID; documented above the backlog). Without the fence the same conclusion held
+	 * only via glib's atomic barriers; a drop in relay_json now provably cannot be
+	 * the join race, which is what makes presence_dropped_dc_closed meaningful.
+	 * A session with no room yet (data channel up before any join) just flips the
+	 * flag — there is nothing to snapshot, and its later join's push path (or its
+	 * re-entry here, which the CAS prevents) is not needed: every subsequent joiner's
+	 * push will find dc_open==1. Lock order room->mutex -> session->mutex preserved:
+	 * the room is resolved under session->mutex FIRST and released before locking. */
+	janus_slvoice_room *room = NULL;
+	janus_mutex_lock(&session->mutex);
+	if(session->room != NULL && !g_atomic_int_get(&session->room->destroyed)) {
+		room = session->room;
+		janus_refcount_increase(&room->ref);   /* macro expands to a block: braces required */
+	}
+	janus_mutex_unlock(&session->mutex);
+	if(room != NULL)
+		janus_mutex_lock(&room->mutex);
 	if(g_atomic_int_compare_and_exchange(&session->dc_open, 0, 1)) {
 		JANUS_LOG(LOG_INFO, "[%s-%p] Data channel open (writable)\n", JANUS_SLVOICE_PACKAGE, handle);
 		/* First time writable: send the roster backlog so occupants already present
 		 * when this listener joined get a row now, not on the next transition
 		 * (docs/join-backlog-defect.md). The CAS above makes this fire exactly once. */
-		janus_slvoice_send_join_backlog(session);
+		if(room != NULL)
+			janus_slvoice_send_join_backlog_locked(session, room);
+	}
+	if(room != NULL) {
+		janus_mutex_unlock(&room->mutex);
+		janus_refcount_decrease(&room->ref);
 	}
 }
 
