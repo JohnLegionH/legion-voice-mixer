@@ -529,6 +529,8 @@ required. OPEN rows are the actionable gaps.
   `AbsolutePosition`. Required for cross-region audibility, by design.
 - **#13 Estate-channel ban/restrict enforcement.** Data exists (#1/#2) but is bypassed on the
   shared estate channel today; enforcing it there is inseparable from #11.
+  **Superseded — see ADDENDUM 4 §P (2026-08-25): this item has three parts and they now
+  have three different statuses.**
 - **#12 Estate-settings-changed invalidation event.** No granular event exists for estate
   ban/manager/`AllowVoice` changes; a voice cache has nothing to subscribe to.
 - **#14 Coarse-location vs voice-hiding policy.** A pre-existing divergence (coarse dots
@@ -650,6 +652,13 @@ is a payload-carrying event."* This is the correction that reshapes the #12 desi
 `mixer-feed-protocol.md`.
 
 ### E. Second structural defect — under `TaxFree` the provision gate consults NO per-parcel voice/ban/restrict deny
+
+> **HISTORICAL (noted 2026-08-25).** The code citations and present-tense framing below
+> describe the provision path as it stood on 2026-08-16. The line numbers have drifted again
+> since (`:289` → `:494`, `:297` → `:502`, `:301` → `:513`) and the `else`-chaining described
+> here has been removed. The `TaxFree` void this section reports is **still open and still
+> accurate in substance** — only its rendering of the surrounding code is out of date. See
+> ADDENDUM 4 §P.
 
 This addendum records the second reportable finding explicitly (§1.4 and §1.1 already carry the raw
 material; this spotlights it). Estate **`TaxFree`** (the `!AllowAccessOverride` misnomer, §1.4)
@@ -1176,3 +1185,61 @@ with the deployed artifact hashes recorded above.
 **Not established here:** anything at or beyond the mixer's participant resolution
 under a duplicate display (§M), which this run deliberately avoided by confirming one
 handle per avatar before starting.
+
+---
+
+## ADDENDUM 4 — #13 status split (2026-08-25)
+
+### P. Correction to #13 — the item has three parts, and they now have three different statuses
+
+The OPEN-items entry reads *"#13 Estate-channel ban/restrict enforcement. Data exists (#1/#2)
+but is bypassed on the shared estate channel today; enforcing it there is inseparable from
+#11."* That is one sentence describing what has turned out to be three separable failures with
+three separate causes. The split is recorded here rather than by rewriting the entry, so the
+original framing stays legible.
+
+**Part 1 — the provisioning channel-type bypass. CLOSED.** The ban/restrict check in
+`ProvisionVoiceAccountRequest` was chained as the `else` of the `UseEstateVoiceChan`
+room-selection branch, so setting the estate-channel flag on a parcel skipped the access check
+entirely and a parcel-banned avatar was provisioned without ever being tested. De-chained by
+*"fix(voice): enforce parcel ban/restrict on the estate voice channel"*, so the check now runs
+unconditionally on both the estate-channel and per-parcel paths; room selection is unchanged.
+The check sits at `WebRtcVoiceRegionModule.cs:513`, after the room-selection block at
+`:502`–`:505`.
+
+**Part 2 — mixer-side per-pair enforcement. CLOSED ON THE ESTATE CHANNEL ONLY; OPEN FOR
+PER-PARCEL AGENTS.** `mixer-feed-protocol.md` §4 claimed the Phase-3a visibility feed closes
+#13 "per-pair in the mix regardless of room sharing". The *regardless of room sharing* clause
+is wrong. `JanusPeerCtlBatchSink` fixes its room once, in its constructor, to `REGION_ROOM_ID`
+(-999) (`JanusPeerCtlBatchSink.cs:38`–`:39`), and the feeder and `VisibilityBatchSender` hold
+no room at all by design, so the matrix is only ever delivered to the estate room. An agent on
+a per-parcel channel is in a different room and its entries are dropped at the mixer as an
+absent listener. Filed as *"WebRTC voice: the visibility feed is addressed only to the estate
+room, so per-parcel agents receive no exclusions"* in `Docs/KnownDefects.md`;
+`mixer-feed-protocol.md` §4 now carries the correction inline.
+
+**UPDATE 2026-08-27 — Part 2 now CLOSED for per-parcel agents too (deployed 2026-08-26).** The
+per-room emission build plan closed the delivery gap: `JanusPeerCtlBatchSink` no longer fixes one room
+in its constructor — it partitions each batch by the room its listeners are actually in and sends one
+`peer_ctl_batch` per room (S3a `ef119f2a90`, S3b *emit one visibility batch per room* `e35463a088`, on
+the per-agent room record from S1/S1b/S2 `3c95ddea0e`/`7b08786d19`/`98465dc662`), so an agent on a
+per-parcel channel receives its exclusions AND its moderation mutes in the room it is in. S4
+`33fc3b412e` surfaces any residual mixer-side drop sim-side. The "OPEN FOR PER-PARCEL AGENTS" clause
+above is superseded by this note (retained, not rewritten); Part 1 and Part 2 are now both closed,
+and only Part 3 (`TaxFree`) remains open. Filed defect entry in `KnownDefects.md` is marked resolved
+the same day.
+
+**Part 3 — the `TaxFree` void. UNTOUCHED, still open.** Neither of the above changes anything
+about §E. `LandObject.IsBannedFromLand` and `IsRestrictedFromLand` both open with
+`if (m_estateSettings.TaxFree) return false;` (`LandObject.cs:847`–`:848` and `:878`–`:879`),
+so on a `TaxFree` estate the provisioning check remains a no-op on **both** paths — exactly as
+it already was on the per-parcel path before Part 1. Part 1 closed the channel-type bypass; it
+did not and could not close this. Note that the Phase-3a matrix *does* override the void on
+its own side, via `LandBan.IsBannedIgnoringTaxFree` (Decision 2b, §F), so under `TaxFree` the
+two layers now disagree: the matrix honours a parcel ban that the provision gate does not.
+§E remains accurate in substance and is now historical in its code references; a note to that
+effect has been added at the head of that section.
+
+**Net.** #13 is not closable as a single item. Part 1 is done, Part 2 is a delivery-addressing
+defect tracked in `KnownDefects.md`, and Part 3 is the shared cross-module consequence of the
+`TaxFree` misnomer that §E already argues is not WebRTC-specific.
