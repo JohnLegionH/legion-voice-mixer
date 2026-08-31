@@ -467,6 +467,13 @@ typedef struct janus_slvoice_session {
 	                              * notices delivered to this recipient — so a live counter read can
 	                              * decompose pushed=N into joins vs leaves (the O-42c ambiguity:
 	                              * "2" could be j+l or j+j). Same locking/read discipline. */
+	volatile gint backlog_confirmed; /* M-A2A-3: this session's viewer has PROVEN its data channel is
+	                              * fully attached (we received its own "j" SLData) and the join
+	                              * backlog has been re-sent once for this attachment. CAS-guarded so
+	                              * repeated "j" frames don't re-send; cleared with dc_open in
+	                              * hangup_media and on leave_room, so a re-attach re-arms it. */
+	guint64 backlog_resent;      /* M-A2A-3: how many proof-of-attachment backlog re-sends this
+	                              * session received (normally 1 per attachment). */
 	slv_sldata last_data;        /* latest parsed SLData values */
 	unsigned last_data_fields;   /* fields_seen from the last SLData */
 
@@ -587,6 +594,7 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	if(who != NULL)
 		janus_slvoice_push_presence(room, who, FALSE);
 	g_free(who);
+	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: next room re-proves */
 	janus_mutex_lock(&room->mutex);
 	g_hash_table_remove(room->participants, &uid);
 	janus_mutex_unlock(&room->mutex);
@@ -1162,6 +1170,8 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "presence_dropped_dc_closed", json_integer((json_int_t)session->presence_dropped_dc_closed));
 	/* M-A2A-2: the leave subset of presence_pushed, so pushed=N is decomposable. */
 	json_object_set_new(info, "presence_leave_pushed", json_integer((json_int_t)session->presence_leave_pushed));
+	/* M-A2A-3: proof-of-attachment backlog re-sends (normally 1 per attachment). */
+	json_object_set_new(info, "backlog_resent", json_integer((json_int_t)session->backlog_resent));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
 	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));
@@ -3087,6 +3097,44 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 		return;
 	}
 
+	/* M-A2A-3 (O-42c root cause): PROOF-OF-ATTACHMENT backlog re-send. The stock viewer
+	 * DISCARDS data-channel frames that arrive before its observer is attached
+	 * (llwebrtc.cpp:1763-1771 iterates an observer list with no buffering; the observer
+	 * is attached via a main-thread hop after OnDataChannelReady,
+	 * llvoicewebrtc.cpp:3450-3468). Our join backlog fires at SERVER-side data_ready —
+	 * inside that window — so a delivered-and-counted "j" can be lost, the peer never
+	 * enters the viewer's participant map, and a later "l" no-ops (no hangup_on_last_leave).
+	 * The viewer's own "j" SLData (sendJoin, llvoicewebrtc.cpp:3477-3494) is sent only
+	 * AFTER its data interface is set, i.e. after attachment — receiving it here is proof
+	 * the window has closed, so the roster backlog is re-sent once per attachment
+	 * (idempotent at the viewer: addParticipant is find-then-reuse). Deliberately NOT
+	 * re-pushed: this participant's own presence to the EXISTING members — their "j" for
+	 * this participant was pushed at ITS join and their attach state is their own; each
+	 * session's window is closed by its own proof, so re-pushing here would only
+	 * duplicate. Do not "fix" that later. Lock discipline as the M-A2A-1 fence: resolve
+	 * the room under session->mutex, release, then room->mutex for the snapshot+send. */
+	if((d.fields_seen & SLV_FIELD_J) &&
+			g_atomic_int_compare_and_exchange(&session->backlog_confirmed, 0, 1)) {
+		janus_slvoice_room *jroom = NULL;
+		janus_mutex_lock(&session->mutex);
+		if(session->room != NULL && !g_atomic_int_get(&session->room->destroyed)) {
+			jroom = session->room;
+			janus_refcount_increase(&jroom->ref);   /* macro expands to a block: braces required */
+		}
+		janus_mutex_unlock(&session->mutex);
+		if(jroom != NULL) {
+			janus_mutex_lock(&jroom->mutex);
+			janus_slvoice_send_join_backlog_locked(session, jroom);
+			session->backlog_resent++;
+			janus_mutex_unlock(&jroom->mutex);
+			janus_refcount_decrease(&jroom->ref);
+			JANUS_LOG(LOG_INFO, "[%s-%p] Viewer data channel attach proven (own \"j\"); roster backlog re-sent\n",
+				JANUS_SLVOICE_PACKAGE, handle);
+		}
+		/* No room yet (a "j" before join): keep the flag — the join-time roster and the
+		 * data_ready backlog cover that ordering, and the viewer is provably attached. */
+	}
+
 	/* Echo toggle (slvoice extension): {"echo":true} / {"echo":false} */
 	if(d.fields_seen & SLV_FIELD_ECHO) {
 		janus_mutex_lock(&session->mutex);
@@ -3185,6 +3233,7 @@ void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 		return;
 	g_atomic_int_set(&session->webrtc_up, 0);
 	g_atomic_int_set(&session->dc_open, 0);
+	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: a re-attach must re-prove */
 	janus_mutex_lock(&session->mutex);
 	janus_slvoice_echo_stop_locked(session);
 	janus_mutex_unlock(&session->mutex);

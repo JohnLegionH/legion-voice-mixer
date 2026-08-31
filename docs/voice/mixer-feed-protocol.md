@@ -442,6 +442,20 @@ announce: it never removes the participant, and Janus can renegotiate media on t
 decompose pushed=N into joins vs leaves. `presence_pushed` itself now counts at the actual
 relay_data hand-off (a serialisation failure no longer inflates it).
 
+**(f) The viewer attach window + proof-of-attachment backlog re-send (M-A2A-3, added 2026-08-31).**
+The stock viewer discards data-channel frames that arrive before its data observer is attached
+(`llwebrtc.cpp:1763-1771` — an observer list with no buffering, attached via a main-thread hop after
+`OnDataChannelReady`). The join backlog fires at SERVER-side `data_ready`, inside that window, so a
+delivered-and-counted `"j"` can be silently lost viewer-side — the peer never enters the viewer's
+participant map and a later `"l"` no-ops, leaving `hangup_on_last_leave` unfired (the O-42c
+falsifier: `presence_leave_pushed=1` with no hangup). The viewer's own `"j"` SLData (`sendJoin`) is
+sent only after its data interface is set — proof the window has closed — so on receiving it the
+mixer re-sends that participant the roster backlog, once per attachment (CAS-guarded
+`backlog_confirmed`, cleared with `dc_open` on `hangup_media` and on leave, idempotent at the
+viewer). The participant's own presence is deliberately NOT re-pushed to existing members — their
+windows are closed by their own proofs. `query_session` gains `backlog_resent` (additive; normally 1
+per attachment). Old viewers/sims unaffected.
+
 ---
 
 ## 4. Mixer side — folding visibility into the existing per-listener map
