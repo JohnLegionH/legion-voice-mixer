@@ -428,6 +428,20 @@ visibility-transition repair path never runs and a dropped one-shot `"j"` used t
 ever count a genuinely dead channel (PeerConnection down), never the join race. Old sims are
 unaffected; the fields are additive.
 
+**(e) Leave announcement on EVERY removal path + leave counter (M-A2A-2, added 2026-08-31).** The
+leave presence (`"l"`) used to be pushed only by the `"leave"` request arm; a participant whose
+teardown arrived as PC-death + session-destroy was removed **silently**, so the remaining members
+never received `"l"` and a stock viewer's `hangup_on_last_leave` never fired — the remaining party
+of a two-party (A2A) call sat in the room until manual End Call (O-42c). The push now lives in
+`janus_slvoice_leave_room` itself, before the participant is removed, so the `"leave"` request,
+`destroy_session`, and any future removal caller all announce; the room-transition guarantee makes
+it exactly-once per removal. A downed PeerConnection (`hangup_media`) deliberately does NOT
+announce: it never removes the participant, and Janus can renegotiate media on the same handle — an
+`"l"` during an ICE restart would erase the row with no `"j"` to restore it. `query_session` gains
+`presence_leave_pushed` (additive): the leave subset of `presence_pushed`, so a live read can
+decompose pushed=N into joins vs leaves. `presence_pushed` itself now counts at the actual
+relay_data hand-off (a serialisation failure no longer inflates it).
+
 ---
 
 ## 4. Mixer side — folding visibility into the existing per-listener map

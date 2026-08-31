@@ -463,6 +463,10 @@ typedef struct janus_slvoice_session {
 	                              * Both counters incremented under room->mutex (every relay_json
 	                              * caller holds it); read unlocked by query_session like
 	                              * rtp_in_count (torn values only garble a diagnostic). */
+	guint64 presence_leave_pushed; /* M-A2A-2: the SUBSET of presence_pushed that were LEAVE ("l")
+	                              * notices delivered to this recipient — so a live counter read can
+	                              * decompose pushed=N into joins vs leaves (the O-42c ambiguity:
+	                              * "2" could be j+l or j+j). Same locking/read discipline. */
 	slv_sldata last_data;        /* latest parsed SLData values */
 	unsigned last_data_fields;   /* fields_seen from the last SLData */
 
@@ -545,19 +549,44 @@ static janus_slvoice_room *janus_slvoice_room_ref_by_id(guint64 id) {
 	return room;
 }
 
+/* M-A2A-2: forward declaration — leave_room (below) announces via push_presence,
+ * which is defined after it. */
+static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *who, gboolean join);
+
 /* Remove a session from its room (if any) and drop the room ref. The session
  * that transitions room from non-NULL to NULL is the one that unrefs — making
- * leave / destroy_session / room-destroy races safe. */
+ * leave / destroy_session / room-destroy races safe.
+ *
+ * M-A2A-2 (O-42c): EVERY removal announces. The leave presence ("l") used to be
+ * pushed only by the "leave" request arm; destroy_session came through here
+ * SILENTLY, so a participant whose teardown arrived as PC-death + session-destroy
+ * (the sim's Handle_Hangup path) vanished without the remaining members ever
+ * receiving "l" — and on a P2P-as-adhoc viewer, hangup_on_last_leave never fired
+ * (llvoicewebrtc.cpp:3339-3346 -> :1445-1473): the remaining party sat in the
+ * call until manual End Call. The push now lives HERE, before the participant is
+ * removed (same ordering guarantee the "leave" arm documented), so the "leave"
+ * request, destroy_session, and any future caller all announce. Exactly-once is
+ * the transition guarantee above: only the caller that flips room non-NULL->NULL
+ * gets here with a room, so leave-then-destroy pushes once. push_presence takes
+ * room->mutex itself (we do not hold it), reads each recipient's dc_open under
+ * it (the M-A2A-1 fence discipline), and skips the subject by display. */
 static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	janus_slvoice_room *room = NULL;
 	guint64 uid = 0;
+	char *who = NULL;
 	janus_mutex_lock(&session->mutex);
 	room = session->room;
 	uid = session->user_id;
+	who = session->display ? g_strdup(session->display) : NULL;
 	session->room = NULL;
 	janus_mutex_unlock(&session->mutex);
-	if(room == NULL)
+	if(room == NULL) {
+		g_free(who);
 		return;
+	}
+	if(who != NULL)
+		janus_slvoice_push_presence(room, who, FALSE);
+	g_free(who);
 	janus_mutex_lock(&room->mutex);
 	g_hash_table_remove(room->participants, &uid);
 	janus_mutex_unlock(&room->mutex);
@@ -581,28 +610,35 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
  * label (janus_textroom.c:1632 uses .label=NULL .protocol=NULL .binary=FALSE).
  * relay_data copies the buffer synchronously, so we free it right after. Only
  * sends once the channel is writable (data_ready has fired). */
-static void janus_slvoice_relay_json(janus_slvoice_session *s, json_t *obj) {
+/* M-A2A-2: returns TRUE iff the object was actually handed to relay_data, so callers
+ * can count per-kind deliveries (the leave counter). presence_pushed now also counts
+ * only at that point (M-A2A-1 counted before serialisation; a dumps failure or an
+ * oversized object no longer inflates it). */
+static gboolean janus_slvoice_relay_json(janus_slvoice_session *s, json_t *obj) {
 	if(s == NULL || obj == NULL || gateway == NULL)
-		return;
+		return FALSE;
 	if(!g_atomic_int_get(&s->dc_open)) {
 		/* M-A2A-1: count the drop. Every caller holds room->mutex, and since the
 		 * data_ready fence (janus_slvoice_data_ready) sets dc_open under that same
 		 * mutex, a drop here can no longer be the join race — only a channel that
 		 * is genuinely not (or no longer) writable. */
 		s->presence_dropped_dc_closed++;
-		return;
+		return FALSE;
 	}
-	s->presence_pushed++;
 	char *text = json_dumps(obj, JSON_COMPACT);
 	if(text == NULL)
-		return;
+		return FALSE;
+	gboolean sent = FALSE;
 	size_t len = strlen(text);
 	if(len < 65536) {
 		janus_plugin_data data = { .label = NULL, .protocol = NULL, .binary = FALSE,
 			.buffer = text, .length = (uint16_t)len };
 		gateway->relay_data(s->handle, &data);
+		s->presence_pushed++;
+		sent = TRUE;
 	}
 	free(text);
+	return sent;
 }
 
 /* Per-peer presence notice: {"<who>":{"j"|"l":true}} to every OTHER participant
@@ -643,7 +679,8 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 		 * truth). The apply path emits the corrective join/leave on transitions. */
 		if(slv_roster_excludes(p->excluded, who))
 			continue;
-		janus_slvoice_relay_json(p, entry);
+		if(janus_slvoice_relay_json(p, entry) && !join)
+			p->presence_leave_pushed++;   /* M-A2A-2: decomposable counter */
 	}
 	janus_mutex_unlock(&room->mutex);
 	json_decref(entry);
@@ -1123,6 +1160,8 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	 * channel later opened would indicate a NEW bug, not the (closed) join race. */
 	json_object_set_new(info, "presence_pushed", json_integer((json_int_t)session->presence_pushed));
 	json_object_set_new(info, "presence_dropped_dc_closed", json_integer((json_int_t)session->presence_dropped_dc_closed));
+	/* M-A2A-2: the leave subset of presence_pushed, so pushed=N is decomposable. */
+	json_object_set_new(info, "presence_leave_pushed", json_integer((json_int_t)session->presence_leave_pushed));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
 	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));
@@ -1258,7 +1297,8 @@ static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const cha
 		json_object_set_new(sub, "l", json_true());
 	}
 	json_object_set_new(entry, who, sub);
-	janus_slvoice_relay_json(L, entry);
+	if(janus_slvoice_relay_json(L, entry) && !join)
+		L->presence_leave_pushed++;   /* M-A2A-2: decomposable counter */
 	json_decref(entry);
 }
 
@@ -2081,19 +2121,18 @@ static void *janus_slvoice_handler(void *data) {
 			gboolean joined = (session->room != NULL);
 			guint64 room_id = session->room ? session->room->room_id : 0;
 			guint64 user_id = session->user_id;
-			char *who = session->display ? g_strdup(session->display) : NULL;
-			janus_slvoice_room *room = session->room;
 			janus_mutex_unlock(&session->mutex);
 			if(!joined) {
-				g_free(who);
 				error_code = JANUS_SLVOICE_ERROR_NOT_JOINED;
 				g_snprintf(error_cause, 512, "Not in a room");
 				goto respond;
 			}
-			/* Notify others BEFORE we remove ourselves */
-			if(who != NULL && room != NULL)
-				janus_slvoice_push_presence(room, who, FALSE);
-			g_free(who);
+			/* M-A2A-2: the leave presence is pushed by janus_slvoice_leave_room below
+			 * (before the removal, same ordering this arm used to guarantee itself),
+			 * so it fires for EVERY removal path, not just this request arm. Pushing
+			 * here too would be a harmless viewer no-op (an "l" for an id the
+			 * recipient no longer holds is ignored, llvoicewebrtc.cpp:3300/:1375)
+			 * but the single push keeps presence_leave_pushed an honest count. */
 			janus_slvoice_leave_room(session);
 			janus_mutex_lock(&session->mutex);
 			janus_slvoice_media_free_locked(session);
@@ -3127,6 +3166,16 @@ void janus_slvoice_slow_link(janus_plugin_session *handle, int mindex, gboolean 
 		JANUS_SLVOICE_PACKAGE, handle, mindex, video ? "video" : "audio", uplink ? "uplink" : "downlink");
 }
 
+/* M-A2A-2 decision, recorded: a downed PeerConnection does NOT announce a leave here.
+ * hangup_media never removes the participant from the room (deliberate, pre-existing),
+ * and Janus can renegotiate media on the SAME handle (setup_media flips webrtc_up back
+ * without a rejoin) — an "l" pushed here during an ICE restart would erase the
+ * participant's row on every remaining viewer with no "j" ever coming to restore it
+ * (the viewer re-adds only on a join notice), manufacturing a new row-suppression bug.
+ * The announce therefore rides the REMOVAL, in janus_slvoice_leave_room, which
+ * destroy_session always reaches on a real teardown; the gap between PC-death and
+ * destroy is the sim's Handle_Hangup -> DisconnectViewerSession -> Shutdown chain,
+ * which runs immediately. */
 void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 	JANUS_LOG(LOG_INFO, "[%s-%p] WebRTC media is gone (PeerConnection down)\n", JANUS_SLVOICE_PACKAGE, handle);
 	if(g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
