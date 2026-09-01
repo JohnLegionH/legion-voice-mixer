@@ -1,4 +1,6 @@
 # S-CON-4 recorder peer (docs/voice/connector-build-plan.md).
+# Build context is connectors/ (compose sets it) so the shared common/ package
+# ships in the image alongside the recorder package.
 FROM python:3.12-slim
 
 # aiortc's manylinux wheels bundle the codec libraries; no apt packages needed.
@@ -11,8 +13,10 @@ RUN useradd --create-home --shell /usr/sbin/nologin recorder \
     && mkdir -p /recordings && chown recorder:recorder /recordings
 USER recorder
 WORKDIR /app
-COPY segments.py recorder.py ./
+COPY common/ ./common/
+COPY recorder/__init__.py recorder/recorder.py ./recorder/
 
 VOLUME /recordings
 ENV OUT_DIR=/recordings
-CMD ["python", "-u", "recorder.py"]
+# -m so /app (cwd) is on sys.path and the common package resolves.
+CMD ["python", "-u", "-m", "recorder.recorder"]

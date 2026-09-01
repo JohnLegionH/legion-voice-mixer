@@ -1,6 +1,8 @@
 """Unit tests for the WAV segment writer (S-CON-4, build plan: "rollover at
 SEGMENT_SECONDS, valid RIFF header on close"). pytest-style; a __main__ fallback
-runs them with plain python where pytest is not installed."""
+runs them with plain python where pytest is not installed. Run from connectors/
+(so the shared common/ package resolves): `python -m pytest recorder/` or
+`python -m recorder.test_segments`."""
 
 import fractions
 import os
@@ -8,7 +10,7 @@ import tempfile
 import wave
 from datetime import datetime, timezone
 
-from segments import ContiguousFrameFeed, WavSegmentWriter, frame_pcm
+from common.segments import ContiguousFrameFeed, WavSegmentWriter, frame_pcm
 
 
 class FakeClock:

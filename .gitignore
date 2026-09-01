@@ -36,3 +36,5 @@ secrets
 
 # S-CON-4 recorder output (compose volume ./recordings)
 recordings/
+# S-CON-6 injector source drop-box (compose volume ./injector-in)
+injector-in/

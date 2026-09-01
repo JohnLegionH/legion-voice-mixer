@@ -1,4 +1,5 @@
-"""WAV segment writer for the S-CON-4 recorder (docs/voice/connector-build-plan.md).
+"""WAV segment writer for the connector peers (docs/voice/connector-build-plan.md;
+written for the S-CON-4 recorder, reused by the S-CON-6 injector's RECORD=1).
 
 Deliberately dependency-free (stdlib only) so the rollover and header behaviour is
 unit-testable without aiortc/av installed. One segment file per SEGMENT_SECONDS of

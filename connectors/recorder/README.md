@@ -54,8 +54,17 @@ segments are unaffected.
 
 ## Tests
 
-    python -m py_compile segments.py recorder.py
-    python -m pytest test_segments.py        # or: python test_segments.py
+    # from the connectors/ directory (the shared common/ package must resolve)
+    python -m py_compile common/segments.py common/janus.py common/peer.py recorder/recorder.py
+    python -m pytest recorder/        # or: python -m recorder.test_segments
 
 The segment writer (rollover, format-change roll, RIFF validity) is stdlib-only
 and tests without aiortc installed.
+
+## Layout note (S-CON-6)
+
+The Janus session/join/poll/keepalive/teardown plumbing and the segment writer
+moved to `connectors/common/`, shared with the S-CON-6 injector peer; this
+directory keeps only the recorder's own media behaviour. Behaviour is
+unchanged. The compose build context is `connectors/` so the image carries
+`common/`.

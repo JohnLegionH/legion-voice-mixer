@@ -82,7 +82,10 @@ services:
   # connectors/recorder/README.md.
   recorder:
     build:
-      context: ./connectors/recorder
+      # Context is connectors/ (not connectors/recorder) so the image can COPY
+      # the common/ package the peers share.
+      context: ./connectors
+      dockerfile: recorder/Dockerfile
     profiles: [recorder]
     depends_on:
       - janus
@@ -97,4 +100,32 @@ services:
       JANUS_URL: ${JANUS_URL:-http://janus:${JS_HTTP_PORT:-14223}${JS_HTTP_BASEPATH:-/voice}}
     volumes:
       - ./recordings:/recordings
+    restart: unless-stopped
+
+  # ── Voice connector: injector peer (S-CON-6) ───────────────────────────────
+  # Sends audio into one room under a sim-registered connector NPC identity,
+  # fed from an s16 WAV file or named pipe in ./injector-in (SOURCE). The sim
+  # record MUST carry MayInject=true — with MayInject=false the registration-
+  # time moderation mute silences this peer for every listener (S-CON-5(e)).
+  # Behind a profile so `docker compose up -d` alone NEVER starts it:
+  #   docker compose --profile injector up -d injector
+  # Config: cp connectors/injector/injector.env.example connectors/injector/injector.env
+  # (gitignored) and fill in JANUS_API_SECRET, ROOM, DISPLAY. See
+  # connectors/injector/README.md.
+  injector:
+    build:
+      context: ./connectors
+      dockerfile: injector/Dockerfile
+    profiles: [injector]
+    depends_on:
+      - janus
+    env_file:
+      - ./connectors/injector/injector.env
+    # Same JANUS_URL derivation as the recorder (see that service's note): the
+    # compose-derived value overrides injector.env.
+    environment:
+      JANUS_URL: ${JANUS_URL:-http://janus:${JS_HTTP_PORT:-14223}${JS_HTTP_BASEPATH:-/voice}}
+    volumes:
+      - ./injector-in:/injector       # drop or stream the source WAV here (SOURCE=/injector/in.wav)
+      - ./recordings:/recordings      # used only with RECORD=1
     restart: unless-stopped
