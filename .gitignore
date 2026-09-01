@@ -38,3 +38,5 @@ secrets
 recordings/
 # S-CON-6 injector source drop-box (compose volume ./injector-in)
 injector-in/
+__pycache__/
+*.pyc
