@@ -1,10 +1,11 @@
 # Ledger — WebRTC Voice Programme
 
 **Artifact type:** Ledger — **LIVING**. Never frozen. Amend in place; date every change.
-**Last reconciled:** 2026-08-27 (evening), against `tranquillity-develop` at *fix(voice): skip the
-pending-join re-send for a listener with empty columns* (`b80efffa36`, branch
-`feature/voice-visibility-matrix`) and `legion-voice-mixer` at *fix(voice): defer a visibility entry
-for a not-yet-joined listener, replay on join* (`27977c8`, branch `main`) [SRC: `git log`].
+**Last reconciled:** 2026-08-31 (evening), against `tranquillity-develop` at *fix(voice): O-41 —
+logout provision now disconnects the viewer session* (`c972136380`, branch
+`feature/voice-visibility-matrix`) and `legion-voice-mixer` at `5e0d637` (M-A2A-3 attach-window
+backlog re-send, branch `main`) [SRC: `git log`; the 19:01 deploy verification].
+*(The 2026-08-27 evening reconciliation narrative below is retained as history.)*
 This evening five commits shipped, deployed, and were **verified live in-world and via the admin API**:
 sim `02ce1b9b10` (moderation mute channel) + `b80efffa36` (empty-column pending guard); mixer
 `354e9fe` (join backlog) + `0d6d0d0` (mute parse / keep+grey) + `27977c8` (join-window deferral). The
@@ -40,6 +41,16 @@ them, new there), six mixer→sim (`webrtc-voice-spec.md` now present in this tr
 `mixer-feed-protocol.md` brought forward to the mixer's `5e0d637` strict superset),
 `phase3a-feeder-acceptance.md` already equal. §4.4's Repo column reads "both" for every
 `Docs/voice` document; §4.3 (k) resynced; a CRLF testing gotcha is recorded at the end of §4.3.*
+*Amended 2026-08-31 (evening) against `tranquillity-develop` at `c972136380` [SRC: live region log
+19:03–19:07; deploy verification; test runs]: **O-41 and O-43 are CLOSED** (§4.1) — the
+caps-wrapper exception logging (`b72afc9fb8`) and the logout-arm disconnect (`c972136380`) built,
+tested and deployed 19:01 (§5.0, rollback `20260831-190101`; the deploy records the standing
+**core-Release / voice-Debug convention**). O-41 verified live at 19:04:52 — both mixer handles
+removed on a voice toggle-off; O-43 not yet observed firing (watch item stands). The A2A
+regression check after O-41 PASSED (§3, 19:06–19:07, auto-hangup in 226 ms, behaviour unchanged).
+`backlog_resent=1` observed on both spatial handles at the 19:03 join — M-A2A-3 confirmed on the
+join path; the A2A during-call read remains owed (§3). O-45 filed (CreateRoom "inconclusive"
+ERROR noise, §4.1).*
 **Scope:** the whole voice programme — the `os-webrtc-janus` addon in this tree, the
 `janus.plugin.slvoice` mixer, and the documents about both. Adjacent parcel/estate enforcement
 defects are listed only where a voice document depends on them.
@@ -586,13 +597,23 @@ defects from the first live call are closed by one sim slice and three mixer sli
 removal (M-A2A-2), and the stock viewer's attach window — the last is **documented stock-viewer
 behaviour the server must accommodate** (per the standing constraint, §4), not a bug we can file.
 **Owed**: a `backlog_resent` counter read on a future call (the behavioural proof — the auto-hangup —
-is banked; the counter confirms the mechanism attribution).
+is banked; the counter confirms the mechanism attribution). *Update 2026-08-31 (evening):
+`backlog_resent=1` observed on both spatial handles at the 19:03 join [SRC: admin API] — M-A2A-3
+is confirmed live on the JOIN path; the during-call read on the two A2A handles REMAINS OWED
+(not taken on the 19:06 call).*
 
 **S-A2A-7 (sim force-teardown of the remaining party) — RESERVE, not needed.** It would guarantee
 call-end through the viewer's error path regardless of presence delivery
 (`OnConnectionFailure` → `handleError` → `deactivate`), at the UX cost of an error-path hangup
 (retry/backoff, a generic error notification instead of a clean end). Kept on the shelf against a
 future presence-delivery regression; no code exists.
+
+### A2A regression check after O-41 — PASSED 2026-08-31 19:06
+*Added 2026-08-31 (evening).* [SRC: live region log; in-world observation.] One call run on the
+19:01 deploy (§5.0) to prove the O-41 logout disconnect changed nothing in the A2A teardown
+chain: `[A2A AGENTLIST]` ENTER at 19:06:43 → caller logout 19:07:00.400 → callee auto-logout
+19:07:00.626 (**226 ms**) → `removed-both-logout` → LEAVE; "your call has ended" shown on the
+callee's stock Firestorm and **remained displayed**. Behaviour unchanged by O-41.
 
 ### Connector layer — not started (design DRAFT)
 [DOC] `connector-design-brief.md` `Status: DRAFT. Not frozen.`; Q1 (identity) resolved by
@@ -675,10 +696,11 @@ discard-before-observer window was accommodated server-side, M-A2A-3, not patche
 
 | ID | Item | Status | Recorded in |
 |---|---|---|---|
-| O-42 | **Caller's IM floater shows no End Call and no participant state during a live A2A call** (the callee's does). *Traced 2026-08-30 (viewer + mixer, read-only) and SPLIT:* **(a)** the IM-panel participant/moderation surface is the missing `ChatterBoxSessionAgentListUpdates` — **built as S-A2A-6** (this tree; ENTER pair on Active, LEAVE to the remaining party on Active-record removal, `can_voice_chat:true` by construction — false hangs up the call, `llimview.cpp:4366-4382`); **(b)** the caller's connected/End-Call state waits on `STATUS_JOINED`, which for the outgoing side fires only on the peer's data-channel `"j"` (`llvoicewebrtc.cpp:1042-1049`, `:1339-1352`) — mixer presence, **fixed as M-A2A-1** (mixer `6ee39be`, fence + counters). Both halves live-verification owed on the next call | **CLOSED 2026-08-31**, all three parts, live-verified: (a) S-A2A-6 `2ff8bf57af`; (b) M-A2A-1 `6ee39be` (End Call present, `presence_pushed>=1`); (c) M-A2A-2 `3f4780d` + M-A2A-3 `5e0d637` (callee auto-hangup 05:27:53, 186 ms after the caller's logout). The stock viewer's attach window is documented behaviour accommodated server-side (§3, §4 standing constraint). `backlog_resent` read owed on a future call | this ledger §3 (O-42 CLOSED); `a2a-build-plan.md` §5 |
-| O-43 | **The caps wrapper's bare `catch { 500 }` swallows handler exceptions unlogged** (`SimpleStreamHandler.cs:91-101`). Cost a full diagnostic round today: the S-A2A-3.1 `NullReferenceException` surfaced as "admitted, then silence" with no log line anywhere. Should-fix: log the exception at ERROR (path + handler + exception) before setting 500 | open, **should-fix** (filed 2026-08-30) | this ledger §3 (four-defects, d) |
+| O-42 | **Caller's IM floater shows no End Call and no participant state during a live A2A call** (the callee's does). *Traced 2026-08-30 (viewer + mixer, read-only) and SPLIT:* **(a)** the IM-panel participant/moderation surface is the missing `ChatterBoxSessionAgentListUpdates` — **built as S-A2A-6** (this tree; ENTER pair on Active, LEAVE to the remaining party on Active-record removal, `can_voice_chat:true` by construction — false hangs up the call, `llimview.cpp:4366-4382`); **(b)** the caller's connected/End-Call state waits on `STATUS_JOINED`, which for the outgoing side fires only on the peer's data-channel `"j"` (`llvoicewebrtc.cpp:1042-1049`, `:1339-1352`) — mixer presence, **fixed as M-A2A-1** (mixer `6ee39be`, fence + counters). Both halves live-verification owed on the next call | **CLOSED 2026-08-31**, all three parts, live-verified: (a) S-A2A-6 `2ff8bf57af`; (b) M-A2A-1 `6ee39be` (End Call present, `presence_pushed>=1`); (c) M-A2A-2 `3f4780d` + M-A2A-3 `5e0d637` (callee auto-hangup 05:27:53, 186 ms after the caller's logout). The stock viewer's attach window is documented behaviour accommodated server-side (§3, §4 standing constraint). `backlog_resent` read 2026-08-31 19:03: 1 on both spatial handles at join (M-A2A-3 live on the join path); the A2A during-call read remains owed | this ledger §3 (O-42 CLOSED); `a2a-build-plan.md` §5 |
+| O-43 | **The caps wrapper's bare `catch { 500 }` swallows handler exceptions unlogged** (`SimpleStreamHandler.cs:91-101`). Cost a full diagnostic round today: the S-A2A-3.1 `NullReferenceException` surfaced as "admitted, then silence" with no log line anywhere. Should-fix: log the exception at ERROR (path + handler + exception) before setting 500 | **CLOSED 2026-08-31** — `b72afc9fb8` logs the exception at ERROR (`[SIMPLE STREAM HANDLER]`, method + path) before the 500; deployed 19:01 (§5.0, core **Release**). Not yet observed firing; watch item: the ERROR line on the next handler exception | this ledger §3 (four-defects, d), §5.0 |
 | O-44 | **Conference (multi-party) voice — ROADMAP, required by the operator.** Not in A2A scope. The substrate is now proven live (non-spatial mixer rooms, invitations, registry admission); what it needs: an n-party registry, server-minted session ids + membership authorization (the XOR trick is 2-party-only), the `"start conference"` ChatSession arm (today a stub), and likely room model (b) — the session-keyed room table — for session-scoped moderation. Tracked-not-blocking alongside the connector tap (O-40) | open, **roadmap** (recorded 2026-08-30) | this ledger §3; `a2a-build-plan.md` §1.2 (room-model fork) |
-| O-41 | **A successful voice logout retains the `ViewerSessions` entry.** The service's logout arm (`WebRtcJanusService.cs:236-245`) leaves the mixer room and replies `BuildClosed()` but never calls `VoiceViewerSession.RemoveViewerSession` (`VoiceViewerSession.cs:264`); only the Janus-disconnect hangup path does (`DisconnectViewerSession`, `WebRtcJanusService.cs:199-205`). The entry — and its `AgentMembershipByRegion` row — persists until the client-close capture (`WebRtcVoiceServiceModule.cs:201-243`), so a voice toggle within a login accumulates one table entry per toggle. Pre-existing (predates `d9fa72c351`); the 403'd-logout defect hid it because the arm never ran | open, **should-fix** (filed 2026-08-30) | this ledger §3 (item-0 finding) |
+| O-41 | **A successful voice logout retains the `ViewerSessions` entry.** The service's logout arm (`WebRtcJanusService.cs:236-245`) leaves the mixer room and replies `BuildClosed()` but never calls `VoiceViewerSession.RemoveViewerSession` (`VoiceViewerSession.cs:264`); only the Janus-disconnect hangup path does (`DisconnectViewerSession`, `WebRtcJanusService.cs:199-205`). The entry — and its `AgentMembershipByRegion` row — persists until the client-close capture (`WebRtcVoiceServiceModule.cs:201-243`), so a voice toggle within a login accumulates one table entry per toggle. Pre-existing (predates `d9fa72c351`); the 403'd-logout defect hid it because the arm never ran | **CLOSED 2026-08-31** — `c972136380`: the logout arm calls `DisconnectViewerSession` after `LeaveRoom` (remove AND shut down; bare `RemoveViewerSession` would have orphaned the live Janus session with nothing left to destroy it — trace 2026-08-31). Deployed 19:01 (§5.0) and **live-verified 19:04:52**: on a voice toggle-off both of the agent's mixer handles (spatial 226001844 and the neighbour-region child session 1578726032) removed within seconds — previously retained until client close. Test added (`RemoveViewerSession_DropsRegistryEntryAndMembership`); Janus suite 175/177 (total was 172; the O-20 pair the only failures, unchanged); region-module 146/146 | this ledger §3 (item-0 finding), §5.0 |
+| O-45 | **`[JANUS AUDIO BRIDGE]` logs "CreateRoom. YY Room creation inconclusive" at ERROR on a plain `janus` ack, before the creation event arrives.** Log-level defect: the ack is not a failure — the room comes up and the event lands normally. Benign, noise only | open, **log-level** (filed 2026-08-31, observed at the 19:0x runs) | this ledger [SRC: live region log 2026-08-31] |
 
 Closed items, kept so nobody re-files them: OnRemovePresence teardown (implemented 2026-08-22);
 estate CAP TaxFree flip on absent `override_public_access` (implemented 2026-08-23); parcel
@@ -764,6 +786,33 @@ add under the LF pin — compare blob hashes, not files.*
 reconciliation; the §5.1 text below it describes 08-26 06:19 and is retained only as history.*
 
 ### 5.0 Current state (2026-08-27)
+
+*Superseding amendment 2026-08-31 (evening) — one regionserver deploy today at 19:01, staged,
+SHA-256-verified, rollback-backed [SRC: deploy verification]. The 2026-08-30 table and
+running-build paragraph below are history for the two assemblies this deploy replaced:*
+
+| # | Time | Content | Binaries | Rollback |
+|---|---|---|---|---|
+| 4 | 2026-08-31 19:01 | `c972136380` — O-41 logout disconnect + O-43 caps-wrapper exception logging (`b72afc9fb8`) | `OpenSim.Framework.Servers.HttpServer` 141,824 B **Release** (+ PDB 69,944 B); `WebRtcJanusService` 90,112 B Debug (+ PDB 40,568 B) | `20260831-190101` |
+
+**Per-DLL running build now** [SRC: nbgv stamps read at the deploy]:
+`OpenSim.Framework.Servers.HttpServer.dll` `1.1.154-alpha+c972136380` (**Release**; was
+`1.1.114-alpha+119fea881e`); `WebRtcJanusService.dll` `1.1.154-alpha+c972136380` (Debug; was
+`1.1.145-alpha+d2506aab55`). The other voice DLLs are unchanged: `WebRtcVoiceRegionModule.dll`
+`1.1.150-alpha+2ff8bf57af` (S-A2A-6 — the stamp read live at this deploy's baseline check; the
+2026-08-30 paragraph below predates the S-A2A-6 deploy that the 08-31 morning amendment's
+"Regionserver unchanged at `2ff8bf57af`" records); `WebRtcVoiceServiceModule.dll`
+`1.1.148-alpha+d23e41c762`; `VoiceVisibility.dll` `1.1.135-alpha+18640868dc`; `WebRtcVoice.dll`
+`1.1.114-alpha+119fea881e`. Mixer unchanged (`5e0d637` / image `1bf042e373dc`). **Nothing
+committed to either branch is undeployed** (HEAD `c972136380` is the deployed build).
+
+**Deploy convention, recorded as standing:** core DLLs deploy **Release** (the deploy root's core
+is the Release@`119fea881e` build; this deploy is the first core DLL this programme has replaced),
+voice DLLs deploy **Debug**. Each DLL ships with the PDB from its own build.
+
+**Lineage note:** O-43 lives in core (`Source/`), so it reaches the gridserver only via the
+voice→integration merge per the deploy-lineage rule below (recorded 2026-08-30); the regionserver
+deploy does not wait on it.
 
 *Superseding amendment 2026-08-30 (evening) — three regionserver deploys today; the morning amendment
 below is history.* All three staged, SHA-256-verified, rollback-backed [SRC: deploy verifications]:
