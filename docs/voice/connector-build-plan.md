@@ -11,6 +11,12 @@ documents' refs and are valid at their tips only.
 (under `connectors/recorder/`). Deployment is batched later per the ledger's §5.0 conventions
 (core Release / voice Debug; mixer-repo containers by compose).
 
+**Progress (2026-08-31):** **S-CON-1..3 DONE** — `7240797fc8` (S-CON-1), `db858f4cff` (S-CON-2),
+`d95754509d` (S-CON-3); deployed 21:59 (ledger §5.0 row 5) and live-verified 22:01–22:06 with a
+`[VoiceConnector.Recorder]` record on Ebony (`MayInject=false`) — see the dated notes under
+S-CON-2 and S-CON-5. Suites at the last slice: Janus 179/181 (the O-20 pair), region-module
+167/167. Next: S-CON-4 (recorder peer, mixer repo).
+
 ---
 
 ## 1. Decided
@@ -40,7 +46,7 @@ Baseline for every sim slice: `dotnet test` over the two voice test projects
 +N passed with the same two failures and no new ones. Peer slices (S-CON-4, S-CON-6, S-CON-7
 connector side) carry their own tests in the mixer repo.
 
-### S-CON-1 — policy record: module, loader, guard
+### S-CON-1 — policy record: module, loader, guard — DONE `7240797fc8`
 **Files:** new `VoiceConnectorModule` (region module, in the `WebRtcVoiceRegionModule` project);
 an ini loader for `[VoiceConnector.<name>]` — keys `Enabled`, `NpcFirstName`, `NpcLastName`,
 `Position`, `Scope` (= `estate`, the only value in v1), `MayInject`, `AuthorisedBy`,
@@ -56,7 +62,13 @@ refused when `AllowNpcVoice=false`, connector registration path exempt.
 **Live test watches:** none (no live behaviour until S-CON-2); config parse lines at region
 start.
 
-### S-CON-2 — NPC lifecycle + voice registration
+### S-CON-2 — NPC lifecycle + voice registration — DONE `db858f4cff`
+
+*Observed live 2026-08-31 22:01–22:06 (first run, Recorder on Ebony, `MayInject=false`): the
+moderation mute was pushed at registration with NO listener present, and read as
+`mod_muted_entries=1` on a listener who joined minutes later — the late-joiner path (join
+backlog + deferred/mute channel) carries the registration-time mute forward. The
+mute-at-registration ordering needs no listener to be present to hold.*
 **Files:** `VoiceConnectorModule` — at region-ready, for each enabled record:
 `INPCModule.CreateNPC` at the configured `Position` (`NPCModule.cs:151-156`); on region close,
 remove the NPC. Voice registration via the service (assessment §3): create the session for the
@@ -74,7 +86,7 @@ registration and false after removal; the room record lands; the mute push happe
 `show voice moderation` (or the admin API `mod_muted_entries`) showing the mute when
 `MayInject=false`.
 
-### S-CON-3 — disclosure
+### S-CON-3 — disclosure — DONE `d95754509d`
 **Files:** `VoiceConnectorModule` — (i) attach/detach **region alert** (the peer's mixer join
 and leave for the connector's display, or — v1 simplification — the module's own
 registration/removal, stated in code comments as the trigger actually used); (ii) **entry
@@ -102,8 +114,11 @@ ROOM_FULL, room gone); WAV segmenter writes valid headers and rolls on the bound
 
 ### S-CON-5 — live verification, recorder
 The acceptance run for S-CON-1..4, on a started region with a stock Firestorm present:
-- **(a)** roster / radar / Nearby Voice all show the marked NPC name (D3(i) on every surface);
-- **(b)** door notices observed on stock Firestorm — attach alert, entry notice (D3(ii));
+- **(a)** roster / radar / Nearby Voice all show the marked NPC name (D3(i) on every surface) —
+  *2026-08-31: pending the operator's in-world confirmation (not yet taken)*;
+- **(b)** door notices observed on stock Firestorm — attach alert, entry notice (D3(ii)) —
+  *2026-08-31: the ENTRY notice observed on stock Firestorm at login; the attach/detach alert
+  observation rides a later run (it fires at region start / connector stop)*;
 - **(c)** admin API `handle_info`: the connector's handle shows `datachannel_open` true;
   `mod_muted_entries` carries the connector on EVERY listener when `MayInject=false`;
 - **(d)** exclusion honoured: a parcel-banned avatar speaking is **absent** from the recording;

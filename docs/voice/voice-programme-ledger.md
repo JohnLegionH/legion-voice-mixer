@@ -62,6 +62,12 @@ pre-existing, not connector-specific; remedy = a join secret, a small mixer chan
 filed** (untrusted-HG voice provision refusal, owed to the trusted-HG rollout). §4.4 gains both
 connector rows; the `Docs/voice` mirror is **15 files after this commit** (14 + the build plan;
 the tasking said 16 — the verified count is 15), mixer copies due per the Maintenance rule.*
+*Amended 2026-08-31 (night, later) against `tranquillity-develop` at `d95754509d` [SRC: deploy
+verification 21:59; live region log 22:01–22:06]: **O-40 is IN PROGRESS** — S-CON-1..3 built,
+deployed (§5.0 row 5, rollback `20260831-215949`) and live-verified with a Recorder record on
+Ebony (§4.1: NPC + registration + mute-at-registration surviving to a late joiner; entry notice
+on stock Firestorm). O-46 gains the api_secret nuance (§4.1); a per-region "loaded" log
+duplication is recorded as cosmetic in §5.0, not filed. The `Docs/voice` mirror stays 15 files.*
 **Scope:** the whole voice programme — the `os-webrtc-janus` addon in this tree, the
 `janus.plugin.slvoice` mixer, and the documents about both. Adjacent parcel/estate enforcement
 defects are listed only where a voice document depends on them.
@@ -701,7 +707,7 @@ discard-before-observer window was accommodated server-side, M-A2A-3, not patche
 | O-37 | **Viewer:** a stored per-avatar volume in `volume_settings.xml` can permanently suppress that avatar's participant row; audio unaffected; survives grid restart, viewer restart, relog and teleport. Mechanism **UNKNOWN**; workaround documented | filed **viewer-side** 2026-08-26 — deferred (§8) | `phoenix-firestorm:docs/voice-participant-row-suppression.md` (do not duplicate here) |
 | O-38 | Hypergrid visitors are provisioned **identically** to local users — the voice addon contains no HG-aware code at all (zero references to `Hypergrid` / `IsLocalGridUser` / `UserAgentService` / `scopeID`). Bears on spec §3.2 and §10 item 1 | open, **policy undecided** — deferred (§8) | this ledger §7.4; spec §3.2, §10 item 1 |
 | O-39 | **Grid-mode (Robust-side) voice connector exists in-tree but is DEAD as shipped.** `WebRtcVoiceServerConnector : IServiceConnector` (`WebRtcVoice/WebRtcVoiceServerConnector.cs:47`) hosts the same `WebRtcVoiceServiceModule` — `WebRtcJanusService` chain as the region path, but it is registered in **no** shipped/example ini (`[ServiceList]` carries only the stock Freeswitch line); the only setup is a manual README edit (`README.md:167`). Complete but unreachable out of the box, **unverified**. Recorded for Iain's grid-mode-fails-to-connect report | open, **unverified** — inventory only (added 2026-08-27) | this ledger; `WebRtcVoice/WebRtcVoiceServerConnector.cs`; `Addons/os-webrtc-janus/README.md:157`—`:187` |
-| O-40 | **Mixer audio tap (Balpien) — first post-RC pull-in.** Confirmed as the first item to pull in after the reviewer-condition RC; not started, no code or brief in either tree yet | **IN PLANNING 2026-08-31** — ground-truth assessment (`connector-assessment-20260831.md`, `31ee058d04`), brief Amendment 2 (Q2–Q6 all DECIDED, D1–D5) and the build plan (`connector-build-plan.md`, S-CON-1..7) committed; no mixer change anywhere in the plan; first slice S-CON-1 (policy record) | `connector-assessment-20260831.md`; `connector-design-brief.md` Amendment 2; `connector-build-plan.md`; this ledger |
+| O-40 | **Mixer audio tap (Balpien) — first post-RC pull-in.** Confirmed as the first item to pull in after the reviewer-condition RC; not started, no code or brief in either tree yet | **IN PROGRESS 2026-08-31** — S-CON-1 `7240797fc8`, S-CON-2 `db858f4cff`, S-CON-3 `d95754509d` committed AND deployed (21:59, §5.0), **live-verified 22:01–22:06** with a `[VoiceConnector.Recorder]` record on Ebony (`MayInject=false`): NPC created and registered, room 226001844, the moderation mute pushed at registration with NO listener present and read as `mod_muted_entries=1` on a listener who joined minutes later — the late-joiner path carries the mute channel; the entry notice shown on stock Firestorm at login. Suites: Janus 179/181 (the O-20 pair), region-module 167/167. Next slice: S-CON-4 (recorder peer, mixer repo). *(Planning basis, 2026-08-31 earlier: assessment `31ee058d04`; brief Amendment 2 Q2–Q6 DECIDED; plan S-CON-1..7; no mixer change anywhere.)* | `connector-assessment-20260831.md`; `connector-design-brief.md` Amendment 2; `connector-build-plan.md`; this ledger §5.0 |
 
 *Row O-41 added 2026-08-30 from the S-A2A-3 item-0 finding (§3). [SRC].*
 
@@ -712,7 +718,7 @@ discard-before-observer window was accommodated server-side, M-A2A-3, not patche
 | O-44 | **Conference (multi-party) voice — ROADMAP, required by the operator.** Not in A2A scope. The substrate is now proven live (non-spatial mixer rooms, invitations, registry admission); what it needs: an n-party registry, server-minted session ids + membership authorization (the XOR trick is 2-party-only), the `"start conference"` ChatSession arm (today a stub), and likely room model (b) — the session-keyed room table — for session-scoped moderation. Tracked-not-blocking alongside the connector tap (O-40) | open, **roadmap** (recorded 2026-08-30) | this ledger §3; `a2a-build-plan.md` §1.2 (room-model fork) |
 | O-41 | **A successful voice logout retains the `ViewerSessions` entry.** The service's logout arm (`WebRtcJanusService.cs:236-245`) leaves the mixer room and replies `BuildClosed()` but never calls `VoiceViewerSession.RemoveViewerSession` (`VoiceViewerSession.cs:264`); only the Janus-disconnect hangup path does (`DisconnectViewerSession`, `WebRtcJanusService.cs:199-205`). The entry — and its `AgentMembershipByRegion` row — persists until the client-close capture (`WebRtcVoiceServiceModule.cs:201-243`), so a voice toggle within a login accumulates one table entry per toggle. Pre-existing (predates `d9fa72c351`); the 403'd-logout defect hid it because the arm never ran | **CLOSED 2026-08-31** — `c972136380`: the logout arm calls `DisconnectViewerSession` after `LeaveRoom` (remove AND shut down; bare `RemoveViewerSession` would have orphaned the live Janus session with nothing left to destroy it — trace 2026-08-31). Deployed 19:01 (§5.0) and **live-verified 19:04:52**: on a voice toggle-off both of the agent's mixer handles (spatial 226001844 and the neighbour-region child session 1578726032) removed within seconds — previously retained until client close. Test added (`RemoveViewerSession_DropsRegistryEntryAndMembership`); Janus suite 175/177 (total was 172; the O-20 pair the only failures, unchanged); region-module 146/146 | this ledger §3 (item-0 finding), §5.0 |
 | O-45 | **`[JANUS AUDIO BRIDGE]` logs "CreateRoom. YY Room creation inconclusive" at ERROR on a plain `janus` ack, before the creation event arrives.** Log-level defect: the ack is not a failure — the room comes up and the event lands normally. Benign, noise only | open, **log-level** (filed 2026-08-31, observed at the 19:0x runs) | this ledger [SRC: live region log 2026-08-31] |
-| O-46 | **The mixer join is ungated and `display` is trusted.** Any process with network reach to the Janus client API can attach, join any room (`janus_slvoice.c:1974-2002` — no secret, token, or authorization on the join path), and claim any avatar's UUID as `display` — inheriting that avatar's exclusion column (`apply_visbatch` fan-out by display, `:1354-1375`) and its roster identity. **Pre-existing, not connector-specific** (the viewer path has always worked this way; network isolation of the Janus port is the only gate in the shipped topology); made pointed by the connector programme, whose policy record gates the sim, not the mixer. Remedy: a **join secret** (sim-minted, carried through provision) — a small mixer change | open, **filed 2026-08-31** (assessment §7(c)) | `connector-assessment-20260831.md` §2, §7(c); this ledger |
+| O-46 | **The mixer join is ungated and `display` is trusted.** Any process with network reach to the Janus client API can attach, join any room (`janus_slvoice.c:1974-2002` — no secret, token, or authorization on the join path), and claim any avatar's UUID as `display` — inheriting that avatar's exclusion column (`apply_visbatch` fan-out by display, `:1354-1375`) and its roster identity. **Pre-existing, not connector-specific** (the viewer path has always worked this way; network isolation of the Janus port is the only gate in the shipped topology); made pointed by the connector programme, whose policy record gates the sim, not the mixer. Remedy: a **join secret** (sim-minted, carried through provision) — a small mixer change. *Nuance (2026-08-31, live check): the Janus gateway's client API requires the `[JanusWebRtcVoice]` `APIToken` (`api_secret`) to CREATE a session, so "ungated" applies to the plugin JOIN once a Janus session exists — not to reaching the API itself. An attacker needs network reach AND the api_secret before the ungated join is exposed. Remedy unchanged.* | open, **filed 2026-08-31** (assessment §7(c)) | `connector-assessment-20260831.md` §2, §7(c); this ledger |
 | O-47 | **Untrusted-HG voice provision refusal — owed to the trusted-HG rollout.** Brief Amendment 2 D4 (DECIDED): trusted-HG visitors get region voice and are recordable/addressable under connector disclosure; untrusted-HG visitors get NO region voice — their provision is refused. Today the voice path has no HG-aware code at all (O-38), so nothing enforces this; the rule is recorded here so the trusted-HG regionserver rollout picks it up. No code in the connector plan | open, **owed to the trusted-HG rollout** (filed 2026-08-31) | `connector-design-brief.md` Amendment 2 D4; this ledger (O-38) |
 
 Closed items, kept so nobody re-files them: OnRemovePresence teardown (implemented 2026-08-22);
@@ -801,6 +807,31 @@ add under the LF pin — compare blob hashes, not files.*
 reconciliation; the §5.1 text below it describes 08-26 06:19 and is retained only as history.*
 
 ### 5.0 Current state (2026-08-27)
+
+*Superseding amendment 2026-08-31 (night) — a SECOND regionserver deploy today at 21:59, staged,
+SHA-256-verified, rollback-backed [SRC: deploy verification; live region log 22:01–22:06]. The
+19:01 block below is history for the three assemblies this deploy replaced:*
+
+| # | Time | Content | Binaries | Rollback |
+|---|---|---|---|---|
+| 5 | 2026-08-31 21:59 | `d95754509d` — S-CON-1 (`7240797fc8`) + S-CON-2 (`db858f4cff`) + S-CON-3 (`d95754509d`): connector policy record + registry, NPC lifecycle/voice registration, three disclosure layers; the AllowNpcVoice deny; the CreateViewerSession dispatch fix | `WebRtcVoiceRegionModule` 121,344 B, `WebRtcVoiceServiceModule` 23,040 B, `WebRtcVoice` 20,480 B — all **Debug** (+ PDBs 50,024 / 19,888 / 21,052 B) | `20260831-215949` |
+
+**Per-DLL running build now** [SRC: nbgv stamps read at the deploy]: `WebRtcVoiceRegionModule.dll`
+`1.1.160-alpha+d95754509d` (was `1.1.150-alpha+2ff8bf57af`); `WebRtcVoiceServiceModule.dll`
+`1.1.160-alpha+d95754509d` (was `1.1.148-alpha+d23e41c762`); `WebRtcVoice.dll`
+`1.1.160-alpha+d95754509d` (was `1.1.114-alpha+119fea881e` — its first change since the original
+baseline: the S-CON-1 `IVoiceConnectorRegistry` type; AssemblyVersion pinned `1.1.0.0`, so the
+stayed-behind `WebRtcJanusService.dll` binds unchanged). Unchanged:
+`OpenSim.Framework.Servers.HttpServer.dll` `1.1.154-alpha+c972136380` (Release);
+`WebRtcJanusService.dll` `1.1.154-alpha+c972136380`; `VoiceVisibility.dll`
+`1.1.135-alpha+18640868dc`. Mixer unchanged (`5e0d637` / image `1bf042e373dc`). **Nothing
+committed to either branch is undeployed** (HEAD `d95754509d` is the deployed build). Live
+verification of the connector slices: O-40 (§4.1) and `connector-build-plan.md`.
+
+**Cosmetic (should-fix, deliberately NOT an O-item):** `[CONNECTOR] loaded <name> …` logs once per
+region INSTANCE for a Region-scoped record — the non-shared module loads the registry per region,
+so a record pinned to one region still prints a "loaded" line in each. NPC creation is correctly
+scoped by the record's Region filter; the duplicate line is log noise only.
 
 *Superseding amendment 2026-08-31 (evening) — one regionserver deploy today at 19:01, staged,
 SHA-256-verified, rollback-backed [SRC: deploy verification]. The 2026-08-30 table and
