@@ -1,6 +1,6 @@
 # Design Brief — Voice Connectors
 
-**Status:** DRAFT. Not frozen. Open questions below must be resolved before implementation.
+**Status:** DECIDED 2026-08-31 — build plan: `connector-build-plan.md`.
 **Date:** 2026-08-21.
 **Basis:** CC recon 2026-08-21 against `legion-voice-mixer @ b4672ff`.
 **Origin:** Balpien Hammerer's second deficiency, raised 2026-07-31 — no connector hooks
@@ -218,3 +218,59 @@ authorising principal, disclosure state.
 
 **Open question 6:** is roster visibility sufficient disclosure, or must the policy record
 carry an explicit obligation — and if so, what enforces it?
+
+---
+
+**AMENDMENT 2 — all remaining questions DECIDED (2026-08-31)**
+
+**Basis:** `Docs/voice/connector-assessment-20260831.md` (ground truth against
+`tranquillity-develop @ 6d012a40d2` / `legion-voice-mixer @ 0eb38f1`). Q1 was decided by
+Amendment 1; this amendment closes Q2–Q6 and the §Scope gate. Build plan:
+`connector-build-plan.md`.
+
+**D1 — Authorisation (Q3): the ini-declared policy record is the gate.** `[VoiceConnector.<name>]`
+records in the region config are the sole authorisation: operator-only by construction (writing
+the ini IS the grant), no runtime grant/revoke surface in v1. At registration the sim logs the
+connector's UUID and room at INFO so the operator can configure the peer from the log line alone.
+The peer→Janus leg stays protected by network isolation only — the assessment's §7(c) finding
+(the mixer join is ungated and `display` is trusted) is pre-existing and not connector-specific,
+so it is filed as its own ledger O-item rather than solved here.
+
+**D2 — Injection (Q4): IN SCOPE.** The origin request (2026-07-31) named NPC TTS voice
+explicitly, so injection is part of this programme, not deferred. A record's `may_inject=true`
+lifts the default refusal. `may_inject=false` is enforced with existing machinery: the sim pushes
+a **moderation mute for the NPC identity at registration** (the mute channel, Option A — every
+listener's mix silences the connector; **no mixer change**). Defence in depth for the wider NPC
+surface: `[WebRtcVoice] AllowNpcVoice=false` (the default) refuses ANY NPC voice provision except
+the connector module's own registration path — NPC voice exists only through a policy record.
+
+**D3 — Disclosure (Q2/Q6) — the governing requirement.** A person must be able to tell they are
+talking to an NPC, on a STOCK viewer, during the conversation — not only at the door. Three
+mandatory layers:
+
+- **(i) NAME MARKER** — `[WebRtcVoice] NpcNameToken` (set once by the operator, e.g. last name
+  "NPC"); every connector's NPC name must carry it or the record is **refused at load**. The name
+  is the one channel every stock-viewer surface shows (roster, radar, nametag, speaking dot).
+- **(ii) DOOR NOTICES** — a region alert on connector attach and detach, and an entry notice to
+  any agent becoming root within the connector's scope while it is attached.
+- **(iii) PROXIMITY NOTICE** — the first time an agent comes within voice range of a voiced
+  (`may_inject`) NPC, once per agent per NPC per login session, one local chat line stating it is
+  an NPC whose voice is automated or remotely operated.
+
+Appearance is optional (a legible name outranks a costume). `disclosed` is ALWAYS true; **no
+undisclosed mode exists** — the record field carries the obligation, not an option. This answers
+Q6: roster visibility alone is NOT sufficient; the record carries the obligation and the module
+enforces it.
+
+**D4 — Hypergrid (Q5): decided as a provisioning rule.** Trusted-HG visitors have region voice
+and are recordable/addressable under the same disclosure as residents; untrusted-HG visitors get
+NO region voice (their provision is refused), so the recording question is moot for them. This is
+a provisioning rule; enforcement ships with the trusted-HG regionserver rollout, not with this
+plan — no code here, and the owed enforcement is filed in the ledger as its own O-item so it is
+not lost.
+
+**D5 — Runtime: aiortc, containerised, both directions.** The connector peer is an aiortc process
+in a container declared in the mixer repo's compose file (it deploys where the mixer deploys).
+One codebase serves both directions — recv for recording, send for injection. The Janus
+signalling layer is kept deliberately small so a possible later port (to a compiled runtime)
+moves little.
