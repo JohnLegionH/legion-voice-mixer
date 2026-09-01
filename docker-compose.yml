@@ -70,3 +70,24 @@ services:
     # Precedence: mounted file > env > default (see docs/docker-notes.md).
     # volumes:
     #   - ./janus.d:/opt/janus/etc/janus.d:ro
+
+  # ── Voice connector: recorder peer (S-CON-4) ───────────────────────────────
+  # Headless aiortc peer that records one room's mixdown under a sim-registered
+  # connector NPC identity. Behind a profile so `docker compose up -d` alone
+  # NEVER starts it: bring it up explicitly with
+  #   docker compose --profile recorder up -d recorder
+  # Config: cp connectors/recorder/recorder.env.example connectors/recorder/recorder.env
+  # (gitignored) and fill in JANUS_API_SECRET, ROOM, DISPLAY — the latter two from
+  # the sim's "[CONNECTOR] registered ... npc=... room=..." line. See
+  # connectors/recorder/README.md.
+  recorder:
+    build:
+      context: ./connectors/recorder
+    profiles: [recorder]
+    depends_on:
+      - janus
+    env_file:
+      - ./connectors/recorder/recorder.env
+    volumes:
+      - ./recordings:/recordings
+    restart: unless-stopped

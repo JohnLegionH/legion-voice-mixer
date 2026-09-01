@@ -33,3 +33,6 @@ secrets
 
 # Note: vendor/janus-gateway is a git submodule (a tracked gitlink), not
 # ignored. Its own working-tree build artifacts are covered by its .gitignore.
+
+# S-CON-4 recorder output (compose volume ./recordings)
+recordings/
