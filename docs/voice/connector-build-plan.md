@@ -17,6 +17,12 @@ documents' refs and are valid at their tips only.
 S-CON-2 and S-CON-5. Suites at the last slice: Janus 179/181 (the O-20 pair), region-module
 167/167. Next: S-CON-4 (recorder peer, mixer repo).
 
+**Progress (2026-09-01):** **S-CON-4 DONE** — mixer `6300edc` (recorder peer) + `1c37b4c` (the
+first-recording defect fix; the dated note under S-CON-4). Second recording 2026-09-01 10:38
+verified (15.3 s, non-zero fraction 0.9997, the operator confirms it is his voice). S-CON-5:
+(a)/(b)/(f) OBSERVED, (c) owed, (d) DEFERRED, (e) DEFERRED to S-CON-6 — dated notes under
+S-CON-5. Next: S-CON-6 (injector peer).
+
 ---
 
 ## 1. Decided
@@ -100,7 +106,17 @@ cite the actual constant in code, do not invent a new knob).
 notice fires on root transition only (child agents silent); notices carry the record's name.
 **Live test watches:** all three layers observed on a stock Firestorm (part of S-CON-5).
 
-### S-CON-4 — recorder peer (mixer repo, `connectors/recorder/`)
+### S-CON-4 — recorder peer (mixer repo, `connectors/recorder/`) — DONE `6300edc` + `1c37b4c`
+
+*DONE 2026-09-01 — mixer `6300edc` (recorder peer) + `1c37b4c` (defect found on the first live
+recording, 2026-09-01 03:40: the recorder wrote the libopus decoder's whole 120 ms plane per
+20 ms frame — the output was [960 audio][4800 zero] samples repeated 871 times, non-zero
+fraction exactly 1/6; fixed by slicing each frame to its own sample count and writing
+contiguously; compose now derives the recorder's `JANUS_URL` from `JS_HTTP_PORT` after the
+first run went to the 14223 fallback). Second recording 2026-09-01 10:38: 15.3 s, non-zero
+fraction 0.9997, no zero run over 34 samples, the operator confirms it is his voice. The peer
+joined room 226001844 as the NPC identity with one existing participant, ICE completed,
+webrtcup; the Janus container untouched throughout.*
 **Files (mixer repo):** an aiortc process — Janus HTTP API `create` (session) / `attach`
 (`janus.plugin.slvoice`) / `join` with `display=<NPC uuid>` and a **sendrecv** audio offer it
 never sends on / event poll / ICE; opens the data channel (so presence flows and
@@ -115,17 +131,21 @@ ROOM_FULL, room gone); WAV segmenter writes valid headers and rolls on the bound
 ### S-CON-5 — live verification, recorder
 The acceptance run for S-CON-1..4, on a started region with a stock Firestorm present:
 - **(a)** roster / radar / Nearby Voice all show the marked NPC name (D3(i) on every surface) —
-  *2026-08-31: pending the operator's in-world confirmation (not yet taken)*;
+  *2026-08-31: pending the operator's in-world confirmation (not yet taken)*; *2026-09-01:
+  OBSERVED — "Recorder NPC" shown in stock Firestorm's Nearby Voice while the peer was joined*;
 - **(b)** door notices observed on stock Firestorm — attach alert, entry notice (D3(ii)) —
   *2026-08-31: the ENTRY notice observed on stock Firestorm at login; the attach/detach alert
   observation rides a later run (it fires at region start / connector stop)*;
 - **(c)** admin API `handle_info`: the connector's handle shows `datachannel_open` true;
-  `mod_muted_entries` carries the connector on EVERY listener when `MayInject=false`;
+  `mod_muted_entries` carries the connector on EVERY listener when `MayInject=false` —
+  *2026-09-01: the handle-walk with the peer joined was not captured this run; owed*;
 - **(d)** exclusion honoured: a parcel-banned avatar speaking is **absent** from the recording;
-  an allowed avatar is present;
+  an allowed avatar is present — *2026-09-01: DEFERRED — needs a second avatar banned from the
+  NPC's parcel*;
 - **(e)** the peer sends test audio with `MayInject=false` → **nobody hears it** (the moderation
-  mute holds);
-- **(f)** playback of the WAV segments confirms an intelligible room mixdown.
+  mute holds) — *2026-09-01: DEFERRED to S-CON-6 — nothing sends yet*;
+- **(f)** playback of the WAV segments confirms an intelligible room mixdown — *2026-09-01:
+  OBSERVED (the second recording, 10:38)*.
 Results are recorded here as a dated addendum; any deviation is recorded against the assessment
 before code changes.
 
