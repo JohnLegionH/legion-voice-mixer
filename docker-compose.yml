@@ -88,6 +88,13 @@ services:
       - janus
     env_file:
       - ./connectors/recorder/recorder.env
+    # JANUS_URL derives from the SAME .env value that configures the Janus HTTP
+    # transport, so the recorder always targets the port Janus actually listens on
+    # (the first live run went to a hard-coded 14223 while the live .env said
+    # 24223). This entry overrides recorder.env: to point the recorder at a
+    # non-compose Janus, set JANUS_URL in the mixer's .env, not in recorder.env.
+    environment:
+      JANUS_URL: ${JANUS_URL:-http://janus:${JS_HTTP_PORT:-14223}${JS_HTTP_BASEPATH:-/voice}}
     volumes:
       - ./recordings:/recordings
     restart: unless-stopped

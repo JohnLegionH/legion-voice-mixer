@@ -15,6 +15,50 @@ import wave
 from datetime import datetime, timezone
 
 
+def frame_pcm(plane_bytes: bytes, samples: int, channels: int) -> bytes:
+    """The VALID PCM of a packed s16 frame: exactly samples*channels*2 bytes.
+
+    Decoder-allocated planes are oversized — libopus sizes the buffer for its 120 ms
+    maximum frame (5760 samples), a 20 ms decode fills 960 and leaves the slack
+    zeroed. Serialising the whole plane appends that slack, observed live as 4800
+    zero samples after every 960 (62a32383_20260901-034027.wav, non-zero fraction
+    exactly 1/6). Always slice to the frame's own sample count.
+    """
+    return plane_bytes[: samples * channels * 2]
+
+
+class ContiguousFrameFeed:
+    """Feeds decoded frames to a WavSegmentWriter CONTIGUOUSLY.
+
+    pts NEVER places samples: the mixer ticks every 20 ms and Opus PLC covers loss,
+    so the received stream is continuous by construction — any timestamp-based
+    placement can only invent gaps. The frame's own time_base-correct timestamp is
+    used for ONE thing: a WARN (via the injected callback) when it jumps by more
+    than a second against the contiguous position. Log only; never pad.
+    """
+
+    JUMP_WARN_SECONDS = 1.0
+
+    def __init__(self, writer: "WavSegmentWriter", warn=None):
+        self._writer = writer
+        self._warn = warn or (lambda msg: None)
+        self._expected: float | None = None
+
+    def push(self, pcm: bytes, sample_rate: int, channels: int,
+             pts: int | None = None, time_base=None) -> None:
+        if not pcm:
+            return
+        samples = len(pcm) // (2 * channels)
+        if pts is not None and time_base is not None and sample_rate > 0:
+            t = float(pts * time_base)   # time_base is a fractions.Fraction: exact units
+            if self._expected is not None and abs(t - self._expected) > self.JUMP_WARN_SECONDS:
+                self._warn(f"frame timestamp jumped {t - self._expected:+.3f}s "
+                           f"against the contiguous position (pts={pts}, tb={time_base}); "
+                           f"writing contiguously anyway")
+            self._expected = t + samples / sample_rate
+        self._writer.write(pcm, sample_rate, channels)
+
+
 class WavSegmentWriter:
     """Writes s16 PCM into rolling WAV segments.
 
