@@ -11,14 +11,17 @@ differ only in the media they attach and consume:
                           recorder's silent-participant shape: never a frame,
                           audible=0, one encode slot)
   on_audio_track(t)    -> called once with the received (mixdown) track
+  on_plugin_event(d)   -> every plugin event's data ("joined", or an error_code)
   on_teardown()        -> cancel media tasks, before leave/detach/destroy
   on_closed()          -> after pc.close(): flush/close writers, final log
 
 The SLData data channel is always opened (so presence flows and
-presence_dropped_dc_closed stays quiet) and NEVER written to; incoming SLData
-is DEBUG-logged by field letters only (top-level keys — presence pushes are
-keyed by agent UUID with inner j/l maps; no content beyond the UUIDs is
-logged; docs/voice/mixer-feed-protocol.md field shapes).
+presence_dropped_dc_closed stays quiet). The connector peers NEVER write to it;
+incoming SLData is DEBUG-logged by field letters only (top-level keys — presence
+pushes are keyed by agent UUID with inner j/l maps; no content beyond the UUIDs is
+logged; docs/voice/mixer-feed-protocol.md field shapes). `janus` and `channel` are
+exposed once run() has created them, for the integration harness
+(tests/integration/), which sends viewer-shaped SLData and reads the handle ids.
 """
 
 from __future__ import annotations
@@ -44,6 +47,10 @@ class ConnectorPeer:
         self._pc = RTCPeerConnection()
         self._answered = asyncio.Event()
         self._stopping = asyncio.Event()
+        #: the Janus client (session/handle ids) once run() has attached
+        self.janus: JanusHttp | None = None
+        #: the SLData data channel once run() has created it
+        self.channel = None
 
     # ---- subclass hooks
 
@@ -51,6 +58,9 @@ class ConnectorPeer:
         return None
 
     def on_audio_track(self, track) -> None:
+        pass
+
+    def on_plugin_event(self, data: dict) -> None:
         pass
 
     def on_teardown(self) -> None:
@@ -67,6 +77,7 @@ class ConnectorPeer:
             janus = JanusHttp(cfg["janus_url"], cfg["api_secret"], http)
             await janus.create()
             await janus.attach()
+            self.janus = janus
             self._log.info("janus session=%s handle=%s", janus.session_id, janus.handle_id)
 
             track = self.local_track()
@@ -79,6 +90,7 @@ class ConnectorPeer:
                 self._pc.addTrack(track)
             channel = self._pc.createDataChannel("SLData")
             channel.on("message", self._on_sldata)
+            self.channel = channel
             self._pc.on("track", self._on_track)
 
             offer = await self._pc.createOffer()
@@ -117,6 +129,7 @@ class ConnectorPeer:
             kind = event.get("janus")
             if kind == "event":
                 data = (event.get("plugindata") or {}).get("data") or {}
+                self.on_plugin_event(data)
                 if data.get("audiobridge") == "joined":
                     self._log.info("joined room %s as %s; %d existing participant(s)",
                                    data.get("room"), self._cfg["display"],

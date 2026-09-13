@@ -1,0 +1,4 @@
+# Same pinned stack as the connector images (connectors/recorder/Dockerfile).
+# Install with: pip install --only-binary=:all: -r tests/integration/requirements.txt
+aiortc==1.13.0
+aiohttp==3.11.11

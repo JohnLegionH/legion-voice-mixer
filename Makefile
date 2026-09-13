@@ -97,7 +97,15 @@ TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 TEST_GLIB_CFLAGS := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags glib-2.0 2>/dev/null)
 TEST_GLIB_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 2>/dev/null)
 
-.PHONY: all install clean test bench_tick
+.PHONY: all install clean test bench_tick integration
+
+# Two-peer integration harness (O-73, tests/integration/README.md). Runs against a LIVE mixer and
+# is NOT part of `test`: the image build never runs it. Needs Python 3.12 with
+# tests/integration/requirements.txt; pass flags through, e.g. INTEGRATION_ARGS="--only S3 --no-restart".
+PYTHON           ?= python3
+INTEGRATION_ARGS ?=
+integration:
+	$(PYTHON) -m tests.integration.run $(INTEGRATION_ARGS)
 
 all: $(TARGET)
 
