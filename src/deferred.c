@@ -131,18 +131,22 @@ static void channel_update(char (**col)[SLV_UUID_LEN], int *n_col,
 
 	/* ADD into an empty channel, or REPLACE: set the channel to src EXACTLY
 	 * (last-write-wins). An empty src clears the channel. */
-	free(*col);
-	*col = NULL;
-	*n_col = 0;
-	if(n_src <= 0)
+	if(n_src <= 0) {
+		free(*col);
+		*col = NULL;
+		*n_col = 0;
 		return;
+	}
+	/* O-70: allocate and fill BEFORE freeing the old column, so a malloc failure leaves
+	 * the channel unchanged as promised above (it used to free first and leave it empty). */
 	char (*fresh)[SLV_UUID_LEN] = malloc((size_t)n_src * SLV_UUID_LEN);
 	if(fresh == NULL)
-		return;
+		return;   /* leave the channel unchanged on OOM */
 	int w = 0;
 	for(int j = 0; j < n_src; j++)
 		if(!col_has(fresh, w, src[j]))   /* de-dupe within src */
 			slv_dcpy(fresh[w++], src[j]);
+	free(*col);
 	*col = fresh;
 	*n_col = w;
 }

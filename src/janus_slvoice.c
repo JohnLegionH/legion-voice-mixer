@@ -335,11 +335,9 @@ typedef struct janus_slvoice_room {
  * prior gain, so this map lives on the session, not on the per-message parse. */
 typedef struct slv_peer_ctl {
 	char uuid[SLV_UUID_LEN]; /* target participant agent UUID */
-	gboolean muted;          /* this listener PERSONALLY muted the target (viewer SLData "m") */
-	gboolean mod_muted;      /* the SIM moderation-muted the target for this listener (mute channel,
-	                          * Option A). Kept SEPARATE from `muted` so clearing a moderation mute
-	                          * never wipes the viewer's own personal mute, and vice versa. The mix
-	                          * silences the source when EITHER is set. */
+	gboolean muted;          /* this listener PERSONALLY muted the target (viewer SLData "m").
+	                          * The SIM moderation mute is NOT here: it lives in session->mod_muted
+	                          * (O-49), so a full table can never refuse it. */
 	gboolean has_gain;       /* a per-source gain was set for the target */
 	float gain;              /* linear gain (ug/220), clamped */
 } slv_peer_ctl;
@@ -433,6 +431,15 @@ typedef struct janus_slvoice_session {
 	 * g_strdup'd (freed on removal / destroy). */
 	GHashTable *excluded;
 
+	/* O-49: the SIM moderation-mute set (mute channel, Option A) — source agent UUIDs this
+	 * listener must not hear, value GINT_TO_POINTER(1). It used to be a flag on peer_ctl, sharing
+	 * that 32-slot table with the viewer's own mutes/gains, so a listener with 32 stored volumes
+	 * could not be moderation-muted at all (set_mod_muted_locked dropped it silently). Kept
+	 * SEPARATE from peer_ctl[].muted so clearing one never wipes the other; the mix silences the
+	 * source when EITHER is set. Unbounded like `excluded`; read/written under session->mutex
+	 * (the peer_ctl discipline); cleared on leave_room, destroyed in session_free. */
+	GHashTable *mod_muted;
+
 	/* Diagnostics (guarded by mutex except where atomic) */
 	guint64 rtp_in_count;        /* RTP packets ingested */
 	guint64 frames_decoded;      /* Opus frames decoded (incl. PLC) */
@@ -474,8 +481,13 @@ typedef struct janus_slvoice_session {
 	                              * hangup_media and on leave_room, so a re-attach re-arms it. */
 	guint64 backlog_resent;      /* M-A2A-3: how many proof-of-attachment backlog re-sends this
 	                              * session received (normally 1 per attachment). */
-	slv_sldata last_data;        /* latest parsed SLData values */
-	unsigned last_data_fields;   /* fields_seen from the last SLData */
+	slv_sldata last_data;        /* persistent SLData values: each message merges in only the fields
+	                              * it carried (O-64, slv_sldata_merge), so a "ug"/"m" message from a
+	                              * stationary user no longer wipes sp/lp */
+	unsigned last_data_fields;   /* persistent union of fields_seen over all SLData (O-64) */
+	unsigned last_msg_fields;    /* fields_seen of the LATEST message only — diagnostics (O-64) */
+	guint64 peer_ctl_full_drops; /* O-49: viewer per-source mute/gain entries dropped because
+	                              * peer_ctl[SLV_MAX_PEER_ADJ] was full (apply_peer_ctl_locked) */
 
 	janus_mutex mutex;
 	volatile gint hangingup;
@@ -608,6 +620,10 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	janus_mutex_lock(&session->mutex);
 	if(session->excluded != NULL)
 		g_hash_table_remove_all(session->excluded);
+	/* O-49: the moderation-mute set is room membership state too; the sim re-sends it (or the
+	 * deferred replay restores it) for the next room. Emptied, not destroyed, like `excluded`. */
+	if(session->mod_muted != NULL)
+		g_hash_table_remove_all(session->mod_muted);
 	janus_mutex_unlock(&session->mutex);
 	janus_refcount_decrease(&room->ref);
 }
@@ -719,14 +735,13 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
  * Locking: grab a room ref under session->mutex then release it before taking
  * room->mutex (order is room->mutex -> session->mutex), mirroring query_session
  * (:979-:991). Caller must NOT hold room->mutex. */
-/* Does this listener currently moderation-mute the given source? Reads the listener's peer_ctl under
- * L->mutex (its discipline). Caller may hold room->mutex (order room->mutex -> session->mutex). */
+/* Does this listener currently moderation-mute the given source? Reads the listener's mod_muted set
+ * under L->mutex (its discipline). Caller may hold room->mutex (order room->mutex -> session->mutex). */
 static gboolean janus_slvoice_is_mod_muted(janus_slvoice_session *L, const char *uuid) {
 	gboolean r = FALSE;
 	janus_mutex_lock(&L->mutex);
-	for(int k = 0; k < L->n_peer_ctl; k++) {
-		if(strcmp(L->peer_ctl[k].uuid, uuid) == 0) { r = L->peer_ctl[k].mod_muted; break; }
-	}
+	if(L->mod_muted != NULL && uuid != NULL)
+		r = g_hash_table_contains(L->mod_muted, uuid);
 	janus_mutex_unlock(&L->mutex);
 	return r;
 }
@@ -770,6 +785,8 @@ static void janus_slvoice_session_free(const janus_refcount *ref) {
 	janus_slvoice_media_free_locked(session);   /* belt-and-suspenders (already freed at leave) */
 	if(session->excluded != NULL)
 		g_hash_table_destroy(session->excluded);
+	if(session->mod_muted != NULL)
+		g_hash_table_destroy(session->mod_muted);
 	g_free(session->display);
 	g_free(session);
 }
@@ -1070,6 +1087,7 @@ void janus_slvoice_create_session(janus_plugin_session *handle, int *error) {
 	session->opus_pt = -1;
 	session->created_ts = janus_get_monotonic_time();
 	session->excluded = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	session->mod_muted = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);   /* O-49 */
 	janus_mutex_init(&session->mutex);
 	janus_refcount_init(&session->ref, janus_slvoice_session_free);
 	handle->plugin_handle = session;
@@ -1152,14 +1170,13 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "last_mix_rms_l", json_real(session->last_mix_rms_l)); /* per-channel output level (Phase 3b item 4 pan diagnostic; L/R swap detector) */
 	json_object_set_new(info, "last_mix_rms_r", json_real(session->last_mix_rms_r));
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
-	/* Deliverable 5: how many of this listener's peer_ctl entries are SIM moderation-muted
-	 * (the mix silences a source when mod_muted OR the viewer's own `muted` is set). The
-	 * moderation flag was previously invisible to the admin API. Read under session->mutex. */
-	int mod_muted_count = 0;
-	for(int mmk = 0; mmk < session->n_peer_ctl; mmk++)
-		if(session->peer_ctl[mmk].mod_muted)
-			mod_muted_count++;
-	json_object_set_new(info, "mod_muted_entries", json_integer(mod_muted_count));
+	/* O-49: viewer mute/gain entries refused because peer_ctl was full (bounded at SLV_MAX_PEER_ADJ). */
+	json_object_set_new(info, "peer_ctl_full_drops", json_integer((json_int_t)session->peer_ctl_full_drops));
+	/* Deliverable 5: how many sources the SIM moderation-mutes for this listener (the mix silences
+	 * a source when it is in mod_muted OR the viewer's own peer_ctl `muted` is set). Since O-49 this
+	 * is the size of the separate mod_muted set, not a count over peer_ctl. Read under session->mutex. */
+	json_object_set_new(info, "mod_muted_entries",
+		json_integer(session->mod_muted ? (json_int_t)g_hash_table_size(session->mod_muted) : 0));
 	json_object_set_new(info, "excluded_entries",
 		json_integer(session->excluded ? (json_int_t)g_hash_table_size(session->excluded) : 0));
 	json_object_set_new(info, "data_msgs_received", json_integer((json_int_t)session->data_msgs_received));
@@ -1174,7 +1191,9 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "backlog_resent", json_integer((json_int_t)session->backlog_resent));
 	char fbuf[96];
 	slv_sldata_fields_str(session->last_data_fields, fbuf, sizeof(fbuf));
-	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));
+	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));   /* O-64: persistent union */
+	slv_sldata_fields_str(session->last_msg_fields, fbuf, sizeof(fbuf));
+	json_object_set_new(info, "last_msg_fields_seen", json_string(fbuf));    /* O-64: latest message only */
 	gint64 uptime = (janus_get_monotonic_time() - session->created_ts) / G_USEC_PER_SEC;
 	json_object_set_new(info, "session_uptime", json_integer((json_int_t)uptime));
 	janus_mutex_unlock(&session->mutex);
@@ -1513,27 +1532,19 @@ static void janus_slvoice_relay_mute_one(janus_slvoice_session *L, const char *w
 	json_decref(entry);
 }
 
-/* Set/clear this listener's MODERATION mute for one source in its persistent peer_ctl map, creating
- * the entry if needed. Returns TRUE iff mod_muted actually CHANGED (so the caller emits an "m"
- * transition). L->mutex held. Never touches `muted` (the viewer's personal mute) or `gain`, so the
- * two mute sources compose (the mix silences on either) and clearing one never wipes the other. */
+/* Set/clear this listener's MODERATION mute for one source in its mod_muted set (O-49). Returns TRUE
+ * iff membership actually CHANGED (so the caller emits an "m" transition). L->mutex held. Never
+ * touches peer_ctl (the viewer's personal mute / gain), so the two mute sources compose (the mix
+ * silences on either) and clearing one never wipes the other. No capacity limit: unlike the old
+ * peer_ctl flag it cannot be refused by a full table. */
 static gboolean janus_slvoice_set_mod_muted_locked(janus_slvoice_session *L, const char *uuid, gboolean muted) {
-	slv_peer_ctl *dst = NULL;
-	for(int k = 0; k < L->n_peer_ctl; k++) {
-		if(strcmp(L->peer_ctl[k].uuid, uuid) == 0) { dst = &L->peer_ctl[k]; break; }
-	}
-	if(dst == NULL) {
-		if(!muted)
-			return FALSE;   /* clearing a mute that was never set: no entry, no change */
-		if(L->n_peer_ctl >= SLV_MAX_PEER_ADJ)
-			return FALSE;   /* peer_ctl table full: drop (source stays audible; bounded) */
-		dst = &L->peer_ctl[L->n_peer_ctl++];
-		memset(dst, 0, sizeof(*dst));
-		g_strlcpy(dst->uuid, uuid, SLV_UUID_LEN);
-	}
-	if((dst->mod_muted ? TRUE : FALSE) == (muted ? TRUE : FALSE))
+	if(L->mod_muted == NULL || uuid == NULL)
 		return FALSE;
-	dst->mod_muted = muted ? TRUE : FALSE;
+	if(!muted)
+		return g_hash_table_remove(L->mod_muted, uuid);   /* TRUE only if it was set */
+	if(g_hash_table_contains(L->mod_muted, uuid))
+		return FALSE;
+	g_hash_table_insert(L->mod_muted, g_strdup(uuid), GINT_TO_POINTER(1));
 	return TRUE;
 }
 
@@ -1579,17 +1590,21 @@ static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb, guint64 *o
 			if(vb->op == SLV_VIS_OP_REPLACE) {
 				/* Set the listener's mod-mute set EXACTLY: clear any currently-muted source not in
 				 * the new set, then set every source in the new set. */
-				for(int k = 0; k < L->n_peer_ctl; k++) {
-					if(!L->peer_ctl[k].mod_muted)
-						continue;
-					gboolean in_new = FALSE;
-					for(int m = 0; m < e->n_excl; m++)
-						if(strcmp(L->peer_ctl[k].uuid, e->excl[m]) == 0) { in_new = TRUE; break; }
-					if(!in_new) {
-						L->peer_ctl[k].mod_muted = FALSE;
-						if(ntrans < SLV_VIS_MAX_EXCL * 2) {
-							g_strlcpy(trans_uuid[ntrans], L->peer_ctl[k].uuid, SLV_UUID_LEN);
-							trans_mute[ntrans++] = FALSE;
+				if(L->mod_muted != NULL) {
+					GHashTableIter mit;
+					gpointer mkey;
+					g_hash_table_iter_init(&mit, L->mod_muted);
+					while(g_hash_table_iter_next(&mit, &mkey, NULL)) {
+						const char *mu = mkey;
+						gboolean in_new = FALSE;
+						for(int m = 0; m < e->n_excl; m++)
+							if(strcmp(mu, e->excl[m]) == 0) { in_new = TRUE; break; }
+						if(!in_new) {
+							if(ntrans < SLV_VIS_MAX_EXCL * 2) {
+								g_strlcpy(trans_uuid[ntrans], mu, SLV_UUID_LEN);   /* copy BEFORE the remove frees the key */
+								trans_mute[ntrans++] = FALSE;
+							}
+							g_hash_table_iter_remove(&mit);
 						}
 					}
 				}
@@ -1630,7 +1645,7 @@ static gboolean janus_slvoice_apply_mutebatch(const slv_visbatch *vb, guint64 *o
  * freshly-created session state, then remove the deferred record. Called from the join branch with
  * room->mutex HELD and BEFORE the join roster is built / push_presence / the data_ready backlog, so
  * the listener's exclusions and mod-mutes are in force before any presence derived from them is
- * revealed. Takes L->mutex (order room->mutex -> session->mutex) to mutate L->excluded / peer_ctl. */
+ * revealed. Takes L->mutex (order room->mutex -> session->mutex) to mutate L->excluded / mod_muted. */
 static void janus_slvoice_room_replay_deferred_locked(janus_slvoice_room *room, janus_slvoice_session *L) {
 	if(L == NULL || L->display == NULL)
 		return;
@@ -1796,6 +1811,10 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 			"%d minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxplaybackrate=48000\r\n", opus_pt);
 		janus_sdp_attribute *a = janus_sdp_attribute_create("fmtp", "%s", fmtp);
 		janus_sdp_attribute_add_to_mline(am, a);
+		/* O-69: pin packetisation to the mixer's 20 ms tick. janus_sdp_write emits
+		 * "a=<name>:<value>\r\n" itself, so these values carry no CRLF. */
+		janus_sdp_attribute_add_to_mline(am, janus_sdp_attribute_create("ptime", "%d", 20));
+		janus_sdp_attribute_add_to_mline(am, janus_sdp_attribute_create("maxptime", "%d", 20));
 	}
 	/* Did we actually accept the application m-line in the answer? (port>0) */
 	janus_sdp_mline *am_dc = janus_sdp_mline_find(answer, JANUS_SDP_APPLICATION);
@@ -2816,13 +2835,16 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			const char *disp = sess[j]->display;
 			if(disp == NULL)
 				continue;
+			/* Silence the source if the listener personally muted it (peer_ctl) OR the sim
+			 * moderation-muted it (Option A; the mod_muted set since O-49, checked outside
+			 * the peer_ctl loop because a moderated source need not have a peer_ctl entry).
+			 * A moderation mute leaves the source in the roster (never in L->excluded) and is
+			 * silenced here instead of by the exclusion cull. s->mutex is held. */
+			if(s->mod_muted != NULL && g_hash_table_contains(s->mod_muted, disp))
+				mutes[j] = 1;
 			for(int k = 0; k < s->n_peer_ctl; k++) {
 				if(strcmp(s->peer_ctl[k].uuid, disp) == 0) {
-					/* Silence the source if the listener personally muted it OR the sim
-					 * moderation-muted it (Option A). mod_muted is the ONLY new term in the
-					 * mix; a moderation mute leaves the source in the roster (never in
-					 * L->excluded) and is silenced here instead of by the exclusion cull. */
-					if(s->peer_ctl[k].muted || s->peer_ctl[k].mod_muted)
+					if(s->peer_ctl[k].muted)
 						mutes[j] = 1;
 					if(s->peer_ctl[k].has_gain)
 						gains[j] = s->peer_ctl[k].gain;
@@ -2994,8 +3016,10 @@ static void janus_slvoice_apply_peer_ctl_locked(janus_slvoice_session *s, const 
 			}
 		}
 		if(dst == NULL) {
-			if(s->n_peer_ctl >= SLV_MAX_PEER_ADJ)
+			if(s->n_peer_ctl >= SLV_MAX_PEER_ADJ) {
+				s->peer_ctl_full_drops++;   /* O-49: counted, visible in query_session */
 				continue;   /* table full: drop extras */
+			}
 			dst = &s->peer_ctl[s->n_peer_ctl++];
 			memset(dst, 0, sizeof(*dst));
 			g_strlcpy(dst->uuid, a->uuid, SLV_UUID_LEN);
@@ -3076,8 +3100,10 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 	janus_mutex_lock(&session->mutex);
 	session->data_msgs_received++;
 	if(st == SLV_SLDATA_OK || st == SLV_SLDATA_EMPTY) {
-		session->last_data = d;
-		session->last_data_fields = d.fields_seen;
+		/* O-64: merge, don't replace — a "ug"/"m" message from a stationary user used to wipe
+		 * sp/lp and flatten their mix until the next geometry message. */
+		slv_sldata_merge(&session->last_data, &session->last_data_fields, &d);
+		session->last_msg_fields = d.fields_seen;
 		/* Per-source mute/gain the viewer set on OTHER participants
 		 * ({"m":{uuid:bool}} / {"ug":{uuid:val}}) — merge into the persistent
 		 * per-listener control map the tick reads (req 4). */

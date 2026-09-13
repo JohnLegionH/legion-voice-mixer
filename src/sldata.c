@@ -220,6 +220,23 @@ slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out)
 	return out->fields_seen ? SLV_SLDATA_OK : SLV_SLDATA_EMPTY;
 }
 
+void slv_sldata_merge(slv_sldata *dst, unsigned *dst_fields, const slv_sldata *src) {
+	/* O-64: copy only what this message carried. j/l carry no stored value; their bits
+	 * still join the union. A map-form "m"/"ug" sets its bit with the legacy scalar left
+	 * at 0 by the parse, which (as before) overwrites an earlier scalar m/ug. */
+	if(dst == NULL || dst_fields == NULL || src == NULL)
+		return;
+	unsigned f = src->fields_seen;
+	if(f & SLV_FIELD_SP)   dst->sp = src->sp;
+	if(f & SLV_FIELD_SH)   dst->sh = src->sh;
+	if(f & SLV_FIELD_LP)   dst->lp = src->lp;
+	if(f & SLV_FIELD_LH)   dst->lh = src->lh;
+	if(f & SLV_FIELD_M)    dst->m = src->m;
+	if(f & SLV_FIELD_UG)   dst->ug = src->ug;
+	if(f & SLV_FIELD_ECHO) dst->echo = src->echo;
+	*dst_fields |= f;
+}
+
 const char *slv_sldata_fields_str(unsigned fields_seen, char *dst, size_t dstlen) {
 	if(dst == NULL || dstlen == 0)
 		return dst;

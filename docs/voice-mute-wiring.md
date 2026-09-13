@@ -288,3 +288,40 @@ which case you're in.*
   `fsparticipantlist.cpp:530`
 - volume-slider callers: `llavatarlistitem.cpp:197`, `llinspectavatar.cpp:540`,
   `fsfloatervoicecontrols.cpp:364`
+
+---
+
+## Mixer side — viewer mutes vs sim moderation mutes (O-49, 2026-09-12)
+
+The mixer keeps the two mute sources in **separate** structures. The mix silences a
+source for a listener when **either** one is set, and clearing one never clears the
+other.
+
+| Source | Structure | Bound | Cleared on `leave_room` |
+|---|---|---|---|
+| Viewer `"m"` / `"ug"` (this document) | `session->peer_ctl[SLV_MAX_PEER_ADJ]` (32 slots: `muted`, `has_gain`, `gain`) | 32 targets; extras are dropped | no (unchanged) |
+| Sim moderation mute (`peer_ctl_batch` mute channel, Option A) | `session->mod_muted` — a `GHashTable` set of source UUIDs | none | **yes**, next to `excluded` |
+
+**Why (O-49).** The moderation flag used to be a `mod_muted` member of
+`slv_peer_ctl`, so it shared those 32 slots with the viewer's own entries. A
+listener with 32 stored per-avatar volumes could not be given **any** sim moderation
+mute: `set_mod_muted_locked` returned FALSE ("table full: drop") and the source
+stayed audible, with no log line. The set has no capacity, so that refusal is gone.
+`set_mod_muted_locked` keeps its "returns TRUE iff membership changed" contract,
+which drives the `{"<uuid>":{"m":bool}}` greying emission. It is read and written
+under the listener's `session->mutex`, like `peer_ctl`.
+
+Readers and writers: `is_mod_muted` (the join backlog's sticky `"m"`),
+`set_mod_muted_locked`, `apply_mutebatch` (REPLACE iterates the set; ADD/REMOVE go
+through `set_mod_muted_locked`), `room_replay_deferred_locked`, and the mix term in
+pass 2. The mix checks the set **outside** the `peer_ctl` loop, because a moderated
+source need not have a `peer_ctl` entry.
+
+**Admin API (`query_session`):**
+- `mod_muted_entries` — the size of the `mod_muted` set (it used to be a count of
+  flagged `peer_ctl` rows).
+- `peer_ctl_entries` — unchanged: viewer-set targets in `peer_ctl`.
+- `peer_ctl_full_drops` — **new**: viewer `"m"`/`"ug"` entries dropped because
+  `peer_ctl` was full (`apply_peer_ctl_locked`). A non-zero value means a viewer
+  personal mute or volume was **silently ignored**. The viewer-side drop remains
+  bounded by design; it is now counted.

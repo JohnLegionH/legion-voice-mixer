@@ -114,6 +114,16 @@ typedef enum slv_sldata_status {
  *          \c len; never aborts on bad input. */
 slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out);
 
+/*! \brief Merge one parsed message into persistent per-session state (O-64).
+ * Copies ONLY the members whose bit is set in \c src->fields_seen (sp, sh, lp,
+ * lh, and the legacy scalars m / ug / echo) into \c dst, and ORs every bit of
+ * \c src->fields_seen into \c *dst_fields — so a message carrying only "ug" or
+ * "m" never wipes geometry an earlier message set. \c *dst_fields is the
+ * persistent union; \c dst->fields_seen, \c dst->peers and \c dst->n_peers are
+ * NOT touched (per-source control is merged separately by the plugin). NULL
+ * arguments are a no-op. */
+void slv_sldata_merge(slv_sldata *dst, unsigned *dst_fields, const slv_sldata *src);
+
 /*! \brief Render a fields_seen bitmask as a stable, comma-separated key list
  * (e.g. "sp,sh,echo") for diagnostics. Always NUL-terminates.
  * \returns \c dst. */

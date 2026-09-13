@@ -217,6 +217,67 @@ static void test_per_source_map(void) {
 	CHECK(!(d.fields_seen & SLV_FIELD_M) && d.n_peers == 0, "bad entry not counted");
 }
 
+/* ---- O-64: persistent geometry merge ------------------------------------ */
+/* Parse `json` and merge it into (dst, dst_fields), as incoming_data does. */
+static void merge_msg(slv_sldata *dst, unsigned *dst_fields, const char *json) {
+	slv_sldata d;
+	slv_sldata_parse(json, strlen(json), &d);
+	slv_sldata_merge(dst, dst_fields, &d);
+}
+
+static void test_merge_geometry_then_ug_keeps_geometry(void) {
+	printf("test_merge_geometry_then_ug_keeps_geometry\n");
+	slv_sldata st;
+	unsigned f = 0;
+	memset(&st, 0, sizeof(st));
+	/* The stock viewer's geometry message: sp,sh,lp,lh together. */
+	merge_msg(&st, &f, "{\"sp\":[1.0,2.0,3.0],\"sh\":[0,0,0,1],\"lp\":[4.0,5.0,6.0],\"lh\":[0,0,1,0]}");
+	/* Then a volume-slider change while stationary. */
+	merge_msg(&st, &f, "{\"ug\":{\"11111111-1111-1111-1111-111111111111\":110}}");
+	CHECK(f & SLV_FIELD_SP, "SP bit kept after ug-only message");
+	CHECK(f & SLV_FIELD_LP, "LP bit kept after ug-only message");
+	CHECK(f & SLV_FIELD_SH, "SH bit kept after ug-only message");
+	CHECK(f & SLV_FIELD_LH, "LH bit kept after ug-only message");
+	CHECK(f & SLV_FIELD_UG, "UG bit added");
+	CHECK(approx(st.sp.x, 1.0) && approx(st.sp.y, 2.0) && approx(st.sp.z, 3.0), "sp kept");
+	CHECK(approx(st.lp.x, 4.0) && approx(st.lp.y, 5.0) && approx(st.lp.z, 6.0), "lp kept");
+	CHECK(approx(st.lh.z, 1.0), "lh kept");
+
+	/* A scalar mute message also leaves geometry alone. */
+	merge_msg(&st, &f, "{\"m\":true}");
+	CHECK((f & SLV_FIELD_SP) && approx(st.sp.x, 1.0), "sp kept after m message");
+	CHECK((f & SLV_FIELD_M) && st.m == 1, "scalar m merged");
+}
+
+static void test_merge_ug_only_never_sets_sp(void) {
+	printf("test_merge_ug_only_never_sets_sp\n");
+	slv_sldata st;
+	unsigned f = 0;
+	memset(&st, 0, sizeof(st));
+	merge_msg(&st, &f, "{\"ug\":0.5}");
+	CHECK(!(f & SLV_FIELD_SP), "ug-only never sets SP");
+	CHECK(!(f & SLV_FIELD_LP), "ug-only never sets LP");
+	CHECK((f & SLV_FIELD_UG) && approx(st.ug, 0.5), "ug merged");
+}
+
+static void test_merge_sh_only_updates_sh(void) {
+	printf("test_merge_sh_only_updates_sh\n");
+	slv_sldata st;
+	unsigned f = 0;
+	memset(&st, 0, sizeof(st));
+	merge_msg(&st, &f, "{\"sp\":[1.0,2.0,3.0],\"sh\":[0,0,0,1],\"lp\":[4.0,5.0,6.0]}");
+	merge_msg(&st, &f, "{\"sh\":[0.0,0.0,0.7071,0.7071]}");
+	CHECK(approx(st.sh.z, 0.7071) && approx(st.sh.w, 0.7071), "sh updated");
+	CHECK(approx(st.sp.x, 1.0) && approx(st.sp.z, 3.0), "sp untouched by sh-only");
+	CHECK(approx(st.lp.y, 5.0), "lp untouched by sh-only");
+	CHECK((f & SLV_FIELD_SP) && (f & SLV_FIELD_LP) && (f & SLV_FIELD_SH), "bits kept");
+	/* NULL arguments are a no-op, not a crash. */
+	slv_sldata_merge(NULL, &f, &st);
+	slv_sldata_merge(&st, NULL, &st);
+	slv_sldata_merge(&st, &f, NULL);
+	CHECK(approx(st.sp.x, 1.0), "NULL merges leave state alone");
+}
+
 /* ---- fields_str helper -------------------------------------------------- */
 static void test_fields_str(void) {
 	printf("test_fields_str\n");
@@ -242,6 +303,9 @@ int main(void) {
 	test_oversized();
 	test_length_honoured();
 	test_per_source_map();
+	test_merge_geometry_then_ug_keeps_geometry();
+	test_merge_ug_only_never_sets_sp();
+	test_merge_sh_only_updates_sh();
 	test_fields_str();
 	printf("== %d checks, %d failure(s) ==\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;

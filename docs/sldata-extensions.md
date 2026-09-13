@@ -46,9 +46,34 @@ Parsing policy (all enforced and unit-tested):
 - The parser honours the exact **byte length** of the data-channel buffer
   (data-channel buffers are not NUL-terminated).
 
-Diagnostics: `query_session` reports `data_msgs_received` and
-`last_data_fields_seen` (a comma-separated list such as `sp,sh,echo`), derived
-from the last parsed payload.
+Diagnostics: `query_session` reports `data_msgs_received`,
+`last_data_fields_seen` and `last_msg_fields_seen` (comma-separated lists such as
+`sp,sh,echo`) — see the next section for what each one means.
+
+### Persistent state across messages (O-64, 2026-09-12)
+
+The viewer sends SLData **only on change**. Live read 2026-09-12: the stock viewer's
+geometry message always carries `sp,sh,lp,lh` together, while a volume-slider or
+mute change arrives as its own `{"ug":{...}}` / `{"m":{...}}` message. Until O-64 the
+plugin **replaced** `session->last_data` with each message, so a `ug`/`m` message
+from a **stationary** user wiped `sp`/`lp`. `snapshot_geometry_locked` then marked
+the snapshot invalid and their mix went **flat** until they next moved.
+
+Now `incoming_data` calls `slv_sldata_merge(&last_data, &last_data_fields, &d)`
+(`src/sldata.c`). It copies **only** the members whose bit is set in the new
+message (`sp`, `sh`, `lp`, `lh`, and the legacy scalars `m` / `ug` / `echo`) and ORs
+that message's bits into the persistent mask. The per-source `m`/`ug` maps are
+merged into `peer_ctl` exactly as before; the merge does not touch them.
+
+- `last_data_fields_seen` — the **persistent union**: every field any message on
+  this session has carried. It is what the geometry snapshot gates on.
+- `last_msg_fields_seen` — the **latest message only** (diagnostic). A stationary
+  user adjusting a volume reads `last_msg_fields_seen: "ug"` with
+  `last_data_fields_seen` still containing `sp,sh,lp,lh`.
+
+Geometry therefore persists until the next geometry message overwrites it. A session
+that never sent geometry stays invalid (flat), as before. Tests:
+`tests/test_sldata.c` `test_merge_*`.
 
 ## Per-source mute and gain — `m` / `ug` (Phase 2, verified against the viewer)
 
