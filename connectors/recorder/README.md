@@ -16,7 +16,9 @@ column out to this peer by `display`).
 Both come from the sim, not from this repo. At region start (or `voice connector
 start <name>` on the region console) the sim logs, at INFO:
 
-    [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...>
+    [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...> identity=derived
+
+DISPLAY is stable across regionserver restarts from build 1.1.392-alpha+d347102272; set it once.
 
 Copy `npc=` into `DISPLAY` and `room=` into `ROOM`. Do **not** invent a DISPLAY:
 the sim's policy record owns the identity; an unregistered UUID records without

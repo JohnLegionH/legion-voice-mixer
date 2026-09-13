@@ -57,6 +57,7 @@ bad()  { fail=$((fail + 1)); echo "FAIL $1"; echo "$OUT" | sed 's/^/     | /'; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 has()     { printf '%s\n' "$OUT" | grep -Fq -- "$1"; }
+first_line() { printf '%s\n' "$OUT" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
 cfg()     { grep -E "^[[:space:]]*$2[[:space:]]*=" "$CONF/$1" | head -1 | sed 's/^[[:space:]]*//'; }
 # sed range, as in the entrypoint (the image's awk is mawk, which lacks [[:space:]]).
 section() { sed -n "/^$2:[[:space:]]*{/,/^}/p" "$CONF/$1"; }
@@ -66,9 +67,12 @@ run_ep JS_API_SECRET= JS_ADMIN_SECRET=
 check "empty secrets -> exit 1" '[ "$RC" -eq 1 ]'
 check "empty secrets -> FATAL names both" 'has "FATAL: JS_API_SECRET and JS_ADMIN_SECRET empty"'
 check "empty secrets -> Janus not started" '! has STUB-JANUS-RAN'
+check "empty secrets -> FATAL names the keys to set and the override" 'has "Set JS_API_SECRET=" && has "and JS_ADMIN_SECRET=" && has "or set ALLOW_INSECURE_DEV=true in .env"'
+check "empty secrets -> effective values printed before the FATAL" '[ "$(first_line "INFO: admin API bind=")" -lt "$(first_line "FATAL:")" ] && has "INFO: secrets api_secret=EMPTY admin_secret=EMPTY allow_insecure_dev=false"'
 
 run_ep JS_ADMIN_SECRET=
 check "empty admin secret only -> exit 1" '[ "$RC" -eq 1 ] && has "FATAL: JS_ADMIN_SECRET empty"'
+check "empty admin secret only -> names only that key" 'has "Set JS_ADMIN_SECRET=" && ! has "Set JS_API_SECRET="'
 
 run_ep JS_API_SECRET="   "
 check "whitespace-only api secret -> exit 1" '[ "$RC" -eq 1 ] && has "FATAL: JS_API_SECRET empty"'
@@ -123,12 +127,20 @@ check "extra IP without public address -> mapping is the extra alone" '[ "$RC" -
 run_ep JS_PUBLIC_IP=203.0.113.7 JS_NAT_EXTRA_IPS=legiongrid.example
 check "non-IPv4 extra -> FATAL exit 1" '[ "$RC" -eq 1 ] && has "FATAL: JS_NAT_EXTRA_IPS entry" && ! has STUB-JANUS-RAN'
 
-# ---- O-55: WebSockets transport default off ----
+# ---- O-55: defaults reproduce pre-6m behaviour; narrowing is opt-in ----
 run_ep
-check "WS default -> ws = false" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = false" ]'
-check "WS default -> transports disable websockets" 'section janus.jcfg transports | grep -Eq "^[[:space:]]*disable = \"libjanus_websockets.so\""'
-check "WS default -> plugins/loggers/events disable untouched" '! section janus.jcfg plugins | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg loggers | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg events | grep -Eq "^[[:space:]]*disable"'
-check "WS default -> start line says ws=off" 'has " ws=off "'
+check "no JS_ADMIN_BIND -> 0.0.0.0 + WARN" 'has "INFO: admin API bind=0.0.0.0 port=14225" && has "WARNING: admin API is reachable on all interfaces; protected by JS_ADMIN_SECRET only"'
+check "no JS_WS_ENABLED -> ws on" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = true" ] && [ "$(cfg janus.transport.websockets.jcfg ws_port)" = "ws_port = 8188" ] && ! section janus.jcfg transports | grep -Eq "^[[:space:]]*disable" && has "INFO: websockets transport enabled=true port=8188" && has " ws=8188 "'
+check "defaults -> admin bind and WS are the first lines" '[ "$(first_line "INFO: admin API bind=")" -eq 1 ] && [ "$(first_line "INFO: websockets transport")" -le 3 ]'
+
+run_ep JS_ADMIN_BIND=192.168.1.225
+check "JS_ADMIN_BIND=192.168.1.225 -> INFO names it, no WARN" 'has "INFO: admin API bind=192.168.1.225 port=14225" && ! has "reachable on all interfaces"'
+
+run_ep JS_WS_ENABLED=false
+check "JS_WS_ENABLED=false -> ws = false" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = false" ] && has "INFO: websockets transport enabled=false"'
+check "JS_WS_ENABLED=false -> transports disable websockets" 'section janus.jcfg transports | grep -Eq "^[[:space:]]*disable = \"libjanus_websockets.so\""'
+check "JS_WS_ENABLED=false -> plugins/loggers/events disable untouched" '! section janus.jcfg plugins | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg loggers | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg events | grep -Eq "^[[:space:]]*disable"'
+check "JS_WS_ENABLED=false -> start line says ws=off" 'has " ws=off "'
 
 run_ep JS_WS_ENABLED=true JS_WS_PORT=24288
 check "JS_WS_ENABLED=true -> ws = true on JS_WS_PORT" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = true" ] && [ "$(cfg janus.transport.websockets.jcfg ws_port)" = "ws_port = 24288" ]'

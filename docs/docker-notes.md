@@ -59,9 +59,9 @@ over the whole config dir by default (that was the old model).
 | `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/voice` |
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
 | `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
-| `JS_ADMIN_BIND` | no jcfg key — the host address `docker-compose.yml` publishes the admin port on (O-55) | `127.0.0.1` |
-| `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; when `false` the entrypoint also sets `transports: { disable = "libjanus_websockets.so" }` (O-55) | `false` |
-| `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (only when `JS_WS_ENABLED=true`) | `8188` |
+| `JS_ADMIN_BIND` | no jcfg key: the host address `docker-compose.yml` publishes the admin port on (O-55). Unset = all interfaces, with a start-up WARNING | *(unset)* = all interfaces |
+| `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; `false` also sets `transports: { disable = "libjanus_websockets.so" }` (O-55) | `true` |
+| `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (used when `JS_WS_ENABLED=true`) | `8188` |
 | `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed (O-54); `0` disables; an invalid value is ignored with a WARN | `60` |
 
 The entrypoint also forces `http = true` and `admin_http = true`, and sets `ws`
@@ -76,31 +76,38 @@ container), matching how `JS_HTTP_PORT`/`JS_ADMIN_PORT` behave.
 
 Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
 
-- **Admin bind (O-55).** `docker-compose.yml` publishes the Admin API as
-  `${JS_ADMIN_BIND}:${JS_ADMIN_PORT}:${JS_ADMIN_PORT}`, default `127.0.0.1`: only
-  this machine can reach `/voiceAdmin`. The sim calls the address in its
-  `JanusGatewayAdminURI`, so set `JS_ADMIN_BIND` to exactly that host address.
-  On Legion Grid the ini says `http://192.168.1.225:24225/voiceAdmin`, so the live
-  `.env` needs `JS_ADMIN_BIND=192.168.1.225`. With the `127.0.0.1` default the sim's
-  admin calls (visibility/moderation `peer_ctl_batch`) are refused. Avoid
-  `0.0.0.0` on a host with a public interface. The HTTP signalling port stays on
-  all interfaces: the sim and the connectors use it, and `api_secret` guards it.
-- **WebSockets off (O-55).** Nothing in the voice path uses WS, so
-  `JS_WS_ENABLED` defaults to `false`: the entrypoint writes `ws = false` and adds
-  the transport to `transports: { disable }`, so Janus does not load it, and the
-  base compose file does not publish `JS_WS_PORT`. To turn it on, set
-  `JS_WS_ENABLED=true` **and** add the overlay:
-  `docker compose -f docker-compose.yml -f docker-compose.ws.yml up -d janus` (or
-  `COMPOSE_PATH_SEPARATOR=:` + `COMPOSE_FILE=docker-compose.yml:docker-compose.ws.yml`
-  in `.env`). Compose cannot make a port conditional on a variable, hence the
-  overlay.
-- **Fail-closed secrets (O-65).** The container exits 1 at start with
-  `[entrypoint] FATAL: JS_API_SECRET … empty; refusing to start` when either secret
-  is empty or whitespace. Without this, an empty `JS_API_SECRET` left the Janus API
-  open, and an empty `JS_ADMIN_SECRET` kept the stock template's well-known
-  `admin_secret`. **`ALLOW_INSECURE_DEV=true` is a dev-only override**: it starts
-  anyway, with a WARNING. Use it only on a throwaway local box that nothing else can
-  reach, never on the grid host.
+- **Admin bind (O-55).** `docker-compose.yml` publishes the Admin API on
+  `JS_ADMIN_BIND`. Unset (the default) publishes it on all interfaces, exactly as
+  before the knob existed, and the entrypoint's first lines say so:
+  `[entrypoint] INFO: admin API bind=0.0.0.0 port=… base_path=…`, then
+  `[entrypoint] WARNING: admin API is reachable on all interfaces; protected by
+  JS_ADMIN_SECRET only — firewall the port or set JS_ADMIN_BIND to the address the
+  regionserver uses.` To narrow, set `JS_ADMIN_BIND` to the host address in the
+  sim's `JanusGatewayAdminURI`. The sim uses that address even when it runs on the
+  same host (Legion Grid: `http://192.168.1.225:24225/voiceAdmin` →
+  `JS_ADMIN_BIND=192.168.1.225`), and on a production server it is a different host.
+  So `127.0.0.1` cuts the sim off: its visibility/moderation `peer_ctl_batch` calls
+  are refused. That was the slice-6m regression that hotfix 6m-1 reverted. The HTTP
+  signalling port stays on all interfaces: the sim and the connectors use it, and
+  `api_secret` guards it.
+- **WebSockets (O-55).** `JS_WS_ENABLED` defaults to `true`: Janus loads the
+  transport on `JS_WS_PORT` and compose publishes it, as before the knob existed.
+  The entrypoint prints `[entrypoint] INFO: websockets transport enabled=<value>
+  port=<port>`. The OpenSim sim uses HTTP only, so `JS_WS_ENABLED=false` is an
+  opt-in narrowing: the entrypoint writes `ws = false` and adds the transport to
+  `transports: { disable }`, so Janus does not load it. The compose port mapping
+  stays but answers nothing; delete that line in your compose file to unpublish it.
+- **Fail-closed secrets (O-65).** The container exits 1 at start when either secret
+  is empty or whitespace, naming the keys and the override:
+  `[entrypoint] FATAL: JS_API_SECRET and JS_ADMIN_SECRET empty; refusing to start.
+  Set JS_API_SECRET=<the sim's APIToken> and JS_ADMIN_SECRET=<the sim's
+  AdminAPIToken> in .env, or set ALLOW_INSECURE_DEV=true in .env to start without
+  them (dev only: the API is then open).` A blank secret was always an open API: an
+  empty `JS_API_SECRET` left the Janus API open, and an empty `JS_ADMIN_SECRET` kept
+  the stock template's well-known `admin_secret`. So this is kept as a deliberate
+  **behaviour change on upgrade** (see below). **`ALLOW_INSECURE_DEV=true` is a
+  dev-only override**: it starts anyway, with a WARNING. Use it only on a throwaway
+  local box that nothing else can reach, never on the grid host.
 - **`nat_1_1_mapping` guard and `JS_NAT_EXTRA_IPS`.** After resolving
   `JS_PUBLIC_HOST` (or taking `JS_PUBLIC_IP`), the entrypoint WARNs for each mapped
   address that is RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) or loopback
@@ -123,6 +130,88 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   against a scratch config dir and a stub Janus (the `JANUS_CONF_DIR`,
   `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` overrides exist only for
   it). The image build runs it against the baked script and templates.
+
+## Configuration compatibility rule
+
+Rebuilding or pulling a new image onto an existing `.env` must not silently change
+what a running install does. Slice 6m broke this: its `JS_ADMIN_BIND=127.0.0.1`
+default cut the regionserver off the Admin API, and `JS_WS_ENABLED=false` removed a
+WebSocket transport that had been on and published. Hotfix 6m-1 reverted both
+defaults and wrote down the rule:
+
+- **A new knob's default reproduces the behaviour of the release before it
+  existed.**
+- **Narrowing is always opt-in**: binds, transports, TLS, allow-lists. The operator
+  sets the narrower value; an upgrade never does.
+- **The entrypoint prints the effective value of every security- or
+  connectivity-relevant knob in its first lines** (before anything can fail), so a
+  wrong value is visible in `docker compose logs janus` before anyone logs in.
+  Secrets are shown as `set`/`EMPTY`, never printed.
+- **Every release note lists "Behaviour changes on upgrade" and "One-time
+  migrations"**, even when a list is empty.
+
+A change that must break compatibility for safety (O-65 below) is allowed only if
+it fails loud at start, names the exact keys to set and the override, and appears
+under "Behaviour changes on upgrade".
+
+### Knob register
+
+Every operator knob, its default, what the install did before the knob existed, and
+the commit that introduced it. `46335f5` (2026-08-12) is the first env-driven image;
+its knobs have no "before".
+
+| Variable | Default | Behaviour before the knob existed | Since |
+|---|---|---|---|
+| `JS_SERVER_NAME` | `GridVoice` | original knob | `46335f5` |
+| `JS_HTTP_PORT` | `14223` | original knob | `46335f5` |
+| `JS_HTTP_BASEPATH` | `/voice` | original knob | `46335f5` |
+| `JS_ADMIN_PORT` | `14225` | original knob | `46335f5` |
+| `JS_ADMIN_BASEPATH` | `/voiceAdmin` | original knob | `46335f5` |
+| `JS_RTP_PORT_RANGE` | `10000-10200` | original knob | `46335f5` |
+| `JS_PUBLIC_IP` | *(unset)*: no `nat_1_1_mapping` | original knob | `46335f5` |
+| `JS_API_SECRET` | *(none; required)* | original knob; until `b96e7b3` a blank value started with the Janus API open | `46335f5`; required since `b96e7b3` |
+| `JS_ADMIN_SECRET` | *(none; required)* | original knob; until `b96e7b3` a blank value kept the template's well-known `admin_secret` | `46335f5`; required since `b96e7b3` |
+| `SLV_ECHO_AUTOSTART` | `false` | no echo | `e483799` |
+| `JS_WS_PORT` | `8188` | WebSockets on the stock port 8188 (host networking) | `92d7d73` |
+| `JS_PUBLIC_HOST` | *(unset)* | only `JS_PUBLIC_IP` could set the mapping | `fc39fb5` |
+| `JS_KEEP_PRIVATE_HOST` | `true` when a public address is set, else `false` | Janus default `false`: the mapping replaced host candidates with the public address. **Pre-rule exception**: the `true` default added the private candidate on upgrade | `fc39fb5` |
+| `JS_EMPTY_ROOM_GRACE_S` | `60` | rooms persisted until the mixer restarted. **Pre-rule exception, kept**: an empty non-permanent room is destroyed after 60 s, and the sim self-heals (a join to the destroyed room answers 485 → the sim forgets and re-creates it). `0` restores the old behaviour | `1859a7f` |
+| `JS_ADMIN_BIND` | *(unset)*: all interfaces, with a start-up WARNING | admin API published on all interfaces | `b96e7b3` (default `127.0.0.1`; restored to all interfaces by hotfix 6m-1) |
+| `JS_WS_ENABLED` | `true` | WebSockets transport loaded and published | `b96e7b3` (default `false`; restored to `true` by hotfix 6m-1) |
+| `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
+| `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
+
+`JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` are test
+seams for `tests/entrypoint_test.sh`, not operator knobs.
+
+## Behaviour changes on upgrade
+
+- **`b96e7b3` (slice 6m) + hotfix 6m-1**
+  - **Blank `JS_API_SECRET` or `JS_ADMIN_SECRET` now refuses to start (O-65).**
+    `[entrypoint] FATAL: … empty; refusing to start. Set JS_API_SECRET=<the sim's
+    APIToken> and JS_ADMIN_SECRET=<the sim's AdminAPIToken> in .env, or set
+    ALLOW_INSECURE_DEV=true in .env …`. Set both secrets. `ALLOW_INSECURE_DEV=true`
+    is for a throwaway dev box only.
+  - The plugin's full offer/answer SDP dumps moved from INFO to VERB, with ICE
+    credentials redacted (O-66). Log content only.
+  - New start-up log lines: the effective-value INFO block, the "admin API is
+    reachable on all interfaces" WARNING when `JS_ADMIN_BIND` is unset, and the
+    private-only `nat_1_1_mapping` WARNING. Log content only.
+  - Slice 6m alone also bound admin to `127.0.0.1` and turned WebSockets off.
+    Hotfix 6m-1 reverted both, so upgrading straight to 6m-1 changes neither.
+- **`1859a7f` (slice 5)**: empty non-permanent rooms are destroyed after
+  `JS_EMPTY_ROOM_GRACE_S` (60 s); `0` restores rooms that live until restart.
+- **`fc39fb5` (v0.3.1)**: `keep_private_host` defaults to `true` when a public
+  address is set.
+
+## One-time migrations
+
+- **Regionserver build 1.1.392+ (connectors):** connector NPC ids are now derived
+  and stable. On the first restart after upgrading, each NPC's id changes once, so
+  re-edit `DISPLAY` in `recorder.env` / `injector.env` one last time. See
+  `connectors/README.md`.
+- Mixer configuration: none for hotfix 6m-1. An install upgrading from before
+  `b96e7b3` with a blank secret must set it (above).
 
 ### External access: public hostname and split-horizon ICE
 

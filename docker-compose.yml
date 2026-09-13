@@ -35,15 +35,17 @@ services:
     # without it; media does not. See docs/docker-notes.md → "Windows/Docker
     # Desktop".
     #
-    # O-55: the Admin API is published only on JS_ADMIN_BIND (default 127.0.0.1).
-    # Set it to the address the sim's JanusGatewayAdminURI uses (e.g. the LAN IP
-    # 192.168.1.225); never 0.0.0.0 on a host with a public interface. The
-    # WebSockets transport is off (JS_WS_ENABLED=false) and NOT published here; to
-    # enable it set JS_WS_ENABLED=true AND add docker-compose.ws.yml (see
-    # docs/docker-notes.md → "Binds, secrets and extra NAT addresses").
+    # O-55 narrowing is opt-in: with neither knob set, the ports below are the
+    # pre-6m publish (docs/docker-notes.md → "Configuration compatibility rule").
+    # JS_ADMIN_BIND = the host address the Admin API is published on; unset means
+    # all interfaces (the entrypoint WARNs). To narrow, set it to the address in
+    # the sim's JanusGatewayAdminURI (e.g. 192.168.1.225). JS_WS_ENABLED=false
+    # stops Janus loading the WebSockets transport (the WS mapping then answers
+    # nothing; delete that line to unpublish it too).
     ports:
       - "${JS_HTTP_PORT:-14223}:${JS_HTTP_PORT:-14223}/tcp"                        # HTTP signalling (/voice)
-      - "${JS_ADMIN_BIND:-127.0.0.1}:${JS_ADMIN_PORT:-14225}:${JS_ADMIN_PORT:-14225}/tcp" # Admin/monitor API (/voiceAdmin)
+      - "${JS_ADMIN_BIND:+${JS_ADMIN_BIND:-}:}${JS_ADMIN_PORT:-14225}:${JS_ADMIN_PORT:-14225}/tcp" # Admin/monitor API (/voiceAdmin)
+      - "${JS_WS_PORT:-8188}:${JS_WS_PORT:-8188}/tcp"                              # WebSockets signalling
       - "${JS_RTP_PORT_RANGE:-10000-10200}:${JS_RTP_PORT_RANGE:-10000-10200}/udp" # WebRTC media (RTP/RTCP)
 
     # ── Linux hosts (optional) ───────────────────────────────────────────────
@@ -62,8 +64,12 @@ services:
     # Phase 1B echo-test knob, surfaced explicitly so it's discoverable. Default
     # false. Set SLV_ECHO_AUTOSTART=true in .env for the echo acceptance run (each
     # participant then hears itself ~500ms delayed), then set it back to false.
+    # JS_ADMIN_BIND / JS_WS_ENABLED are passed with their defaults so the
+    # entrypoint's first log lines report the effective values.
     environment:
       - SLV_ECHO_AUTOSTART=${SLV_ECHO_AUTOSTART:-false}
+      - JS_ADMIN_BIND=${JS_ADMIN_BIND:-0.0.0.0}
+      - JS_WS_ENABLED=${JS_WS_ENABLED:-true}
 
     # Keeps voice up across crashes and host reboots. Note for JS_PUBLIC_HOST
     # users: on each (re)start the entrypoint re-resolves the hostname to an

@@ -27,7 +27,9 @@ do not hear it.
 
 `ROOM` and `DISPLAY` come from the sim's registration line, as for the recorder:
 
-    [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=true session=<...>
+    [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=true session=<...> identity=derived
+
+DISPLAY is stable across regionserver restarts from build 1.1.392-alpha+d347102272; set it once.
 
 ## Running
 

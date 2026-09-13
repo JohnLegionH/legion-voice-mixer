@@ -30,8 +30,13 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_ADMIN_PORT:=14225}"
 : "${JS_ADMIN_BASEPATH:=/voiceAdmin}"
 : "${JS_WS_PORT:=8188}"
-# O-55: the WebSockets transport is off unless asked for (the sim uses HTTP only).
-: "${JS_WS_ENABLED:=false}"
+# O-55 knobs. Defaults reproduce the behaviour before the knobs existed (WS on,
+# admin published on all interfaces); narrowing is opt-in. See "Configuration
+# compatibility rule" in docs/docker-notes.md.
+: "${JS_WS_ENABLED:=true}"
+# Host address docker-compose.yml publishes the admin port on. Compose passes it
+# in; the entrypoint only reports it (Janus itself listens on all container addresses).
+: "${JS_ADMIN_BIND:=0.0.0.0}"
 : "${JS_RTP_PORT_RANGE:=10000-10200}"
 : "${JS_PUBLIC_IP:=}"
 : "${JS_PUBLIC_HOST:=}"
@@ -66,18 +71,46 @@ is_private_or_loopback() {
 	return 1
 }
 
+if is_true "$JS_WS_ENABLED"; then JS_WS_ENABLED=true; else JS_WS_ENABLED=false; fi
+if is_true "$ALLOW_INSECURE_DEV"; then ALLOW_INSECURE_DEV=true; else ALLOW_INSECURE_DEV=false; fi
+
+secret_state() {
+	if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo EMPTY; else echo set; fi
+}
+
+# ---- Effective values first (compatibility rule) --------------------------
+# Every security- or connectivity-relevant knob, before anything can fail, so a
+# wrong value is visible in `docker compose logs` before anyone logs in.
+# Secrets are reported as set/EMPTY, never printed.
+echo "[entrypoint] INFO: admin API bind=${JS_ADMIN_BIND} port=${JS_ADMIN_PORT} base_path=${JS_ADMIN_BASEPATH} (JS_ADMIN_BIND)"
+case "$JS_ADMIN_BIND" in
+	0.0.0.0|::|"[::]")
+		echo "[entrypoint] WARNING: admin API is reachable on all interfaces; protected by JS_ADMIN_SECRET only — firewall the port or set JS_ADMIN_BIND to the address the regionserver uses." >&2 ;;
+esac
+echo "[entrypoint] INFO: websockets transport enabled=${JS_WS_ENABLED} port=${JS_WS_PORT} (JS_WS_ENABLED)"
+echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH} rtp=${JS_RTP_PORT_RANGE}"
+echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
+echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
+echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S}"
+
 # ---- O-65: fail closed on empty secrets -----------------------------------
-# An empty JS_API_SECRET leaves the Janus API open to anyone who can reach the
-# HTTP port; an empty JS_ADMIN_SECRET leaves the stock template's well-known
-# admin_secret in force. Refuse to start unless the operator opts in explicitly.
-missing=""
-if [ -z "$(printf '%s' "$JS_API_SECRET" | tr -d '[:space:]')" ];   then missing="JS_API_SECRET"; fi
-if [ -z "$(printf '%s' "$JS_ADMIN_SECRET" | tr -d '[:space:]')" ]; then missing="${missing:+$missing and }JS_ADMIN_SECRET"; fi
+# A blank secret was always an open API: an empty JS_API_SECRET leaves the Janus
+# API open to anyone who can reach the HTTP port, and an empty JS_ADMIN_SECRET
+# leaves the stock template's well-known admin_secret in force. Kept as a
+# deliberate behaviour change on upgrade (docs/docker-notes.md).
+missing=""; set_hint=""
+if [ "$(secret_state "$JS_API_SECRET")" = EMPTY ]; then
+	missing="JS_API_SECRET"; set_hint="JS_API_SECRET=<the sim's APIToken>"
+fi
+if [ "$(secret_state "$JS_ADMIN_SECRET")" = EMPTY ]; then
+	missing="${missing:+$missing and }JS_ADMIN_SECRET"
+	set_hint="${set_hint:+$set_hint and }JS_ADMIN_SECRET=<the sim's AdminAPIToken>"
+fi
 if [ -n "$missing" ]; then
-	if is_true "$ALLOW_INSECURE_DEV"; then
+	if [ "$ALLOW_INSECURE_DEV" = true ]; then
 		echo "[entrypoint] WARNING: ${missing} empty; starting anyway because ALLOW_INSECURE_DEV=true (DEV ONLY — never on a reachable host)" >&2
 	else
-		echo "[entrypoint] FATAL: ${missing} empty; refusing to start. Set both in .env (they must match the sim's APIToken/AdminAPIToken), or ALLOW_INSECURE_DEV=true on a throwaway dev box only" >&2
+		echo "[entrypoint] FATAL: ${missing} empty; refusing to start. Set ${set_hint} in .env, or set ALLOW_INSECURE_DEV=true in .env to start without them (dev only: the API is then open). See docs/docker-notes.md, \"Behaviour changes on upgrade\"." >&2
 		exit 1
 	fi
 fi
@@ -140,7 +173,6 @@ else
 	: "${JS_KEEP_PRIVATE_HOST:=false}"
 fi
 if is_true "$JS_KEEP_PRIVATE_HOST"; then JS_KEEP_PRIVATE_HOST=true; else JS_KEEP_PRIVATE_HOST=false; fi
-if is_true "$JS_WS_ENABLED"; then JS_WS_ENABLED=true; else JS_WS_ENABLED=false; fi
 
 # ---- 1. Restore pristine templates so generation is deterministic every start ----
 if [ -d "$TPL_DIR" ]; then
@@ -209,10 +241,11 @@ set_kv "$HTTP_JCFG" admin_http      true
 set_kv "$HTTP_JCFG" admin_port      "${JS_ADMIN_PORT}"
 set_kv "$HTTP_JCFG" admin_base_path "\"${JS_ADMIN_BASEPATH}\""
 
-# WebSockets signalling transport (O-55: off by default). `ws` anchors to line
-# start so it never collides with `wss`/`admin_ws`/`admin_wss`; `ws_port`
-# likewise never matches `admin_ws_port`. The container's internal WS port
-# tracks JS_WS_PORT so the port mapping in docker-compose.ws.yml stays symmetric.
+# WebSockets signalling transport (on by default, as before O-55; JS_WS_ENABLED=false
+# narrows). `ws` anchors to line start so it never collides with `wss`/`admin_ws`/
+# `admin_wss`; `ws_port` likewise never matches `admin_ws_port`. The container's
+# internal WS port tracks JS_WS_PORT so the port mapping in docker-compose.yml
+# stays symmetric.
 if [ "$JS_WS_ENABLED" = true ]; then
 	set_kv "$WS_JCFG" ws      true
 	set_kv "$WS_JCFG" ws_port "${JS_WS_PORT}"
