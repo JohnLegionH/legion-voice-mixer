@@ -32,6 +32,10 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_PUBLIC_HOST:=}"
 : "${JS_API_SECRET:=}"
 : "${JS_ADMIN_SECRET:=}"
+# O-54: seconds a non-permanent mixer room may stay empty before the plugin destroys it
+# (0 disables). The plugin reads it from the process environment, so it is exported here.
+: "${JS_EMPTY_ROOM_GRACE_S:=60}"
+export JS_EMPTY_ROOM_GRACE_S
 
 # ---- Public address resolution --------------------------------------------
 # Janus's nat_1_1_mapping needs an IPv4 *literal*, not a hostname. When
@@ -148,5 +152,5 @@ if [ -d "$OVERRIDE_DIR" ]; then
 	done
 fi
 
-echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${JS_WS_PORT} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST}"
+echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${JS_WS_PORT} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST} empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S}"
 exec /opt/janus/bin/janus "$@"

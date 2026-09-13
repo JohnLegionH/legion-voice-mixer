@@ -58,6 +58,7 @@ over the whole config dir by default (that was the old model).
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
 | `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
 | `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` | `8188` |
+| `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed (O-54); `0` disables; an invalid value is ignored with a WARN | `60` |
 
 The entrypoint also forces `http = true`, `admin_http = true`, and `ws = true`.
 `sed` substitutions are anchored to line start so `http`/`port`/`base_path`

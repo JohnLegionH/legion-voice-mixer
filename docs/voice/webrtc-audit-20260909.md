@@ -292,16 +292,16 @@ All [SRC: source] at `691a52bb9c` / `230ac0f` unless marked.*
 
 | # | Slice | Repo | Est. | Stop at | Status |
 |---|---|---|---|---|---|
-| 1 | O-48 parcel derivation from position (+ tests) | sim | 25 | 50 | DONE 2026-09-12, 7 min, `7191e9b6a1` — not deployed |
-| 2 | O-49 mute set + O-64 geometry merge + O-70 + O-69 ptime | mixer | 30 | 60 | issued 2026-09-12 |
-| 3 | O-50 + O-51: timeout on ack'd requests, fault pending on destroy/exit, lock every dictionary access | sim | 25 | 50 | |
-| 4 | O-52 + O-53: child-agent guard; register-on-success; `:232` return check | sim | 25 | 50 | |
+| 1 | O-48 parcel derivation from position (+ tests) | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`7191e9b6a1`, 7 min; O-48a hotfix `0f19e4e584`) |
+| 2 | O-49 mute set + O-64 geometry merge + O-70 + O-69 ptime | mixer | 30 | 60 | DONE + DEPLOYED 2026-09-12; O-64, O-69 verified live 2026-09-13, O-49 live check pending (second avatar) |
+| 3 | O-50 + O-51: timeout on ack'd requests, fault pending on destroy/exit, lock every dictionary access | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`3ca74633df`) |
+| 4 | O-52 + O-53: child-agent guard; register-on-success; `:232` return check | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`afe2df635d`) |
 | 5 | O-54 + O-56 + O-68 + O-67: empty-room grace destroy with `reset_room_state()`; `hangup_media` leaves; init cleanup | mixer | 35 | 70 | |
 | 6 | O-55 + O-65 + O-57 + O-66: compose binds; fail-closed secrets; ini = example; SDP log level | both | 15 | 30 | |
 | 7 | O-60 sweep + O-63 deterministic NPC identity | sim | 25 | 50 | |
 | 8 | O-71 doc resync + push/PR CI + aiortc two-peer integration test | mixer | 30 | 60 | |
 
-Sim slices deploy together (regionserver restart, Debug voice DLLs per the convention); mixer
+Sim slices deploy together (regionserver restart, Release voice DLLs (the 08-31 Debug rule is superseded)); mixer
 slices are one container rebuild each. Slice 6 needs no deploy beyond a compose `up -d`.
 
 ## 8. Addendum 2026-09-11/12 — reconciliation with a second audit, and the live read
@@ -331,3 +331,5 @@ showed one avatar legitimately holding two mixer handles (Ebony room `226001844`
 neighbour-region room `1578726032`, identical `rtp_in_count`) because the LL viewer opens a
 spatial connection to each adjacent region — not a leak. Live endpoints: `24223/voice`,
 `24225/voiceAdmin` (not the `env.sample` defaults).
+
+**2026-09-13:** Aleric's missing voice dot (2026-09-13) was the experimental Firestorm build, not NAT hairpin; stable Firestorm works from the LAN laptop — the LAN-candidate entrypoint change is dropped.

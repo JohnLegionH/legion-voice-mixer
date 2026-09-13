@@ -100,6 +100,12 @@
 
 /* Mixer->client SLData power/VAD batch cadence (spec §9: ~100ms). */
 #define SLV_POWER_TICK_MS   100
+/* O-54: a non-permanent room that has had no participants for this many seconds is destroyed by
+ * the sender thread (janus_slvoice_sweep_empty_rooms_locked). Runtime override: the process env
+ * JS_EMPTY_ROOM_GRACE_S (the entrypoint exports it; 0 disables, i.e. the pre-O-54 behaviour). */
+#ifndef SLV_EMPTY_ROOM_GRACE_S
+#define SLV_EMPTY_ROOM_GRACE_S 60
+#endif
 
 /* ---- Phase 2 mixer / audio constants --------------------------------------
  * Everything runs at Opus fullband stereo (matching the negotiated
@@ -270,11 +276,16 @@ static GThread *handler_thread = NULL;   /* async request handler */
 static GThread *sender_thread = NULL;    /* ~100ms mixer->client SLData ticker */
 static void *janus_slvoice_handler(void *data);
 static void *janus_slvoice_sender(void *data);
+static void janus_slvoice_teardown(void);   /* O-67: shared by destroy() and a failed init */
 
 /* When set (SLV_ECHO_AUTOSTART / general.echo_autostart), echo is enabled for
  * every participant the moment its PeerConnection is up — so a stock viewer,
  * which cannot send the {"echo":true} SLData toggle, still hears itself. */
 static gboolean echo_autostart = FALSE;
+
+/* O-54: empty-room grace in seconds (SLV_EMPTY_ROOM_GRACE_S, env JS_EMPTY_ROOM_GRACE_S, parsed in
+ * janus_slvoice_init). 0 disables the grace destroy. */
+static guint slv_empty_room_grace_s = SLV_EMPTY_ROOM_GRACE_S;
 
 /* ---- Rooms (slv_regions) and participants (folded into the session) -------
  * One WebRTC peer = one participant. A room is a lightweight membership +
@@ -284,7 +295,11 @@ typedef struct janus_slvoice_room {
 	guint64 room_id;
 	char *description;
 	gboolean is_private;
-	gboolean permanent;         /* loaded from static config (not saved on destroy) */
+	gboolean permanent;         /* loaded from static config (not saved on destroy); never grace-destroyed */
+	gint64 empty_since;         /* O-54: monotonic us the room became empty (created with no one, or the last
+	                             * participant left); 0 while occupied, and always 0 for a permanent room.
+	                             * Guarded by mutex. A join clears it; the sender's sweep destroys the room
+	                             * once it is older than slv_empty_room_grace_s. */
 	guint32 sampling_rate;      /* advertised in list; internal mix rate is fixed 48k */
 	gboolean spatial_audio;
 	GHashTable *participants;    /* guint64* user_id -> janus_slvoice_session* (borrowed) */
@@ -523,6 +538,9 @@ static void janus_slvoice_echo_stop_locked(janus_slvoice_session *s);
 static gboolean janus_slvoice_room_start(janus_slvoice_room *room);
 static void janus_slvoice_room_stop(janus_slvoice_room *room);
 
+/* O-68: room-scoped session state reset (defined with the room teardown, below leave_room). */
+static void janus_slvoice_reset_room_state_locked(janus_slvoice_session *s);
+
 /* ---- Room helpers -------------------------------------------------------- */
 
 static void janus_slvoice_room_free(const janus_refcount *ref) {
@@ -549,8 +567,19 @@ static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *des
 	janus_mutex_init(&room->mutex);
 	janus_refcount_init(&room->ref, janus_slvoice_room_free);
 	slv_deferred_init(&room->vis_deferred);   /* empty deferred store (g_malloc0 already zeroed it) */
+	/* O-54: a room is born empty, so a non-permanent one starts its grace clock now; the first join
+	 * clears it. A room the sim creates but nobody ever joins (a failed provision) is then reclaimed
+	 * too, instead of ticking forever. Set before the ticker starts; nothing else can see the room yet. */
+	if(!permanent)
+		room->empty_since = janus_get_monotonic_time();
 	/* Start the per-region 20ms mix tick thread (the mixer.h slv_region model). */
-	janus_slvoice_room_start(room);
+	if(!janus_slvoice_room_start(room)) {
+		/* O-67: a room without its tick thread would admit joins and mix nothing, silently. Fail the
+		 * create instead: drop the creation reference (room_start already dropped the ticker's), which
+		 * frees the room, and let the caller report the error. */
+		janus_refcount_decrease(&room->ref);
+		return NULL;
+	}
 	return room;
 }
 
@@ -609,23 +638,132 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: next room re-proves */
 	janus_mutex_lock(&room->mutex);
 	g_hash_table_remove(room->participants, &uid);
+	/* O-54: the last participant is gone -- start the grace clock. The sender's sweep destroys the room
+	 * once it expires; a join clears it. A permanent room never gets one. */
+	if(!room->permanent && g_hash_table_size(room->participants) == 0)
+		room->empty_since = janus_get_monotonic_time();
 	janus_mutex_unlock(&room->mutex);
-	/* Clear the sim-sourced exclusion set. It is membership state for the room we
-	 * just left; a session that rejoins must not carry it into the next room.
-	 * Emptied, NOT destroyed: apply_visbatch dereferences L->excluded directly and
-	 * would crash on a NULL table, so only session_free frees it. remove_all runs
-	 * the g_free key destructor the table was created with, so no key leaks. Done
-	 * AFTER the participants removal so a batch mid-apply under room->mutex cannot
-	 * repopulate the set we just cleared. */
+	/* O-68: reset ALL room-scoped state (this used to clear only `excluded` and, since O-49, `mod_muted`).
+	 * Done AFTER the participants removal so a batch mid-apply under room->mutex cannot repopulate what
+	 * we just cleared, and the old room's tick no longer reads this session's geometry snapshot. */
 	janus_mutex_lock(&session->mutex);
-	if(session->excluded != NULL)
-		g_hash_table_remove_all(session->excluded);
-	/* O-49: the moderation-mute set is room membership state too; the sim re-sends it (or the
-	 * deferred replay restores it) for the next room. Emptied, not destroyed, like `excluded`. */
-	if(session->mod_muted != NULL)
-		g_hash_table_remove_all(session->mod_muted);
+	janus_slvoice_reset_room_state_locked(session);
 	janus_mutex_unlock(&session->mutex);
 	janus_refcount_decrease(&room->ref);
+}
+
+/* O-68: clear every piece of ROOM-SCOPED session state, so a session that leaves a room by any path --
+ * its own "leave", destroy_session, hangup_media (O-56), an explicit room destroy, or the empty-room
+ * grace destroy (O-54) -- carries nothing into the next room it joins:
+ *   - the sim's exclusion set and moderation-mute set. Emptied, NOT destroyed: apply_visbatch and the
+ *     mix dereference them without a NULL check, so only session_free frees them; remove_all runs the
+ *     g_free key destructor, so no key leaks. The sim re-sends both for the next room, or that room's
+ *     deferred replay restores them at join;
+ *   - the distance-cull hysteresis latches and the tick's geometry snapshot;
+ *   - the SLData geometry (sp/sh/lp/lh) and presence markers (j/l) with their bits, and the latest-
+ *     message diagnostic mask -- coordinates in the old room's region mean nothing in the next one;
+ *   - backlog_confirmed (M-A2A-3: the next room's roster must be re-proven).
+ * Deferred columns are held by the ROOM (vis_deferred), not the session, and are freed with it.
+ * NOT cleared, because it belongs to the viewer and not the room: peer_ctl (the viewer's own per-source
+ * mutes/gains), the echo setting, the viewer's own m/ug/echo SLData values, media/codecs, identity.
+ * session->mutex held; the session must already be out of its room's participants (or the room's tick
+ * thread already joined). */
+static void janus_slvoice_reset_room_state_locked(janus_slvoice_session *s) {
+	if(s->excluded != NULL)
+		g_hash_table_remove_all(s->excluded);
+	if(s->mod_muted != NULL)
+		g_hash_table_remove_all(s->mod_muted);
+	memset(s->cull_hyst, 0, sizeof(s->cull_hyst));
+	s->n_cull_hyst = 0;
+	memset(&s->snap_sp, 0, sizeof(s->snap_sp));
+	memset(&s->snap_lp, 0, sizeof(s->snap_lp));
+	s->snap_lh = (slv_quat){ 0.0, 0.0, 0.0, 1.0 };
+	s->snap_valid = FALSE;
+	memset(&s->last_data.sp, 0, sizeof(s->last_data.sp));
+	memset(&s->last_data.sh, 0, sizeof(s->last_data.sh));
+	memset(&s->last_data.lp, 0, sizeof(s->last_data.lp));
+	memset(&s->last_data.lh, 0, sizeof(s->last_data.lh));
+	s->last_data_fields &= ~(unsigned)(SLV_FIELD_J | SLV_FIELD_L | SLV_FIELD_SP | SLV_FIELD_SH | SLV_FIELD_LP | SLV_FIELD_LH);
+	s->last_msg_fields = 0;
+	g_atomic_int_set(&s->backlog_confirmed, 0);
+}
+
+/* O-54/O-68: the ONE room teardown, shared by the explicit "destroy" request and the empty-room grace
+ * sweep. Caller holds rooms_mutex and the room is still in `rooms`. Marks the room destroyed (so
+ * room_ref_by_id refuses it and a join already holding a ref fails its insert with 485), joins the tick
+ * thread (rooms_mutex held but NOT room->mutex -- the ticker takes room->mutex), evicts every straggler
+ * with its room-scoped state reset, frees the deferred columns, and removes the room from `rooms`. The
+ * reference the `rooms` table held passes to the caller, who must drop it. Stragglers are evicted
+ * silently, as the destroy request always did (no "l"). Lock order rooms_mutex -> room->mutex ->
+ * session->mutex. */
+static void janus_slvoice_room_teardown_locked(janus_slvoice_room *room) {
+	guint64 room_id = room->room_id;
+	g_atomic_int_set(&room->destroyed, 1);
+	janus_slvoice_room_stop(room);
+	janus_mutex_lock(&room->mutex);
+	GList *members = g_hash_table_get_values(room->participants);
+	for(GList *mi = members; mi != NULL; mi = mi->next) {
+		janus_slvoice_session *p = (janus_slvoice_session *)mi->data;
+		gboolean unref = FALSE;
+		janus_mutex_lock(&p->mutex);
+		if(p->room == room) {
+			/* Only the caller that flips room non-NULL -> NULL drops the session's ref, so a racing
+			 * leave_room / destroy_session cannot drop it twice. */
+			p->room = NULL;
+			janus_slvoice_reset_room_state_locked(p);   /* O-68: this arm used to only null `room` */
+			unref = TRUE;
+		}
+		janus_mutex_unlock(&p->mutex);
+		if(unref)
+			janus_refcount_decrease(&room->ref);
+	}
+	g_list_free(members);
+	g_hash_table_remove_all(room->participants);
+	slv_deferred_free_all(&room->vis_deferred);   /* drop deferred columns for this destroyed room */
+	janus_mutex_unlock(&room->mutex);
+	g_hash_table_remove(rooms, &room_id);
+}
+
+/* O-54: destroy every non-permanent room that has been empty for at least slv_empty_room_grace_s.
+ * Called by the sender thread about once a second with rooms_mutex held; `now` is a parameter so the
+ * unit test drives the clock. The expiry decision and the destroyed flag are taken together under
+ * room->mutex, the lock the join arm inserts under: either the join lands first (the room is occupied
+ * and empty_since is 0, so it is not expired) or the room is marked destroyed first (the join sees that
+ * and answers 485, which the sim self-heals: ForgetRoom, then the retry re-creates). Returns the number
+ * of rooms destroyed. */
+static guint janus_slvoice_sweep_empty_rooms_locked(gint64 now) {
+	if(slv_empty_room_grace_s == 0 || rooms == NULL)
+		return 0;
+	gint64 grace_us = (gint64)slv_empty_room_grace_s * G_USEC_PER_SEC;
+	GList *expired = NULL;
+	GHashTableIter iter;
+	gpointer value;
+	g_hash_table_iter_init(&iter, rooms);
+	while(g_hash_table_iter_next(&iter, NULL, &value)) {
+		janus_slvoice_room *room = value;
+		if(room == NULL || room->permanent || g_atomic_int_get(&room->destroyed))
+			continue;
+		janus_mutex_lock(&room->mutex);
+		if(room->empty_since != 0 && g_hash_table_size(room->participants) == 0
+				&& now - room->empty_since >= grace_us) {
+			g_atomic_int_set(&room->destroyed, 1);
+			expired = g_list_prepend(expired, room);
+		}
+		janus_mutex_unlock(&room->mutex);
+	}
+	guint n = 0;
+	for(GList *l = expired; l != NULL; l = l->next) {
+		janus_slvoice_room *room = l->data;
+		guint64 room_id = room->room_id;
+		gint64 empty_us = now - room->empty_since;   /* destroyed and empty: nothing writes it any more */
+		janus_slvoice_room_teardown_locked(room);
+		JANUS_LOG(LOG_INFO, "[slvoice] room %"PRIu64" destroyed after %us empty\n",
+			room_id, (unsigned)(empty_us / G_USEC_PER_SEC));
+		janus_refcount_decrease(&room->ref);   /* the `rooms` table's reference */
+		n++;
+	}
+	g_list_free(expired);
+	return n;
 }
 
 /* ---- Mixer->client SLData (data channel send) ---------------------------- */
@@ -848,11 +986,17 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 		janus_mutex_lock(&rooms_mutex);
 		if(g_hash_table_lookup(rooms, &room_id) == NULL) {
 			janus_slvoice_room *room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, TRUE);
-			guint64 *key = g_malloc(sizeof(guint64));
-			*key = room_id;
-			g_hash_table_insert(rooms, key, room);
-			JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config\n",
-				JANUS_SLVOICE_PACKAGE, room_id, room->description);
+			if(room == NULL) {
+				/* O-67: its tick thread could not start (logged by room_start); skip the room. */
+				JANUS_LOG(LOG_ERR, "[%s] Static room %"PRIu64" not loaded: room creation failed\n",
+					JANUS_SLVOICE_PACKAGE, room_id);
+			} else {
+				guint64 *key = g_malloc(sizeof(guint64));
+				*key = room_id;
+				g_hash_table_insert(rooms, key, room);
+				JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config\n",
+					JANUS_SLVOICE_PACKAGE, room_id, room->description);
+			}
 		}
 		janus_mutex_unlock(&rooms_mutex);
 	}
@@ -981,6 +1125,27 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 		JANUS_LOG(LOG_INFO, "[%s] SLV_ECHO_AUTOSTART enabled — echo starts automatically on connect\n",
 			JANUS_SLVOICE_PACKAGE);
 
+	/* O-54: empty-room grace from the process env (the entrypoint exports JS_EMPTY_ROOM_GRACE_S; .env
+	 * overrides its default). 0 disables the grace destroy; anything that is not an integer in
+	 * 0..86400 is ignored with a WARN and the compiled default stands. */
+	slv_empty_room_grace_s = SLV_EMPTY_ROOM_GRACE_S;
+	const char *grace_env = getenv("JS_EMPTY_ROOM_GRACE_S");
+	if(grace_env != NULL && *grace_env != '\0') {
+		char *grace_end = NULL;
+		long grace = strtol(grace_env, &grace_end, 10);
+		if(grace_end != NULL && *grace_end == '\0' && grace >= 0 && grace <= 86400)
+			slv_empty_room_grace_s = (guint)grace;
+		else
+			JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_EMPTY_ROOM_GRACE_S='%s' (want an integer 0-86400); using %u s\n",
+				JANUS_SLVOICE_PACKAGE, grace_env, slv_empty_room_grace_s);
+	}
+	if(slv_empty_room_grace_s > 0)
+		JANUS_LOG(LOG_INFO, "[%s] Empty-room grace destroy: non-permanent rooms empty for %u s are destroyed (JS_EMPTY_ROOM_GRACE_S)\n",
+			JANUS_SLVOICE_PACKAGE, slv_empty_room_grace_s);
+	else
+		JANUS_LOG(LOG_INFO, "[%s] Empty-room grace destroy DISABLED (JS_EMPTY_ROOM_GRACE_S=0): rooms live until an explicit destroy\n",
+			JANUS_SLVOICE_PACKAGE);
+
 	/* Amendment 8: runtime spatial DSP overrides from [general]; metres->stored
 	 * converted once here, validated, defaults kept on any bad value. Must run
 	 * BEFORE janus_config_destroy, which frees the parsed config. */
@@ -995,19 +1160,21 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 	GError *error = NULL;
 	handler_thread = g_thread_try_new("slvoice handler", janus_slvoice_handler, NULL, &error);
 	if(error != NULL) {
-		g_atomic_int_set(&initialized, 0);
 		JANUS_LOG(LOG_ERR, "[%s] Got error %d (%s) launching the handler thread\n",
 			JANUS_SLVOICE_PACKAGE, error->code, error->message ? error->message : "??");
 		g_error_free(error);
+		handler_thread = NULL;
+		janus_slvoice_teardown();   /* O-67: free the tables and the static rooms' tick threads */
 		return -1;
 	}
 	error = NULL;
 	sender_thread = g_thread_try_new("slvoice sender", janus_slvoice_sender, NULL, &error);
 	if(error != NULL) {
-		g_atomic_int_set(&initialized, 0);
 		JANUS_LOG(LOG_ERR, "[%s] Got error %d (%s) launching the sender thread\n",
 			JANUS_SLVOICE_PACKAGE, error->code, error->message ? error->message : "??");
 		g_error_free(error);
+		sender_thread = NULL;
+		janus_slvoice_teardown();   /* O-67: also stops and joins the handler thread already running */
 		return -1;
 	}
 
@@ -1019,6 +1186,16 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 void janus_slvoice_destroy(void) {
 	if(!g_atomic_int_get(&initialized))
 		return;
+	janus_slvoice_teardown();
+	JANUS_LOG(LOG_INFO, "%s destroyed!\n", JANUS_SLVOICE_NAME);
+}
+
+/* O-67: the ONE teardown of plugin-global state, shared by destroy() and a failed init. A thread-
+ * creation failure in init used to set initialized=0 and return with the tables, the static rooms' tick
+ * threads and (on a sender failure) a running handler thread all left live -- and destroy() refuses to
+ * run when initialized==0, so nothing could ever clean them up. Every step is NULL-safe, so this runs
+ * whichever threads were actually started; it ends with initialized=0 and stopping=0 and nothing live. */
+static void janus_slvoice_teardown(void) {
 	g_atomic_int_set(&stopping, 1);
 
 	if(messages != NULL)
@@ -1063,7 +1240,6 @@ void janus_slvoice_destroy(void) {
 	gateway = NULL;
 	g_atomic_int_set(&initialized, 0);
 	g_atomic_int_set(&stopping, 0);
-	JANUS_LOG(LOG_INFO, "%s destroyed!\n", JANUS_SLVOICE_NAME);
 }
 
 int janus_slvoice_get_api_compatibility(void) {
@@ -1928,6 +2104,13 @@ static void *janus_slvoice_handler(void *data) {
 				goto respond;
 			}
 			room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, permanent);
+			if(room == NULL) {
+				/* O-67: the room's tick thread could not start; nothing was inserted. */
+				janus_mutex_unlock(&rooms_mutex);
+				error_code = JANUS_SLVOICE_ERROR_UNKNOWN;
+				g_snprintf(error_cause, 512, "Room %"PRIu64" could not be created (tick thread failed to start)", room_id);
+				goto respond;
+			}
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = room_id;
 			g_hash_table_insert(rooms, key, room);
@@ -1956,35 +2139,13 @@ static void *janus_slvoice_handler(void *data) {
 				g_snprintf(error_cause, 512, "No such room (%"PRIu64")", room_id);
 				goto respond;
 			}
-			g_atomic_int_set(&room->destroyed, 1);
-			/* Stop the mix tick thread before evicting (join it while holding
-			 * rooms_mutex but NOT room->mutex — the ticker takes room->mutex). */
-			janus_slvoice_room_stop(room);
-			/* Evict participants: each session we transition out drops the ref
-			 * it held (mutex makes the transition unique). */
-			janus_mutex_lock(&room->mutex);
-			GList *members = g_hash_table_get_values(room->participants);
-			GList *mi = members;
-			while(mi != NULL) {
-				janus_slvoice_session *p = (janus_slvoice_session *)mi->data;
-				mi = mi->next;
-				gboolean unref = FALSE;
-				janus_mutex_lock(&p->mutex);
-				if(p->room == room) {
-					p->room = NULL;
-					unref = TRUE;
-				}
-				janus_mutex_unlock(&p->mutex);
-				if(unref)
-					janus_refcount_decrease(&room->ref);
-			}
-			g_list_free(members);
-			g_hash_table_remove_all(room->participants);
-			slv_deferred_free_all(&room->vis_deferred);   /* drop deferred columns for this destroyed room */
-			janus_mutex_unlock(&room->mutex);
-			g_hash_table_remove(rooms, &room_id);
+			/* O-54/O-68: the shared teardown -- stop and join the tick thread, evict stragglers with their
+			 * room-scoped state reset (this arm used to only null `room`, leaving `excluded` and the rest to
+			 * leak into the evicted session's next room), free deferred columns, remove from `rooms`. The
+			 * empty-room grace sweep uses the same function. */
+			janus_slvoice_room_teardown_locked(room);
 			janus_mutex_unlock(&rooms_mutex);
-			janus_refcount_decrease(&room->ref);
+			janus_refcount_decrease(&room->ref);   /* the `rooms` table's reference */
 
 			event = json_object();
 			json_object_set_new(event, "audiobridge", json_string("destroyed"));
@@ -2065,6 +2226,24 @@ static void *janus_slvoice_handler(void *data) {
 					JANUS_SLVOICE_PACKAGE, msg->handle);
 			janus_mutex_unlock(&session->mutex);
 			janus_mutex_lock(&room->mutex);
+			if(g_atomic_int_get(&room->destroyed)) {
+				/* O-54: the room was destroyed -- by the empty-room grace sweep or an explicit destroy --
+				 * after room_ref_by_id above and before this insert (both destroy paths set the flag under
+				 * room->mutex, so this check is exact). Undo the membership and answer 485, exactly as for a
+				 * room that was never there: the sim forgets its room hint and the retry re-creates it. */
+				janus_mutex_unlock(&room->mutex);
+				janus_mutex_lock(&session->mutex);
+				if(session->room == room)
+					session->room = NULL;
+				janus_slvoice_media_free_locked(session);
+				janus_mutex_unlock(&session->mutex);
+				janus_refcount_decrease(&room->ref);
+				g_free(answer_sdp);
+				error_code = JANUS_SLVOICE_ERROR_NO_SUCH_ROOM;
+				g_snprintf(error_cause, 512, "No such room (%"PRIu64")", room_id);
+				goto respond;
+			}
+			room->empty_since = 0;   /* O-54: a join cancels the grace destroy */
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = user_id;
 			g_hash_table_insert(room->participants, key, session);
@@ -2266,11 +2445,18 @@ respond:
  * viewer receives valid state and renders a (silent) voice dot. */
 static void *janus_slvoice_sender(void *data) {
 	JANUS_LOG(LOG_VERB, "[%s] Joining sender thread\n", JANUS_SLVOICE_PACKAGE);
+	guint sweep_ticks = 0;
 	while(g_atomic_int_get(&initialized) && !g_atomic_int_get(&stopping)) {
 		g_usleep(SLV_POWER_TICK_MS * 1000);
 		if(g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
 			break;
 		janus_mutex_lock(&rooms_mutex);
+		/* O-54: about once a second, destroy the rooms that have been empty past the grace. Runs before
+		 * the power batch below, so a room destroyed here is not visited this pass. */
+		if(++sweep_ticks >= 1000 / SLV_POWER_TICK_MS) {
+			sweep_ticks = 0;
+			janus_slvoice_sweep_empty_rooms_locked(janus_get_monotonic_time());
+		}
 		GHashTableIter riter;
 		gpointer rvalue;
 		g_hash_table_iter_init(&riter, rooms);
@@ -3240,16 +3426,18 @@ void janus_slvoice_slow_link(janus_plugin_session *handle, int mindex, gboolean 
 		JANUS_SLVOICE_PACKAGE, handle, mindex, video ? "video" : "audio", uplink ? "uplink" : "downlink");
 }
 
-/* M-A2A-2 decision, recorded: a downed PeerConnection does NOT announce a leave here.
- * hangup_media never removes the participant from the room (deliberate, pre-existing),
- * and Janus can renegotiate media on the SAME handle (setup_media flips webrtc_up back
- * without a rejoin) — an "l" pushed here during an ICE restart would erase the
- * participant's row on every remaining viewer with no "j" ever coming to restore it
- * (the viewer re-adds only on a join notice), manufacturing a new row-suppression bug.
- * The announce therefore rides the REMOVAL, in janus_slvoice_leave_room, which
- * destroy_session always reaches on a real teardown; the gap between PC-death and
- * destroy is the sim's Handle_Hangup -> DisconnectViewerSession -> Shutdown chain,
- * which runs immediately. */
+/* O-56 (audit W-9): a downed PeerConnection LEAVES the room, as audiobridge's hangup_media does.
+ * It used to only drop webrtc_up/dc_open and stop echo, so a dead PC kept its roster row on every
+ * remaining viewer and one SLV_MAX_MIX capacity slot until destroy_session -- and when the sim's
+ * teardown never came, forever. Now: janus_slvoice_leave_room announces the "l", removes the
+ * participant, resets its room-scoped state (O-68) and, if it was the last member, starts the room's
+ * grace clock (O-54); media_free releases the codecs and buffers and clears jb_have_first/jb_primed,
+ * and the cursors and the RTP liveness stamp are zeroed here, so a renegotiated PC starts clean.
+ * This SUPERSEDES the M-A2A-2 decision previously recorded here (hangup never leaves, because a
+ * renegotiation on the same handle might follow without a rejoin): after a hangup the participant must
+ * re-join, which is what the stock flow does anyway -- the sim's Handle_Hangup tears the viewer session
+ * down and the viewer re-provisions. Idempotent: the sim's later "leave" gets NOT_JOINED (handled), and
+ * destroy_session's leave_room finds room == NULL and does nothing. */
 void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 	JANUS_LOG(LOG_INFO, "[%s-%p] WebRTC media is gone (PeerConnection down)\n", JANUS_SLVOICE_PACKAGE, handle);
 	if(g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
@@ -3260,7 +3448,15 @@ void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 	g_atomic_int_set(&session->webrtc_up, 0);
 	g_atomic_int_set(&session->dc_open, 0);
 	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: a re-attach must re-prove */
+	/* Leave FIRST (blocks on room->mutex while a tick runs, so the tick is done with this participant),
+	 * THEN free its media -- the same order destroy_session and the "leave" arm use. */
+	janus_slvoice_leave_room(session);
 	janus_mutex_lock(&session->mutex);
 	janus_slvoice_echo_stop_locked(session);
+	janus_slvoice_media_free_locked(session);
+	session->jb_next = 0;
+	session->jb_newest = 0;
+	session->jb_first_seq = 0;
+	session->last_rtp_us = 0;   /* the active-set cull restarts from the next packet */
 	janus_mutex_unlock(&session->mutex);
 }

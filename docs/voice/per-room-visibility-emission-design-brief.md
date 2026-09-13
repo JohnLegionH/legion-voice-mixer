@@ -406,14 +406,22 @@ every column in that state would have been empty and estate-channel enforcement 
 silently collapsed. The source-side fallback is therefore load-bearing for this skew, not
 cosmetic; see §7.
 
-**When `unknown_room` can legitimately occur after this fix.** Rooms are never destroyed on
-empty: the `g_hash_table_size(room->participants) == 0` test at `janus_slvoice.c:1920` is the
-sender skipping idle rooms, and no sim-side path calls `JanusAudioBridge.DestroyRoom`. A
-recorded room therefore exists until the mixer restarts. After a mixer restart every recorded
-room is unknown until its agents re-provision — a pre-existing condition for the estate room,
-now visible per room in the mixer log. This is why OQ5's inner-reply result never latches:
-`unknown_room` is the normal signature of a mixer restart, and it heals by itself through the
-pending-join path as agents re-provision.
+**When `unknown_room` can legitimately occur after this fix.** *Amended 2026-09-13 (O-54, mixer
+slice 5):* a non-permanent room is **destroyed once it has been empty for the grace period** —
+`JS_EMPTY_ROOM_GRACE_S`, default 60 s, 0 disables. The grace clock starts when the last
+participant leaves (or at creation, for a room nobody joined); a join cancels it. The sender
+thread sweeps about once a second and tears the room down through the same path as an explicit
+`destroy` (tick thread joined, stragglers' room-scoped state reset, removed from `rooms`), logging
+`[slvoice] room <id> destroyed after <n>s empty`. Rooms loaded from static config (`permanent`)
+are never grace-destroyed. No sim-side path calls `JanusAudioBridge.DestroyRoom`, and none is
+needed: a recorded room that was grace-destroyed is unknown to the mixer until its agents
+re-provision, when the sim's `_knownRooms` hint makes the join fail once with 485, `ForgetRoom`
+fires, and the retry creates the room (the self-heal observed live 2026-09-13 10:18:41). So
+`unknown_room` for a batch now has two normal signatures — a mixer restart, and a room that sat
+empty past the grace — and both heal by themselves through the pending-join path as agents
+re-provision. This is why OQ5's inner-reply result never latches. *(Before O-54 rooms were never
+destroyed on empty: the sender skipped idle rooms and a recorded room lived until the mixer
+restarted.)*
 
 ## 5. Verification plan
 
