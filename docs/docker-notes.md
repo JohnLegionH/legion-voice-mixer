@@ -49,23 +49,80 @@ over the whole config dir by default (that was the old model).
 | `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping` (only if set) | *(unset)* |
 | `JS_PUBLIC_HOST` | resolved to IPv4 at start → `nat_1_1_mapping` (overrides `JS_PUBLIC_IP`) | *(unset)* |
 | `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
-| `JS_API_SECRET` | `janus.jcfg` → `api_secret` (only if set) | *(unset)* |
-| `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret` (only if set) | *(unset)* |
+| `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the public address (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
+| `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
+| `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
+| `ALLOW_INSECURE_DEV` | no jcfg key — `true` lets the container start with an empty secret. **Dev only** | `false` |
 | `JS_RTP_PORT_RANGE` | `janus.jcfg` → `rtp_port_range` | `10000-10200` |
 | `JS_SERVER_NAME` | `janus.jcfg` → `server_name` | `GridVoice` |
 | `JS_HTTP_PORT` | `janus.transport.http.jcfg` → `port` | `14223` |
 | `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/voice` |
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
 | `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
-| `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` | `8188` |
+| `JS_ADMIN_BIND` | no jcfg key — the host address `docker-compose.yml` publishes the admin port on (O-55) | `127.0.0.1` |
+| `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; when `false` the entrypoint also sets `transports: { disable = "libjanus_websockets.so" }` (O-55) | `false` |
+| `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (only when `JS_WS_ENABLED=true`) | `8188` |
 | `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed (O-54); `0` disables; an invalid value is ignored with a WARN | `60` |
 
-The entrypoint also forces `http = true`, `admin_http = true`, and `ws = true`.
+The entrypoint also forces `http = true` and `admin_http = true`, and sets `ws`
+from `JS_WS_ENABLED`.
 `sed` substitutions are anchored to line start so `http`/`port`/`base_path`
 never collide with `admin_http`/`admin_port`/`admin_base_path`, and `ws`/`ws_port`
 never collide with `wss`/`admin_ws`/`admin_ws_port`. The container's internal WS
 port tracks `JS_WS_PORT` so the bridge port mapping stays symmetric (host ==
 container), matching how `JS_HTTP_PORT`/`JS_ADMIN_PORT` behave.
+
+### Binds, secrets and extra NAT addresses
+
+Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
+
+- **Admin bind (O-55).** `docker-compose.yml` publishes the Admin API as
+  `${JS_ADMIN_BIND}:${JS_ADMIN_PORT}:${JS_ADMIN_PORT}`, default `127.0.0.1`: only
+  this machine can reach `/voiceAdmin`. The sim calls the address in its
+  `JanusGatewayAdminURI`, so set `JS_ADMIN_BIND` to exactly that host address.
+  On Legion Grid the ini says `http://192.168.1.225:24225/voiceAdmin`, so the live
+  `.env` needs `JS_ADMIN_BIND=192.168.1.225`. With the `127.0.0.1` default the sim's
+  admin calls (visibility/moderation `peer_ctl_batch`) are refused. Avoid
+  `0.0.0.0` on a host with a public interface. The HTTP signalling port stays on
+  all interfaces: the sim and the connectors use it, and `api_secret` guards it.
+- **WebSockets off (O-55).** Nothing in the voice path uses WS, so
+  `JS_WS_ENABLED` defaults to `false`: the entrypoint writes `ws = false` and adds
+  the transport to `transports: { disable }`, so Janus does not load it, and the
+  base compose file does not publish `JS_WS_PORT`. To turn it on, set
+  `JS_WS_ENABLED=true` **and** add the overlay:
+  `docker compose -f docker-compose.yml -f docker-compose.ws.yml up -d janus` (or
+  `COMPOSE_PATH_SEPARATOR=:` + `COMPOSE_FILE=docker-compose.yml:docker-compose.ws.yml`
+  in `.env`). Compose cannot make a port conditional on a variable, hence the
+  overlay.
+- **Fail-closed secrets (O-65).** The container exits 1 at start with
+  `[entrypoint] FATAL: JS_API_SECRET … empty; refusing to start` when either secret
+  is empty or whitespace. Without this, an empty `JS_API_SECRET` left the Janus API
+  open, and an empty `JS_ADMIN_SECRET` kept the stock template's well-known
+  `admin_secret`. **`ALLOW_INSECURE_DEV=true` is a dev-only override**: it starts
+  anyway, with a WARNING. Use it only on a throwaway local box that nothing else can
+  reach, never on the grid host.
+- **`nat_1_1_mapping` guard and `JS_NAT_EXTRA_IPS`.** After resolving
+  `JS_PUBLIC_HOST` (or taking `JS_PUBLIC_IP`), the entrypoint WARNs for each mapped
+  address that is RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) or loopback
+  (`127/8`). When *no* mapped address is public it adds
+  `off-LAN viewers will fail ICE`: they receive only unreachable candidates. This
+  happens when a hosts-file or split-horizon DNS pin makes the DDNS name resolve to
+  the LAN IP inside the container (Legion Grid today: `legiongrid.ddns.net` →
+  `192.168.1.225`). `JS_NAT_EXTRA_IPS` (comma list) appends addresses, e.g.
+  `JS_NAT_EXTRA_IPS=<router public IPv4>` gives `nat_1_1_mapping =
+  "192.168.1.225,<public>"`. Janus 1.x splits the list and advertises a host
+  candidate per address, so LAN and off-LAN viewers both get a reachable one. A
+  static public IP goes stale when a dynamic address changes; restart the container
+  with the new value. With a public mapping and no extras, the generated config is
+  unchanged.
+- **SDP logging (O-66).** The plugin's full offer/answer SDP dumps are at
+  `LOG_VERB` (debug level 5+), with `a=ice-ufrag`, `a=ice-pwd` and the
+  `a=fingerprint` value redacted. Each join still logs one INFO line:
+  `Answer sent: audio Opus pt=<pt> ptime=20 maxptime=20; m=application answered=YES`.
+- **Tests.** `bash tests/entrypoint_test.sh` runs the entrypoint without Docker
+  against a scratch config dir and a stub Janus (the `JANUS_CONF_DIR`,
+  `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` overrides exist only for
+  it). The image build runs it against the baked script and templates.
 
 ### External access: public hostname and split-horizon ICE
 

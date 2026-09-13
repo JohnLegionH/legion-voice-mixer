@@ -68,6 +68,7 @@
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
 #include "mixer/azimuth.h" /* Phase 3b item 4: horizontal azimuth of a source (pan input) */
 #include "mixer/pan.h"     /* Phase 3b item 4: constant-power stereo pan gains */
+#include "sdp_redact.h"    /* O-66: ICE credential / fingerprint redaction for the SDP dumps */
 
 /* Plugin information */
 #define JANUS_SLVOICE_VERSION         9
@@ -1943,9 +1944,15 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	gboolean has_dc = (janus_sdp_mline_find(offer, JANUS_SDP_APPLICATION) != NULL);
 	JANUS_LOG(LOG_INFO, "[%s-%p] Offer received: Opus pt=%d, m=application present=%s\n",
 		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, has_dc ? "yes" : "no");
-	/* Full offer dump for capture against a live viewer (per-join, not spammy). */
-	JANUS_LOG(LOG_INFO, "[%s-%p] ==== OFFER SDP ====\n%s==== END OFFER SDP ====\n",
-		JANUS_SLVOICE_PACKAGE, session->handle, sdp_str);
+	/* Full offer dump for capture against a live viewer. O-66: VERB only, with ICE
+	 * credentials and the DTLS fingerprint redacted (the core normally anonymises the
+	 * offer before a plugin sees it; this guards any path that does not). */
+	if(janus_log_level >= LOG_VERB) {
+		char *redacted = slv_sdp_redact(sdp_str);
+		JANUS_LOG(LOG_VERB, "[%s-%p] ==== OFFER SDP (ICE credentials redacted) ====\n%s==== END OFFER SDP ====\n",
+			JANUS_SLVOICE_PACKAGE, session->handle, redacted ? redacted : "(redaction failed: out of memory)\n");
+		free(redacted);
+	}
 
 	/* Build the answer: accept Opus audio sendrecv AND the datachannel; reject
 	 * everything else (generate_answer defaults every m-line to rejected). */
@@ -2010,12 +2017,17 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 	session->dc_answered = dc_answered;
 	janus_mutex_unlock(&session->mutex);
 	*answer_sdp = new_sdp;
-	JANUS_LOG(LOG_INFO, "[%s-%p] Answer sent: audio Opus pt=%d; m=application answered=%s\n",
+	/* The one INFO line per join: the negotiated codec, payload type and packetisation. */
+	JANUS_LOG(LOG_INFO, "[%s-%p] Answer sent: audio Opus pt=%d ptime=20 maxptime=20; m=application answered=%s\n",
 		JANUS_SLVOICE_PACKAGE, session->handle, opus_pt, dc_answered ? "YES" : "NO");
 	/* Full answer dump (the plugin's answer, before the core's ICE/DTLS merge)
-	 * for capture against a live viewer. */
-	JANUS_LOG(LOG_INFO, "[%s-%p] ==== ANSWER SDP ====\n%s==== END ANSWER SDP ====\n",
-		JANUS_SLVOICE_PACKAGE, session->handle, new_sdp);
+	 * for capture against a live viewer. O-66: VERB only, redacted like the offer. */
+	if(janus_log_level >= LOG_VERB) {
+		char *redacted = slv_sdp_redact(new_sdp);
+		JANUS_LOG(LOG_VERB, "[%s-%p] ==== ANSWER SDP (ICE credentials redacted) ====\n%s==== END ANSWER SDP ====\n",
+			JANUS_SLVOICE_PACKAGE, session->handle, redacted ? redacted : "(redaction failed: out of memory)\n");
+		free(redacted);
+	}
 	if(has_dc && !dc_answered)
 		JANUS_LOG(LOG_WARN, "[%s-%p] Offer had a data channel but the answer did NOT accept it — "
 			"the viewer will tear down (check Janus was built with SCTP)\n",

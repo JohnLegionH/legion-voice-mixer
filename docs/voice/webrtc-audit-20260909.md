@@ -293,13 +293,17 @@ All [SRC: source] at `691a52bb9c` / `230ac0f` unless marked.*
 | # | Slice | Repo | Est. | Stop at | Status |
 |---|---|---|---|---|---|
 | 1 | O-48 parcel derivation from position (+ tests) | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`7191e9b6a1`, 7 min; O-48a hotfix `0f19e4e584`) |
-| 2 | O-49 mute set + O-64 geometry merge + O-70 + O-69 ptime | mixer | 30 | 60 | DONE + DEPLOYED 2026-09-12; O-64, O-69 verified live 2026-09-13, O-49 live check pending (second avatar) |
+| 1a | O-48a hotfix: child-agent provisions keep the client/estate path; position derivation root-only (added, regression from slice 1) | sim | 15 | 30 | DONE + DEPLOYED 2026-09-13 09:58 (`0f19e4e584`) |
+| 2 | O-49 mute set + O-64 geometry merge + O-70 + O-69 ptime | mixer | 30 | 60 | DONE + DEPLOYED 2026-09-12; O-64, O-69 verified live 2026-09-13; O-49 verified live 2026-09-13 16:45 (console mute) |
 | 3 | O-50 + O-51: timeout on ack'd requests, fault pending on destroy/exit, lock every dictionary access | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`3ca74633df`) |
 | 4 | O-52 + O-53: child-agent guard; register-on-success; `:232` return check | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 (`afe2df635d`) |
-| 5 | O-54 + O-56 + O-68 + O-67: empty-room grace destroy with `reset_room_state()`; `hangup_media` leaves; init cleanup | mixer | 35 | 70 | |
+| 4a | O-74: a root client close captures the agent's voice sessions in every region (added, live finding) | sim | 15 | 30 | DONE + DEPLOYED 2026-09-13 13:10 (`e0f36ea6db`, with `WebRtcVoice.dll`) |
+| 5 | O-54 + O-56 + O-68 + O-67: empty-room grace destroy with `reset_room_state()`; `hangup_media` leaves; init cleanup | mixer | 35 | 70 | DONE + DEPLOYED 2026-09-13 11:57 CDT (`1859a7f`) |
 | 6 | O-55 + O-65 + O-57 + O-66: compose binds; fail-closed secrets; ini = example; SDP log level | both | 15 | 30 | |
-| 7 | O-60 sweep + O-63 deterministic NPC identity | sim | 25 | 50 | |
-| 8 | O-71 doc resync + push/PR CI + aiortc two-peer integration test | mixer | 30 | 60 | |
+| 7a | O-60 sweep + service-session reconnect; O-72 refusal cache; Vivox probe to DEBUG | sim | 30 | 60 | DONE + DEPLOYED 2026-09-13 15:41 (`1b88989e9f`) |
+| 7b | O-63 deterministic NPC identity (UUIDv5) + fixed-id `CreateNPC`; console `voice moderation mute` | sim | 25 | 50 | DONE + DEPLOYED 2026-09-13 15:41 (`d347102272`, with `OpenSim.Region.OptionalModules`) |
+| 8 | O-71 doc resync + push/PR CI + aiortc two-peer integration test | mixer | 30 | 60 | aiortc part split out as 8a (DONE); O-71 doc resync and push/PR CI open |
+| 8a | O-73 two-peer integration harness (`tests/integration/`, S1-S8) | mixer | 40 | 80 | DONE 2026-09-13 (`735cae8`); a test harness run against the live mixer, nothing to deploy |
 
 Sim slices deploy together (regionserver restart, Release voice DLLs (the 08-31 Debug rule is superseded)); mixer
 slices are one container rebuild each. Slice 6 needs no deploy beyond a compose `up -d`.

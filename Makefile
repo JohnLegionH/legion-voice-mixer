@@ -74,6 +74,9 @@ TEST_AZIMUTH_BIN   := tests/test_azimuth
 TEST_AZIMUTH_SRCS  := tests/test_azimuth.c
 TEST_PAN_BIN       := tests/test_pan
 TEST_PAN_SRCS      := tests/test_pan.c
+# test_sdp_redact: O-66 SDP log redaction (header-only sdp_redact.h; libc only).
+TEST_REDACT_BIN    := tests/test_sdp_redact
+TEST_REDACT_SRCS   := tests/test_sdp_redact.c
 # bench_tick is a load HARNESS, not a unit test — deliberately NOT in `test:`.
 # bench_tick.c #includes janus_slvoice.c to reach the static tick, so the plugin
 # .c is NOT listed here (it would double-define); the other pure .c deps are.
@@ -98,6 +101,8 @@ TEST_GLIB_CFLAGS := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags gl
 TEST_GLIB_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 2>/dev/null)
 
 .PHONY: all install clean test bench_tick integration
+# `integration` sits above `all`; without this a bare `make` (the Dockerfile's plugin build) ran it.
+.DEFAULT_GOAL := all
 
 # Two-peer integration harness (O-73, tests/integration/README.md). Runs against a LIVE mixer and
 # is NOT part of `test`: the image build never runs it. Needs Python 3.12 with
@@ -117,7 +122,7 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
@@ -126,6 +131,10 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BI
 	./$(TEST_AZIMUTH_BIN)
 	./$(TEST_PAN_BIN)
 	./$(TEST_LIFECYCLE_BIN)
+	./$(TEST_REDACT_BIN)
+
+$(TEST_REDACT_BIN): $(TEST_REDACT_SRCS) src/sdp_redact.h
+	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_REDACT_SRCS)
 
 # test_room_lifecycle compiles the plugin source into the test binary (see the variable block above).
 $(TEST_LIFECYCLE_BIN): $(TEST_LIFECYCLE_SRCS) src/janus_slvoice.c
@@ -167,4 +176,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(BENCH_TICK_BIN)

@@ -79,6 +79,9 @@ RUN mkdir -p /opt/janus/share/janus-templates \
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
+# Entrypoint tests (O-55/O-65/nat_1_1 guard): the baked script against the image's own
+# templates, in a scratch dir with a stub Janus. A failure fails the image build.
+RUN ENTRYPOINT_UNDER_TEST=/usr/local/bin/docker-entrypoint.sh bash /root/slvoice/tests/entrypoint_test.sh
 
 # API connections (Janus HTTP/HTTPS/admin/websockets live in 14220-14229)
 EXPOSE 14220-14229

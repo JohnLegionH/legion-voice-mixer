@@ -13,6 +13,7 @@ tests/test_sldata
 tests/test_mix
 tests/test_visbatch
 tests/test_roster
+tests/test_sdp_redact
 
 # --- Secrets / local config (NEVER commit; use env.sample as the template) ---
 .env
