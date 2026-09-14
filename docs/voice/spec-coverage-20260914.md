@@ -17,6 +17,8 @@ written 2026-08-15.
   applied it to 29 rows. SC-68 became `MET` with its unbuilt half descoped, and SC-1 and SC-2 were
   verdicted. The spec itself now marks each descoped item and carries a status block. See "Spec
   amendment (2026-09-14)" under the rules.
+- **Spec amendment follow-up (2026-09-14):** descoped SC-9 in full, the effects half of SC-11 (now
+  `MET`), and the morph-state part of SC-139 (still `PARTIAL`).
 
 ## Header
 
@@ -182,15 +184,20 @@ written 2026-08-15.
   - SC-68 is `MET`: its load-adaptive aggregation is descoped, and culling and per-listener rendering
     were met in pass 1b.
   - SC-2 is `MET`: its large multi-mixer end is descoped.
+  - SC-11 is `MET` (follow-up): its effects half is descoped, and the connector hooks were met in pass
+    1a.
+  - SC-139 stays `PARTIAL` (follow-up): its morph-state extension is descoped; echo-test control is
+    met; `diag` and trust-domain disclosure are still not met.
+- **Follow-up (same date):** SC-9, the §1 goal naming voice morphing as a restored capability, is
+  descoped in full, consistent with §7.4.
 - **Mismatches with the descoping decision:**
   - It listed "placement map" and "co-location" under §8.3. Those rows are SC-119 and SC-120 in §8.2,
     and each name matches only that row, so both are descoped and their rows say so.
   - It said "all of §8.3", but four §8.3 rows are not among the items it named, so they are unchanged:
     SC-124 (admission control, `PARTIAL`), SC-127 (viewer-side FOA decode, `BLOCKED`), SC-131
     (rate-limited provisioning, `PARTIAL`) and SC-133 (RTP source validation, `MET`).
-- **Related rows left unchanged:** SC-9 (§1 goal, voice morphing), the effects half of SC-11 (§1 goal),
-  SC-73 (vacuous `MET` on binning) and the morph-state part of SC-139 (§9). The decision did not name
-  them.
+- **Related row left unchanged:** SC-73 keeps its vacuous `MET` (binning is absent) and its annotation,
+  by decision. SC-9, SC-11 and SC-139 were first left unchanged, then handled by the follow-up above.
 - **SC-1 and SC-2:** verdicted under the pass 1a rules against tranq-ais `feature/ais-v3` at
   `7d018bd3a6` and legion-voice-mixer `main` at `bedca0b`. SC-2 is an OPS row, so a doc is cited for
   configuration.
@@ -207,9 +214,9 @@ written 2026-08-15.
 | SC-6 | 1 | 14 | Privacy and permission enforcement performed in the mix, on the server, not delegated to clients | BOTH | | MET | **Sim decides:** estate ban, `SIM Addons/os-webrtc-janus/Visibility/VisibilityRules.cs:27` "estate.IsEstateBanned(source.Id)"; parcel ban, `:41` "sourceParcel.ExcludesByBan(listener.Id)". It pushes the result: `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/JanusPeerCtlBatchSink.cs:219` "PeerCtlBatchSerializer.BuildRequest(op, exclSlice, muteSlice);". **Mixer enforces** it in the mix, `MIXER src/janus_slvoice.c:3125` "if(slv_roster_excludes(s->excluded, disp))" and `:3110` "g_hash_table_contains(s->mod_muted, disp)", and in the roster, `:929` "if(slv_roster_excludes(listener->excluded, p->display))". |
 | SC-7 | 1 | 15 | First-class diagnosability: voice failures must be triageable by the user or operator in minutes, without log-emailing rituals | BOTH | DERIVED | DERIVED | Derives from SC-41, SC-52 and SC-53 (pass-0b ruling). |
 | SC-8 | 1 | 16 | Restoration of camera-position listening, lost in the Vivox→WebRTC transition | BOTH | | MET | The listener position is the viewer's camera `lp`: `MIXER src/janus_slvoice.c:2972` "s->snap_lp = s->last_data.lp;". The server applies a leash around the avatar: `:2980` "s->snap_lp = slv_vec3_madd(s->snap_sp, slv_spatial.leash_dist / d, off);". Distance and pan are taken from `lp`: `:3143` "slv_vec3_sub(s->snap_lp, sess[j]->snap_sp)" and `:3162` "slv_azimuth(s->snap_lp, s->snap_lh, sess[j]->snap_sp)". |
-| SC-9 | 1 | 16 | Restoration of voice morphing, lost in the Vivox→WebRTC transition | MIXER | | UNMET | `git -C D:/legion-voice-mixer grep -n -i -E 'morph\|pitch.?shift\|formant\|psola\|vocoder\|voice.?font' -- src connectors etc docker-entrypoint.sh` → 0 matches. `git -C D:/tranq-ais grep -n -i -E 'morph\|pitch.?shift\|formant\|psola\|vocoder\|voice.?font' -- Addons/os-webrtc-janus ':!*.md'` → 0 matches. |
+| SC-9 | 1 | 16 | Restoration of voice morphing, lost in the Vivox→WebRTC transition | MIXER | | DESCOPED | **DESCOPED 2026-09-14 (a decision, not a finding):** voice morphing not built, consistent with §7.4 (SC-89 – SC-94). Pass 1a's finding, kept for the record: `git -C D:/legion-voice-mixer grep -n -i -E 'morph\|pitch.?shift\|formant\|psola\|vocoder\|voice.?font' -- src connectors etc docker-entrypoint.sh` → 0 matches. `git -C D:/tranq-ais grep -n -i -E 'morph\|pitch.?shift\|formant\|psola\|vocoder\|voice.?font' -- Addons/os-webrtc-janus ':!*.md'` → 0 matches. |
 | SC-10 | 1 | 16 | A capability Vivox never had: mixer-enforced moderation | BOTH | | MET | **Operator mute:** `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/VoiceModerationCommands.cs:89` "AddCommand("Voice", false, "voice moderation mute",". The matrix emits a mute channel, `SIM Addons/os-webrtc-janus/Visibility/VisibilityMatrix.cs:84` "VisibilityRules.IsModerationMuted(agents[si], parcels[si])", sent in the batch at `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/JanusPeerCtlBatchSink.cs:219` "BuildRequest(op, exclSlice, muteSlice);". **Mixer:** applies it, `MIXER src/janus_slvoice.c:1838` "janus_slvoice_set_mod_muted_locked(L, e->excl[m], TRUE)", and silences the source in the mix, `:3110` "g_hash_table_contains(s->mod_muted, disp)" → `:3111` "mutes[j] = 1;". |
-| SC-11 | 1 | 16 | A capability Vivox never had: effects/connector hooks | MIXER | | PARTIAL | **Met — connector hooks:** send hook `MIXER connectors/common/peer.py:57` "def local_track(self):"; injector `MIXER connectors/injector/injector.py:208` "def local_track(self):"; recorder `MIXER connectors/recorder/recorder.py:49` "def on_audio_track(self, track) -> None:"; sim policy record `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/VoiceConnector/VoiceConnectorRecord.cs:59` "public bool MayInject { get; }". **Not met — effects:** `git -C D:/legion-voice-mixer grep -n -i -E 'reverb\|biquad\|equali[sz]\|distortion\|chorus\|flanger\|dsp.?chain\|audio.?filter\|voice.?effect' -- src connectors etc` → 0 matches; the same pattern over `git -C D:/tranq-ais … -- Addons/os-webrtc-janus ':!*.md'` → 0 matches. |
+| SC-11 | 1 | 16 | A capability Vivox never had: effects/connector hooks | MIXER | | MET | **Effects half DESCOPED 2026-09-14 (feature not built; a decision, not a finding).** Under the part-descoped rule, the verdict covers the rest of the row: the connector hooks, which pass 1a found met. Pass 1a's evidence, kept for the record: **Met — connector hooks:** send hook `MIXER connectors/common/peer.py:57` "def local_track(self):"; injector `MIXER connectors/injector/injector.py:208` "def local_track(self):"; recorder `MIXER connectors/recorder/recorder.py:49` "def on_audio_track(self, track) -> None:"; sim policy record `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/VoiceConnector/VoiceConnectorRecord.cs:59` "public bool MayInject { get; }". **Not met — effects:** `git -C D:/legion-voice-mixer grep -n -i -E 'reverb\|biquad\|equali[sz]\|distortion\|chorus\|flanger\|dsp.?chain\|audio.?filter\|voice.?effect' -- src connectors etc` → 0 matches; the same pattern over `git -C D:/tranq-ais … -- Addons/os-webrtc-janus ':!*.md'` → 0 matches. |
 | SC-12 | 1 | 17 | Scale-invariant deployment: identical code path and configuration model from a one-region hobby grid to a large commercial grid | OPS | | PARTIAL | **Met — one configuration model:** the same service class loads in the region or behind the grid service, `SIM Addons/os-webrtc-janus/WebRtcVoiceServiceModule/WebRtcVoiceServiceModule.cs:112` "ServerUtils.LoadPlugin<IWebRtcVoiceService>(spatialDllName, [m_Config]);"; one env file, `MIXER docker-compose.yml:61` "env_file:". **Not met — large-grid scale-out:** each service has a single mixer endpoint, `SIM Addons/os-webrtc-janus/Janus/WebRtcJanusService.cs:105` "janusConfig.GetString("JanusGatewayURI", string.Empty);"; rooms are capped per mixer, `MIXER src/janus_slvoice.c:164` "#define SLV_MAX_MIX         110". No sharding: `git -C D:/tranq-ais grep -n -i -E 'shard\|load.?balanc\|GatewayURIs\|MixerPool\|mixer.?pool' -- Addons/os-webrtc-janus ':!*.md'` → 0 matches; `git -C D:/legion-voice-mixer grep -n -i -E 'shard\|load.?balanc\|mixer.?pool\|replica' -- src docker-compose.yml env.sample docker-entrypoint.sh etc` → 0 matches. |
 | SC-13 | 1 | 17 | Small deployments must not pay complexity for scale they don't need | OPS | | MET | One prebuilt image, `MIXER docker-compose.yml:14` "image: ghcr.io/johnlegionh/legion-voice-mixer:latest", configured from one env file, `:61` "env_file:" / `:62` "- .env". The operator values are the secrets and public address, `MIXER env.sample:28` "JS_API_SECRET=", `:30` "JS_ADMIN_SECRET=", `:6` "JS_PUBLIC_IP="; everything else has defaults, e.g. `MIXER docker-entrypoint.sh:28` ": "${JS_HTTP_PORT:=14223}"". The Janus config is generated from them: `:242` "set_kv "$HTTP_JCFG" port            "${JS_HTTP_PORT}"". |
 | SC-14 | 1 | 21 | Non-goal: client-side spatialization via selective forwarding (SFU); ruled out by the privacy model (§3) | MIXER | | MET | No SFU: inbound RTP only enters a jitter buffer, `MIXER src/janus_slvoice.c:3352` "janus_slvoice_jb_insert(session, seq, payload, plen);". Each listener gets a server-built N-minus-one mix, `:3175` "summed = slv_mix_nminus1_stereo(frame, SLV_FRAME_TOTAL, srcbuf, audible,", and only that mix is relayed, `:2949` "gateway->relay_rtp(s->handle, &outp);". |
@@ -337,7 +344,7 @@ written 2026-08-15.
 | SC-136 | 9 | 189 | SDP: fmtp mangle honored (`minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxplaybackrate=48000`) | MIXER | | MET | The answer carries that exact fmtp: `MIXER src/janus_slvoice.c:2043` "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxplaybackrate=48000". **Note:** advertising `minptime=10` while the mix reads 20 ms frames is ledger O-81. |
 | SC-137 | 9 | 190 | SLData channel client→mixer `j/l/sp/sh/lp/lh/m/ug` per the published format | MIXER | | MET | Every member is parsed in `MIXER src/sldata.c`: `:128` "json_object_get(root, "j")", `:130` "json_object_get(root, "l")", `:134` "json_object_get(root, "sp")", `:138` "json_object_get(root, "sh")", `:142` "json_object_get(root, "lp")", `:146` "json_object_get(root, "lh")", `:158` "json_object_get(root, "m")", `:184` "json_object_get(root, "ug")". **Note:** for `j` and `l` only their presence is recorded (`:126`–`:127`, comment); see SC-140. |
 | SC-138 | 9 | 190 | SLData channel mixer→client per-peer `p/V/j/l` batched ~100 ms | MIXER | | PARTIAL | **Cadence:** a fixed 100 ms sleep between passes, `MIXER src/janus_slvoice.c:113` "#define SLV_POWER_TICK_MS   100", slept at `:2516` "g_usleep(SLV_POWER_TICK_MS * 1000);". The sleep is not clock-scheduled, so the real interval is 100 ms plus the time to walk every room. **Met — `p` and the VAD flag, batched per room:** `:2585` "json_object_set_new(pv, "p", json_integer(ppow));" and `:2586` "json_object_set_new(pv, "v", pvad ? json_true() : json_false());". The key is lowercase `v`, not the spec's `V`; the source comment records that the viewer reads `v` (`:2541`). **Not met — `j` and `l` are not in the batch.** They are sent at the moment of the event: join presence `:852` "json_object_set_new(jd, "p", json_true());" → `:853` "json_object_set_new(sub, "j", jd);", relayed immediately at `:829` "gateway->relay_data(s->handle, &data);". |
-| SC-139 | 9 | 190 | SLData extensions, all optional and ignored by stock viewers: `diag` (§4.1), echo-test control (§4.2), morph state (§7.4), trust-domain disclosure (§3.2) | MIXER | | PARTIAL | **Met — echo-test control:** an optional client field, `MIXER src/sldata.c:213` "slv_get_bool(json_object_get(root, "echo"), &b)". **Not met — `diag`, morph state and trust-domain disclosure:** `git -C D:/legion-voice-mixer grep -n -i -E '"diag"\|trust.?domain\|morph' -- src` → 0 matches. |
+| SC-139 | 9 | 190 | SLData extensions, all optional and ignored by stock viewers: `diag` (§4.1), echo-test control (§4.2), morph state (§7.4), trust-domain disclosure (§3.2) | MIXER | | PARTIAL | **Morph-state extension DESCOPED 2026-09-14 with §7.4 (feature not built; a decision, not a finding).** Under the part-descoped rule, the verdict covers the rest of the row: echo-test control is met, but `diag` and trust-domain disclosure are still not met, so the row stays PARTIAL. Pass 1d's evidence, kept for the record: **Met — echo-test control:** an optional client field, `MIXER src/sldata.c:213` "slv_get_bool(json_object_get(root, "echo"), &b)". **Not met — `diag`, morph state and trust-domain disclosure:** `git -C D:/legion-voice-mixer grep -n -i -E '"diag"\|trust.?domain\|morph' -- src` → 0 matches. |
 | SC-140 | 9 | 191 | Cross-region: neighbor connections with primary flag, client-side summing, per the published model | BOTH | | PARTIAL | **Met — neighbour connections.** A child agent's provision is accepted into that region's estate room: `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/WebRtcVoiceRegionModule.cs:669` "new ParcelResolveInput(clientParcelId, sp.IsChildAgent);", `:690` "if (res.Source != ParcelSource.None)", and `SIM Addons/os-webrtc-janus/Janus/WebRtcJanusService.cs:385` "? pli : JanusAudioBridge.REGION_ROOM_ID;". Each connection gets its own mix for the client to sum: `MIXER src/janus_slvoice.c:3175`. **Not met — the primary flag is never read.** The parser records only that `j` appeared, `MIXER src/sldata.c:128` "if(json_object_get(root, "j") != NULL)", and its inner shape is not decoded (`:126`–`:127`, comment). `git -C D:/legion-voice-mixer grep -n -i -E 'primary\|"p"' -- src/sldata.c src/sldata.h` → 0 matches. `git -C D:/tranq-ais grep -n -i -E 'primary' -- Addons/os-webrtc-janus ':!*.md'` → 0 matches. |
 | SC-141 | 9 | 191 | Parcel changes within a region do not trigger connection changes (§7.3) | BOTH | | PARTIAL | Filled in pass 1c alongside SC-88. It is the same claim on the same code path, and gets the same result. **Met — estate-channel parcels.** A crossing only marks the visibility matrix dirty: `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/VoiceVisibilityService.cs:221` "m_feeder.OnAvatarEnteringNewParcel();" → `SIM Addons/os-webrtc-janus/Visibility/VoiceStateFeeder.cs:64` "public void OnAvatarEnteringNewParcel() => Invalidate();". Both parcels map to the estate room: `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/WebRtcVoiceRegionModule.cs:716` "map.Remove("parcel_local_id"); // estate channel" and `SIM Addons/os-webrtc-janus/Janus/WebRtcJanusService.cs:385` "? pli : JanusAudioBridge.REGION_ROOM_ID;". **Not met — parcels with their own voice channel.** The room number hashes the parcel, `SIM Addons/os-webrtc-janus/Janus/JanusAudioBridge.cs:251` "hasher.Add(pParcelLocalID);", with the id set at `SIM Addons/os-webrtc-janus/WebRtcVoiceRegionModule/WebRtcVoiceRegionModule.cs:722`. The mixer cannot move a participant between rooms: `git -C D:/legion-voice-mixer grep -n -i -E 'changeroom\|change_room\|switch_room\|"move"' -- src` → 0 matches. The sim does not itself trigger the change, but reaching the new parcel's room takes a new provision and join: `SIM Addons/os-webrtc-janus/Janus/WebRtcJanusService.cs:408` "viewerSession.Room = await viewerSession.AudioBridge.SelectRoom(pSceneID.ToString(),". |
 
@@ -484,14 +491,15 @@ These adjustments are not meant to change meaning:
 
 ## Whole-document summary
 
-141 rows in total, all with a verdict. The counts are as of the spec amendment of 2026-09-14.
+141 rows in total, all with a verdict. The counts are as of the spec amendment and its follow-up, both
+2026-09-14.
 
 | Verdict | Rows |
 |---|---|
-| MET | 44 |
-| PARTIAL | 39 |
-| UNMET | 21 |
-| DESCOPED | 29 |
+| MET | 45 |
+| PARTIAL | 38 |
+| UNMET | 20 |
+| DESCOPED | 30 |
 | BLOCKED | 5 |
 | DERIVED | 2 |
 | NOT-A-COMMITMENT | 1 |
@@ -508,6 +516,7 @@ These adjustments are not meant to change meaning:
 | 1c | 29 |
 | 1d | 35 |
 | Spec amendment | 32 (29 to `DESCOPED`, SC-68 to `MET`, SC-1 and SC-2 first verdicted) |
+| Spec amendment follow-up | 3 (SC-9 to `DESCOPED`, SC-11 to `MET`, SC-139 annotated and still `PARTIAL`) |
 
 **Changes made by the spec amendment:**
 
@@ -516,6 +525,9 @@ These adjustments are not meant to change meaning:
 | SC-65, SC-70, SC-71, SC-72, SC-74, SC-75, SC-77, SC-81, SC-82, SC-84, SC-89 – SC-94, SC-97, SC-101, SC-103, SC-119, SC-120, SC-122, SC-123, SC-125, SC-126, SC-128, SC-129, SC-130, SC-132 | `UNMET` | `DESCOPED` |
 | SC-68 | `PARTIAL` | `MET` (load-adaptive half descoped) |
 | SC-1, SC-2 | no verdict | `MET` (SC-2: large multi-mixer end descoped) |
+| SC-9 (follow-up) | `UNMET` | `DESCOPED` |
+| SC-11 (follow-up) | `PARTIAL` | `MET` (effects half descoped) |
+| SC-139 (follow-up) | `PARTIAL` | `PARTIAL` (morph-state part descoped; `diag` and trust-domain disclosure still not met) |
 
 The pass tables above are left as each pass recorded them. This summary is the current state.
 

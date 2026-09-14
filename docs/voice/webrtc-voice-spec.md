@@ -32,7 +32,7 @@
 - True per-listener spatial audio (distance, azimuth, listener orientation), which no current OpenSimulator voice service provides.
 - Privacy and permission enforcement performed **in the mix**, on the server, not delegated to clients.
 - First-class diagnosability: voice failures must be triageable by the user or operator in minutes, without log-emailing rituals.
-- Restoration of capabilities lost in the Vivox→WebRTC transition (camera-position listening, voice morphing) and capabilities Vivox never had (mixer-enforced moderation, effects/connector hooks).
+- Restoration of capabilities lost in the Vivox→WebRTC transition (camera-position listening, voice morphing *[voice morphing DESCOPED 2026-09-14: feature not built]*) and capabilities Vivox never had (mixer-enforced moderation, effects/connector hooks *[effects hooks DESCOPED 2026-09-14: feature not built; connector hooks are built]*).
 - Scale-invariant deployment: identical code path and configuration model from a one-region hobby grid to a large commercial grid. Small deployments must not pay complexity for scale they don't need.
 
 **Non-goals**
