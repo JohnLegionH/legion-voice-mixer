@@ -30,6 +30,7 @@ if str(_CONNECTORS) not in sys.path:
 
 import aiohttp  # noqa: E402
 import av  # noqa: E402
+from aiortc import RTCPeerConnection  # noqa: E402
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack  # noqa: E402
 
 from common.janus import PLUGIN, JanusHttp  # noqa: E402
@@ -74,6 +75,7 @@ class Config:
     compose_file: Path
     grace: int
     restart: bool
+    join_timeout: int = 30
 
 
 def read_env(path: Path) -> dict:
@@ -387,8 +389,8 @@ class Control:
             if event and event.get("janus") == "event" and event.get("transaction"):
                 self._events[event["transaction"]] = (event.get("plugindata") or {}).get("data") or {}
 
-    async def request(self, body: dict, timeout: float = POLL_TIMEOUT) -> dict:
-        ack = await self._janus.message(body)
+    async def request(self, body: dict, timeout: float = POLL_TIMEOUT, jsep: dict | None = None) -> dict:
+        ack = await self._janus.message(body, jsep=jsep)
         tx = ack.get("transaction")
 
         async def reply():
@@ -434,6 +436,41 @@ class Control:
                 pass
 
 
+class NoMediaPeer(Control):
+    """A participant whose PeerConnection never comes up (O-75, S10). It creates its Janus session,
+    attaches, and joins with a real aiortc offer whose ICE candidates are stripped. It never trickles a
+    candidate or end-of-candidates, and never applies the answer. Afterwards it only long-polls (which
+    keeps the Janus session alive, as the sim's long-poll does for a viewer). Janus never gets a
+    connectivity check, so setup_media never fires and there is no PeerConnection to hang up."""
+
+    def __init__(self, cfg: Config, http: aiohttp.ClientSession, name: str, room: int, display: str):
+        super().__init__(cfg, http)
+        self.name = name
+        self.room = room
+        self.display = display
+        self.crashed = False
+
+    @property
+    def ids(self) -> tuple:
+        return (self._janus.session_id, self._janus.handle_id)
+
+    async def join(self) -> dict:
+        pc = RTCPeerConnection()
+        try:
+            pc.addTransceiver("audio", direction="sendrecv")
+            pc.createDataChannel("SLData")
+            await pc.setLocalDescription(await pc.createOffer())
+            sdp = "\r\n".join(line for line in pc.localDescription.sdp.splitlines()
+                              if not line.startswith(("a=candidate:", "a=end-of-candidates"))) + "\r\n"
+        finally:
+            await pc.close()
+        return await self.request({"request": "join", "room": self.room, "display": self.display},
+                                  jsep={"type": "offer", "sdp": sdp})
+
+    async def stop(self) -> None:
+        await self.close()
+
+
 # ---- per-scenario context ---------------------------------------------------------------------
 
 class Ctx:
@@ -471,7 +508,17 @@ class Ctx:
         self.peers.append(peer)
         return await peer.start()
 
-    async def info(self, peer: TestPeer):
+    async def join_without_media(self, name: str, room: int, display: str | None = None) -> NoMediaPeer:
+        """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer)."""
+        await self.control.create_room(room, f"integration {self.name}")
+        peer = await NoMediaPeer(self.cfg, self.http, name, room, display or new_display()).open()
+        self.background.append(peer)   # teardown stops it: detach + destroy its Janus session
+        data = await peer.join()
+        if data.get("audiobridge") != "joined":
+            raise Fail(f"{name} join (no media) into room {room}", data)
+        return peer
+
+    async def info(self, peer):
         return await self.admin.handle_info(peer)
 
     async def until_info(self, peer: TestPeer, pred, what: str, timeout: float = POLL_TIMEOUT) -> dict:

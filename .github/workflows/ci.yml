@@ -51,13 +51,12 @@ jobs:
       # The job writes its own .env and never reads a developer's: .env is git-ignored,
       # so none exists on the runner. Every knob the harness depends on is set here
       # explicitly, and the secrets are random per run.
-      #   - JS_EMPTY_ROOM_GRACE_S must equal the harness --grace below (S5 waits it out).
+      #   - JS_EMPTY_ROOM_GRACE_S must equal the harness --grace below (S5 waits it out), and
+      #     JS_JOIN_MEDIA_TIMEOUT_S the harness --join-timeout (S10 waits it out).
       #   - JS_PUBLIC_IP=127.0.0.1: the peers run on this host (keep_private_host also
       #     advertises the container address, which the Linux host can route to).
       #   - JS_ADMIN_BIND / JS_WS_ENABLED narrow on purpose: the harness uses
       #     127.0.0.1 and no WebSockets.
-      #   - No O-75 knob (JS_JOIN_MEDIA_TIMEOUT_S) or --join-timeout: neither exists
-      #     yet; add both here when O-75 lands.
       - name: Write the CI .env (explicit knobs, ephemeral secrets)
         run: |
           api_secret="$(openssl rand -hex 24)"
@@ -82,6 +81,7 @@ jobs:
           JS_PUBLIC_HOST=
           JS_NAT_EXTRA_IPS=
           JS_EMPTY_ROOM_GRACE_S=10
+          JS_JOIN_MEDIA_TIMEOUT_S=10
           SLV_ECHO_AUTOSTART=false
           EOF
           # Compose resolves env_file for the profile-gated recorder/injector services
@@ -110,16 +110,20 @@ jobs:
           cache: pip
           cache-dependency-path: tests/integration/requirements.txt
 
+      # --only-binary=:all: as tests/integration/requirements.txt says: without it pip picks an
+      # av release with no wheel for this runner and tries to build it against system ffmpeg
+      # (the first CI run, 34841769396, failed exactly there).
       - name: Install harness requirements
-        run: pip install -r tests/integration/requirements.txt
+        run: |
+          pip install --only-binary=:all: -r tests/integration/requirements.txt
 
       # --no-restart leaves out S4 (mixer restart mid-session). S4 restarts the
       # service under test (`docker compose restart janus`) and then waits for the
       # peers to recover. On a shared runner that makes the job's pass/fail depend on
       # container restart and ICE re-gather timing rather than on the code. S4 is run
       # locally against the real mixer before a deploy instead.
-      # --grace 10 matches JS_EMPTY_ROOM_GRACE_S in the .env above.
-      - name: Integration harness (S1-S3, S5-S8)
+      # --grace 10 and --join-timeout 10 match JS_EMPTY_ROOM_GRACE_S and JS_JOIN_MEDIA_TIMEOUT_S above.
+      - name: Integration harness (S1-S3, S5-S8, S10)
         run: |
           python -m tests.integration.run \
             --env .env \
@@ -127,6 +131,7 @@ jobs:
             --janus-url http://127.0.0.1:24223/voice \
             --admin-url http://127.0.0.1:24225/voiceAdmin \
             --grace 10 \
+            --join-timeout 10 \
             --no-restart
 
       - name: Mixer log (on failure)

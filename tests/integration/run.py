@@ -1,4 +1,4 @@
-"""Entry point: python -m tests.integration.run [--only S3[,S5]] [--grace N] [--no-restart]
+"""Entry point: python -m tests.integration.run [--only S3[,S5]] [--grace N] [--join-timeout N] [--no-restart]
 
 Runs the scenarios against a LIVE mixer and prints one PASS/FAIL/SKIP line per scenario (the
 observed oracle values on a FAIL), then a summary. Exit code 1 if any scenario failed.
@@ -32,11 +32,13 @@ def parse_args(argv):
     p.add_argument("--api-secret", default=None, help="overrides JS_API_SECRET from --env")
     p.add_argument("--admin-secret", default=None, help="overrides JS_ADMIN_SECRET from --env")
     p.add_argument("--compose-file", default=str(REPO / "docker-compose.yml"),
-                   help="used by S4 (restart) and S5 (log line)")
+                   help="used by S4 (restart), S5 and S10 (log lines)")
     p.add_argument("--only", action="append", default=[],
                    help="scenario id(s) to run, e.g. --only S3 or --only S1,S7 (repeatable)")
     p.add_argument("--grace", type=int, default=60,
                    help="the mixer's JS_EMPTY_ROOM_GRACE_S, which S5 waits out (default 60)")
+    p.add_argument("--join-timeout", type=int, default=30,
+                   help="the mixer's JS_JOIN_MEDIA_TIMEOUT_S, which S10 waits out (default 30)")
     p.add_argument("--no-restart", action="store_true", help="skip S4 (docker compose restart janus)")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
@@ -59,6 +61,7 @@ async def main_async(args) -> int:
         compose_file=Path(args.compose_file),
         grace=args.grace,
         restart=not args.no_restart,
+        join_timeout=args.join_timeout,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}
@@ -118,7 +121,7 @@ async def main_async(args) -> int:
     counts = {k: sum(1 for _, s, _, _ in results if s == k) for k in ("PASS", "FAIL", "SKIP")}
     rooms = f"{ROOM_BASE + nonce * 100}..{ROOM_BASE + nonce * 100 + max(next(counter) - 1, 0)}"
     print(f"\n{counts['PASS']} passed, {counts['FAIL']} failed, {counts['SKIP']} skipped "
-          f"in {total:.1f} s (grace {cfg.grace} s, rooms {rooms})")
+          f"in {total:.1f} s (grace {cfg.grace} s, join timeout {cfg.join_timeout} s, rooms {rooms})")
     return 1 if counts["FAIL"] else 0
 
 

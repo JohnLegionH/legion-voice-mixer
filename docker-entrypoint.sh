@@ -50,6 +50,10 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 # (0 disables). The plugin reads it from the process environment, so it is exported here.
 : "${JS_EMPTY_ROOM_GRACE_S:=60}"
 export JS_EMPTY_ROOM_GRACE_S
+# O-75: seconds a joined participant may go without its PeerConnection coming up before the plugin reaps
+# it (0 disables). Read by the plugin from the process environment, so exported like the grace.
+: "${JS_JOIN_MEDIA_TIMEOUT_S:=30}"
+export JS_JOIN_MEDIA_TIMEOUT_S
 
 is_true() {
 	case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -91,7 +95,7 @@ echo "[entrypoint] INFO: websockets transport enabled=${JS_WS_ENABLED} port=${JS
 echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH} rtp=${JS_RTP_PORT_RANGE}"
 echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
-echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S}"
+echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
 # A blank secret was always an open API: an empty JS_API_SECRET leaves the Janus
@@ -266,5 +270,5 @@ if [ -d "$OVERRIDE_DIR" ]; then
 fi
 
 if [ "$JS_WS_ENABLED" = true ]; then ws_desc="${JS_WS_PORT}"; else ws_desc="off"; fi
-echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${ws_desc} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_1_1_mapping=${NAT_MAPPING:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST} empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S}"
+echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${ws_desc} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_1_1_mapping=${NAT_MAPPING:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST} empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 exec "$JANUS_BIN" "$@"

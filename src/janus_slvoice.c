@@ -39,7 +39,9 @@
  *  - Lifecycle. Hangup leaves the room (O-56); leave and destroy reset all
  *    room-scoped state (O-68); a non-permanent room empty for JS_EMPTY_ROOM_GRACE_S
  *    (default 60 s) is destroyed by the sender thread's once-a-second sweep, which
- *    stops its tick thread (O-54).
+ *    stops its tick thread (O-54); a participant whose PeerConnection is not up
+ *    JS_JOIN_MEDIA_TIMEOUT_S (default 30 s) after joining is reaped by its room's
+ *    tick the same way a hangup leaves (O-75).
  *  - Diagnostics. The query_session diag vector and per-room tick histogram; the
  *    full SDP dumps at LOG_VERB with ICE credentials redacted (O-66). Echo-to-self
  *    ({"echo":true} on SLData, or SLV_ECHO_AUTOSTART) remains a per-participant
@@ -114,6 +116,12 @@
  * JS_EMPTY_ROOM_GRACE_S (the entrypoint exports it; 0 disables, i.e. the pre-O-54 behaviour). */
 #ifndef SLV_EMPTY_ROOM_GRACE_S
 #define SLV_EMPTY_ROOM_GRACE_S 60
+#endif
+/* O-75: seconds a joined participant may go without its PeerConnection ever coming up before its room's
+ * tick reaps it. Overridable at runtime with JS_JOIN_MEDIA_TIMEOUT_S (the entrypoint exports it; 0
+ * disables, i.e. the pre-O-75 behaviour where such a participant stayed until its session was destroyed). */
+#ifndef SLV_JOIN_MEDIA_TIMEOUT_S
+#define SLV_JOIN_MEDIA_TIMEOUT_S 30
 #endif
 
 /* ---- Phase 2 mixer / audio constants --------------------------------------
@@ -295,6 +303,9 @@ static gboolean echo_autostart = FALSE;
 /* O-54: empty-room grace in seconds (SLV_EMPTY_ROOM_GRACE_S, env JS_EMPTY_ROOM_GRACE_S, parsed in
  * janus_slvoice_init). 0 disables the grace destroy. */
 static guint slv_empty_room_grace_s = SLV_EMPTY_ROOM_GRACE_S;
+/* O-75: join-media timeout in seconds (SLV_JOIN_MEDIA_TIMEOUT_S, env JS_JOIN_MEDIA_TIMEOUT_S, parsed in
+ * janus_slvoice_init). 0 disables the reap. */
+static guint slv_join_media_timeout_s = SLV_JOIN_MEDIA_TIMEOUT_S;
 
 /* ---- Rooms (slv_regions) and participants (folded into the session) -------
  * One WebRTC peer = one participant. A room is a lightweight membership +
@@ -389,6 +400,13 @@ typedef struct janus_slvoice_session {
 
 	volatile gint webrtc_up;     /* setup_media(1) / hangup_media(0) — coarse ICE/DTLS up */
 	volatile gint dc_open;       /* data_ready seen: the data channel is writable */
+	/* O-75 join-media floor. join_ts: monotonic us of the join into the current room (0 = not joined through
+	 * the join arm; guarded by mutex). media_seen: set by setup_media, re-derived at each join, so it means
+	 * "this participant's PeerConnection came up since THIS join". A participant still at media_seen == 0
+	 * slv_join_media_timeout_s after join_ts is reaped by its room's tick; one that had media and lost it
+	 * keeps media_seen == 1 and is left to hangup_media (O-56). */
+	gint64 join_ts;
+	volatile gint media_seen;
 
 	/* ---- Media state (guarded by mutex; ALL buffers allocated at join in
 	 * janus_slvoice_media_alloc_locked, freed at leave/destroy — nothing is
@@ -609,6 +627,10 @@ static janus_slvoice_room *janus_slvoice_room_ref_by_id(guint64 id) {
 /* M-A2A-2: forward declaration — leave_room (below) announces via push_presence,
  * which is defined after it. */
 static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *who, gboolean join);
+/* O-56 / O-75: the one "media is gone" teardown (hangup_media and the join-media reap) and the reap itself,
+ * called from the room tick, which is defined before both. */
+static void janus_slvoice_media_gone(janus_slvoice_session *session);
+static void janus_slvoice_reap_no_media(janus_slvoice_session *s, janus_slvoice_room *room, gint64 join_ts, gint64 now);
 
 /* Remove a session from its room (if any) and drop the room ref. The session
  * that transitions room from non-NULL to NULL is the one that unrefs — making
@@ -1153,6 +1175,25 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 			JANUS_SLVOICE_PACKAGE, slv_empty_room_grace_s);
 	else
 		JANUS_LOG(LOG_INFO, "[%s] Empty-room grace destroy DISABLED (JS_EMPTY_ROOM_GRACE_S=0): rooms live until an explicit destroy\n",
+			JANUS_SLVOICE_PACKAGE);
+
+	/* O-75: join-media timeout from the process env, parsed like the grace above (0 disables the reap). */
+	slv_join_media_timeout_s = SLV_JOIN_MEDIA_TIMEOUT_S;
+	const char *jmt_env = getenv("JS_JOIN_MEDIA_TIMEOUT_S");
+	if(jmt_env != NULL && *jmt_env != '\0') {
+		char *jmt_end = NULL;
+		long jmt = strtol(jmt_env, &jmt_end, 10);
+		if(jmt_end != NULL && *jmt_end == '\0' && jmt >= 0 && jmt <= 86400)
+			slv_join_media_timeout_s = (guint)jmt;
+		else
+			JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_JOIN_MEDIA_TIMEOUT_S='%s' (want an integer 0-86400); using %u s\n",
+				JANUS_SLVOICE_PACKAGE, jmt_env, slv_join_media_timeout_s);
+	}
+	if(slv_join_media_timeout_s > 0)
+		JANUS_LOG(LOG_INFO, "[%s] Join-media reap: a participant whose PeerConnection is not up %u s after joining is removed (JS_JOIN_MEDIA_TIMEOUT_S)\n",
+			JANUS_SLVOICE_PACKAGE, slv_join_media_timeout_s);
+	else
+		JANUS_LOG(LOG_INFO, "[%s] Join-media reap DISABLED (JS_JOIN_MEDIA_TIMEOUT_S=0): a participant without media stays until its session ends\n",
 			JANUS_SLVOICE_PACKAGE);
 
 	/* Amendment 8: runtime spatial DSP overrides from [general]; metres->stored
@@ -2238,6 +2279,10 @@ static void *janus_slvoice_handler(void *data) {
 			g_free(session->display);
 			session->display = display ? g_strdup(display) : NULL;
 			session->room = room;
+			/* O-75: start this join's media clock. media_seen follows webrtc_up rather than being cleared, so a
+			 * PeerConnection that is (implausibly) already up at join is never counted as missing. */
+			session->join_ts = janus_get_monotonic_time();
+			g_atomic_int_set(&session->media_seen, g_atomic_int_get(&session->webrtc_up));
 			/* Preallocate all codec + mix buffers now, at join — the tick never
 			 * allocates. Failure is logged but non-fatal (participant holds the
 			 * session, just contributes/receives silence). */
@@ -2999,6 +3044,15 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		sess[count++] = (janus_slvoice_session *)v;
 	}
 
+	/* O-75: about once a second, pick out participants whose PeerConnection never came up within
+	 * slv_join_media_timeout_s of joining. They are only COLLECTED here (with a session ref): the reap
+	 * goes through leave_room, which takes room->mutex, so it runs after this tick releases it. */
+	janus_slvoice_session *reap[SLV_MAX_MIX];
+	gint64 reap_join_ts[SLV_MAX_MIX];
+	int n_reap = 0;
+	gboolean check_reap = slv_join_media_timeout_s > 0 && (room->tick_seq % (1000 / SLV_TICK_MS)) == 0;
+	gint64 reap_after_us = (gint64)slv_join_media_timeout_s * G_USEC_PER_SEC;
+
 	/* Pass 1: decode each source once. */
 	for(int i = 0; i < count; i++) {
 		janus_slvoice_session *s = sess[i];
@@ -3007,6 +3061,12 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		audible[i] = (s->dec_samples > 0) ? 1 : 0;
 		srcbuf[i] = s->decbuf;   /* tick-owned; stable for the rest of this tick */
 		janus_slvoice_snapshot_geometry_locked(s);   /* Phase 3b: geometry + §7.1 leash (tick-owned) */
+		if(check_reap && s->join_ts != 0 && !g_atomic_int_get(&s->media_seen)
+				&& !g_atomic_int_get(&s->destroyed) && t0 - s->join_ts >= reap_after_us) {
+			janus_refcount_increase(&s->ref);
+			reap_join_ts[n_reap] = s->join_ts;
+			reap[n_reap++] = s;
+		}
 		janus_mutex_unlock(&s->mutex);
 	}
 
@@ -3160,6 +3220,12 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	if(ms > SLV_TICK_WARN_MS)
 		JANUS_LOG(LOG_WARN, "[%s] room %"PRIu64" tick %"PRIu64" took %.1fms (>%.0fms deadline)\n",
 			JANUS_SLVOICE_PACKAGE, room->room_id, seq, ms, SLV_TICK_WARN_MS);
+
+	/* O-75: reap what pass 1 collected, outside room->mutex (see there). Not timed by the histogram. */
+	for(int r = 0; r < n_reap; r++) {
+		janus_slvoice_reap_no_media(reap[r], room, reap_join_ts[r], t0);
+		janus_refcount_decrease(&reap[r]->ref);
+	}
 }
 
 /* The per-room 20ms tick thread. Holds a room ref for its lifetime. */
@@ -3250,6 +3316,7 @@ void janus_slvoice_setup_media(janus_plugin_session *handle) {
 	if(session == NULL)
 		return;
 	g_atomic_int_set(&session->webrtc_up, 1);
+	g_atomic_int_set(&session->media_seen, 1);   /* O-75: this join's media came up; never reaped for "no media" */
 	JANUS_LOG(LOG_INFO, "[%s-%p] WebRTC media is now available (ICE connected, DTLS complete, PeerConnection up)\n",
 		JANUS_SLVOICE_PACKAGE, handle);
 	if(echo_autostart) {
@@ -3466,11 +3533,20 @@ void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 	janus_slvoice_session *session = (janus_slvoice_session *)handle->plugin_handle;
 	if(session == NULL)
 		return;
+	janus_slvoice_media_gone(session);
+}
+
+/* O-56 / O-75: take a participant's media down and out of its room -- the body hangup_media always had,
+ * shared with the join-media reap so both leave identically: leave_room (the "l" presence, the roster row
+ * and the SLV_MAX_MIX slot, reset_room_state, the O-54 grace clock if it was the last member), then echo
+ * stop and media_free with the jitter-buffer cursors and RTP liveness stamp zeroed, so a new PeerConnection
+ * or a rejoin starts clean. Leave FIRST (it blocks on room->mutex while a tick runs, so the tick is done
+ * with this participant), THEN free its media -- the order destroy_session and the "leave" arm use.
+ * Must not be called with room->mutex held. */
+static void janus_slvoice_media_gone(janus_slvoice_session *session) {
 	g_atomic_int_set(&session->webrtc_up, 0);
 	g_atomic_int_set(&session->dc_open, 0);
 	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: a re-attach must re-prove */
-	/* Leave FIRST (blocks on room->mutex while a tick runs, so the tick is done with this participant),
-	 * THEN free its media -- the same order destroy_session and the "leave" arm use. */
 	janus_slvoice_leave_room(session);
 	janus_mutex_lock(&session->mutex);
 	janus_slvoice_echo_stop_locked(session);
@@ -3480,4 +3556,28 @@ void janus_slvoice_hangup_media(janus_plugin_session *handle) {
 	session->jb_first_seq = 0;
 	session->last_rtp_us = 0;   /* the active-set cull restarts from the next packet */
 	janus_mutex_unlock(&session->mutex);
+}
+
+/* O-75: reap a participant the room tick found still without media slv_join_media_timeout_s after its
+ * join. Re-checked under session->mutex first: if the session has since left this room, rejoined (join_ts
+ * changed), brought its PeerConnection up (media_seen) or been destroyed, nothing happens. The session is
+ * then taken down exactly as hangup_media does; it stays a valid Janus handle, so the peer (or the sim, on
+ * the viewer's re-provision) can join again with a new offer. Called from the room's own tick thread with a
+ * session ref held and room->mutex NOT held; `room` is kept alive by the tick thread's ref. */
+static void janus_slvoice_reap_no_media(janus_slvoice_session *s, janus_slvoice_room *room, gint64 join_ts, gint64 now) {
+	janus_mutex_lock(&s->mutex);
+	gboolean still = s->room == room && s->join_ts == join_ts && !g_atomic_int_get(&s->media_seen)
+		&& !g_atomic_int_get(&s->destroyed);
+	char *who = NULL;
+	if(still) {
+		who = s->display ? g_strdup(s->display) : NULL;
+		s->join_ts = 0;
+	}
+	janus_mutex_unlock(&s->mutex);
+	if(!still)
+		return;
+	janus_slvoice_media_gone(s);
+	JANUS_LOG(LOG_INFO, "[slvoice] %s reaped from room %"PRIu64": no media %us after join\n",
+		who ? who : "??", room->room_id, (unsigned)((now - join_ts) / G_USEC_PER_SEC));
+	g_free(who);
 }

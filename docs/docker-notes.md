@@ -63,6 +63,7 @@ over the whole config dir by default (that was the old model).
 | `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; `false` also sets `transports: { disable = "libjanus_websockets.so" }` (O-55) | `true` |
 | `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (used when `JS_WS_ENABLED=true`) | `8188` |
 | `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed (O-54); `0` disables; an invalid value is ignored with a WARN | `60` |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a participant whose PeerConnection is not up this many seconds after joining is reaped from its room, as a hangup leaves (O-75); `0` disables; an invalid value is ignored with a WARN | `30` |
 
 The entrypoint also forces `http = true` and `admin_http = true`, and sets `ws`
 from `JS_WS_ENABLED`.
@@ -181,12 +182,20 @@ its knobs have no "before".
 | `JS_WS_ENABLED` | `true` | WebSockets transport loaded and published | `b96e7b3` (default `false`; restored to `true` by hotfix 6m-1) |
 | `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
 | `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | the O-75 commit (`fix(mixer): O-75 reap participants with no media 30s after join; harness S10`) |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` are test
 seams for `tests/entrypoint_test.sh`, not operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **O-75 commit (`fix(mixer): O-75 reap participants with no media 30s after join; harness S10`)**
+  - **A participant whose PeerConnection never comes up is reaped** `JS_JOIN_MEDIA_TIMEOUT_S`
+    (default 30 s) after joining, logging `[slvoice] <display> reaped from room <id>: no media <n>s
+    after join`. Before, it held its roster row and mix slot, and kept the room from its grace destroy,
+    for as long as its Janus session lived. This default deliberately changes behaviour: it is the fix.
+    `JS_JOIN_MEDIA_TIMEOUT_S=0` restores the old behaviour. A participant that had media and lost it is
+    unaffected (the O-56 hangup path).
 - **`b96e7b3` (slice 6m) + hotfix 6m-1**
   - **Blank `JS_API_SECRET` or `JS_ADMIN_SECRET` now refuses to start (O-65).**
     `[entrypoint] FATAL: … empty; refusing to start. Set JS_API_SECRET=<the sim's

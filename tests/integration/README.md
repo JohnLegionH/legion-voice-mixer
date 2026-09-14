@@ -32,9 +32,10 @@ self-heals; pass `--no-restart` when people are talking.
 | `--admin-url` | `http://localhost:24225/voiceAdmin` | Admin API base (the oracle) |
 | `--env` | `<repo>/.env` | where `JS_API_SECRET` / `JS_ADMIN_SECRET` are read from |
 | `--api-secret`, `--admin-secret` | from `--env` | override the secrets |
-| `--compose-file` | `<repo>/docker-compose.yml` | S4 `restart janus`, S5 `logs janus` |
+| `--compose-file` | `<repo>/docker-compose.yml` | S4 `restart janus`, S5 and S10 `logs janus` |
 | `--only S3` / `--only S1,S7` | all | run a subset (repeatable) |
 | `--grace N` | `60` | the mixer's `JS_EMPTY_ROOM_GRACE_S`; S5 waits it out, so a short grace (set it in `.env`, `docker compose up -d janus`) makes a full run fast |
+| `--join-timeout N` | `30` | the mixer's `JS_JOIN_MEDIA_TIMEOUT_S`; S10 waits it out (a short value in `.env` makes a full run faster) |
 | `--no-restart` | off | skip S4 |
 | `-v` | off | peer and harness logs, tracebacks |
 
@@ -79,6 +80,7 @@ shown wrong; report it, do not bend the scenario to pass.
 | S6 | A sends `ug` for 33 distinct sources, then a mute batch for a 34th | `peer_ctl_entries` 32, `peer_ctl_full_drops` 1, then `mod_muted_entries` 1 | **O-49** a full `peer_ctl` cannot eat moderation |
 | S7 | B sends `sp/sh/lp/lh`, then a `ug`-only message | `last_msg_fields_seen` = `ug`, `last_data_fields_seen` still has `sp`, `lp` | **O-64** geometry persists |
 | S8 | B rejoins with the same display while its old handle is still up (two rows, the mixer's duplicate-display WARN), then the old PeerConnection dies with no leave | within 5 s one row for that display, and it is the new handle; the old handle is out of the room | **O-56** / **O-13** duplicate-display residue |
+| S10 | G creates its Janus session and joins R with an offer stripped of ICE candidates, then never brings a PeerConnection up (it only long-polls, as the sim does) | G listed right after the join; gone no earlier than `--join-timeout` − 1 s and within `--join-timeout` + 5 s; the log shows `[slvoice] <G> reaped from room <R>: no media <n>s after join`; a fresh join by G's display is admitted and gets media | **O-75** join-media reap |
 
 **Why S8 joins before it crashes.** The brief's order — drop the PeerConnection, then rejoin at once —
 never overlaps on a local mixer: Janus processes the old PeerConnection's DTLS close before the

@@ -15,6 +15,33 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer O-75 — 2026-09-14 (join-media reap)
+
+Commit `fix(mixer): O-75 reap participants with no media 30s after join; harness S10`. Deployed
+2026-09-14 07:39 CDT (image `0a3624b9`; full local harness S1–S8 and S10 passed against it). The
+plugin still reports version `1.0.0`.
+
+O-items: **O-75** (a participant whose PeerConnection never comes up no longer holds a room slot
+indefinitely). New integration scenario **S10**; CI sets `JS_JOIN_MEDIA_TIMEOUT_S` and runs S10.
+
+### Behaviour changes on upgrade
+- **New knob `JS_JOIN_MEDIA_TIMEOUT_S`, default 30, and its default changes behaviour.** A participant
+  whose PeerConnection is not up 30 s after its join is removed from the room exactly as a hangup
+  removes it (leave notice, roster row and mix slot freed, room-scoped state reset, the room's grace
+  clock started if it was the last member). The mixer logs `[slvoice] <display> reaped from room <id>:
+  no media <n>s after join`. Before, such a participant stayed until its Janus session ended, which
+  the sim's long-poll could keep alive indefinitely (seen twice on 2026-09-13, ledger O-74/O-75).
+  - This deliberately departs from the compatibility rule's "default reproduces the previous release":
+    the old behaviour is the defect being fixed.
+  - `JS_JOIN_MEDIA_TIMEOUT_S=0` restores it.
+  - Participants that had media and lost it are not affected; that is the O-56 hangup path.
+- The entrypoint's effective-value line and start line now also print `join_media_timeout_s`.
+
+### One-time migrations
+- None.
+
+---
+
 ## Mixer 1.0.0 — 2026-09-14 (slice 8b)
 
 Commit `docs(mixer): O-71 resync header/README/docs to the shipped plugin, version

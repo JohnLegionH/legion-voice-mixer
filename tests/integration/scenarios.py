@@ -1,4 +1,4 @@
-"""The churn scenarios S1-S8 -- the mixer's robustness contract (README.md in this directory).
+"""The churn scenarios S1-S8 and S10 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down
 in a finally block. Every expectation is a poll of the oracle (Admin API handle_info, or the
@@ -227,6 +227,45 @@ async def s8_hangup_rejoin_same_display(ctx: Ctx) -> None:
     await ctx.ready(b2)
 
 
+async def s10_no_media_reap(ctx: Ctx) -> None:
+    limit = ctx.cfg.join_timeout
+    r = ctx.new_room()
+    dg = new_display()
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    g = await ctx.join_without_media("G", r, dg)
+    joined = time.monotonic()
+    await ctx.until_participants(r, lambda rows: displays(rows) == [dg], "G present right after its join")
+    first = await ctx.info(g)
+    if first is None or first.get("room") != r or first.get("datachannel_open") is True:
+        raise Fail("G's handle is in the room with no media (datachannel_open not true)", pick(first))
+
+    await until(lambda: ctx.control.participants(r), lambda rows: dg not in displays(rows),
+                f"G gone within the {limit} s join timeout + 5 s (O-75)",
+                timeout=max(1.0, limit + 5 - (time.monotonic() - joined)), step=0.5,
+                show=lambda rows: {"g_listed": dg in displays(rows), "waited_s": round(time.monotonic() - joined, 1)})
+    waited = time.monotonic() - joined
+    if waited < limit - 1:
+        raise Fail("G reaped before its join timeout", {"waited_s": round(waited, 1), "join_timeout_s": limit})
+    after = await ctx.info(g)
+    if after is not None and after.get("room") == r:
+        raise Fail("G's handle still reports the room after the reap", pick(after))
+
+    res = await compose(ctx.cfg, "logs", "--no-log-prefix", "--since", since, "janus")
+    m = re.search(rf"\[slvoice\] {re.escape(dg)} reaped from room {r}: no media (\d+)s after join", res.stdout or "")
+    if m is None:
+        raise Fail(f"log line '[slvoice] {dg} reaped from room {r}: no media <n>s after join'",
+                   {"compose_rc": res.returncode,
+                    "reap_lines": re.findall(r"\[slvoice\] \S+ reaped from room \d+: no media \d+s after join",
+                                             res.stdout or "")[-3:]})
+    if int(m.group(1)) < limit:
+        raise Fail("logged no-media time shorter than the join timeout", {"logged_s": int(m.group(1)), "join_timeout_s": limit})
+
+    g2 = await ctx.join("G2", r, dg)
+    await ctx.ready(g2)
+    await ctx.until_participants(r, lambda rows: displays(rows) == [dg],
+                                 "a fresh join by G's display is admitted and gets media (one row)")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -236,4 +275,5 @@ SCENARIOS = [
     Scenario("S6", "peer_ctl table full does not eat moderation", "O-49", s6_peer_ctl_full),
     Scenario("S7", "geometry persistence", "O-64", s7_geometry_persistence),
     Scenario("S8", "hangup then rejoin with the same display", "O-56, O-13", s8_hangup_rejoin_same_display),
+    Scenario("S10", "join whose PeerConnection never comes up is reaped", "O-75", s10_no_media_reap),
 ]
