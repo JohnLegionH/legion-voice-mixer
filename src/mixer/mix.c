@@ -127,3 +127,12 @@ double slv_mix_rms(const float *buf, size_t n) {
 int slv_mix_is_silent(const float *buf, size_t n, double threshold) {
 	return slv_mix_rms(buf, n) <= threshold;
 }
+
+int slv_mix_encode_skip(int summed, const float *frame, size_t n) {
+	if(summed <= 0 || frame == NULL)
+		return 1;
+	for(size_t i = 0; i < n; i++)
+		if(frame[i] != 0.0f)
+			return 0;
+	return 1;
+}

@@ -250,9 +250,36 @@ static void test_fill_frame(void) {
 	CHECK(n == 0 && err == -3, "decode error: 0 samples and the error is reported");
 }
 
+/* ---- O-82: a quiet but audible mix is encoded ----------------------------- */
+static void test_encode_skip(void) {
+	printf("test_encode_skip\n");
+	enum { N = 1920 };
+	static float src[N], out[N];
+	const float *srcs[1] = { src };
+	int active[1] = { 1 };
+
+	/* One talker at RMS 0.1, 59 m away with the default curve (ref 10 m, cutoff 60 m,
+	 * exponent 2): gain = ((60 - 59) / (60 - 10))^2 = 0.02^2 = 0.0004, and a centred
+	 * constant-power pan scales each channel by cos(pi/4). Frame RMS ~ 2.83e-5. */
+	fill(src, N, 0.1f);
+	float g = 0.0004f * 0.70710678f;
+	float gl[1] = { g }, gr[1] = { g };
+	int summed = slv_mix_nminus1_stereo(out, N, srcs, active, NULL, gl, gr, 1, -1);
+	CHECK(summed == 1, "quiet: the attenuated talker is summed");
+	CHECK(slv_mix_is_silent(out, N, 0.02), "quiet: the old 0.02 RMS floor would have skipped this mix");
+	CHECK(!slv_mix_encode_skip(summed, out, N), "quiet: the encode-skip decision encodes it");
+
+	fill(out, N, 0.0f);
+	CHECK(slv_mix_encode_skip(0, out, N), "nothing summed: skipped");
+	CHECK(slv_mix_encode_skip(1, out, N), "summed but exactly zero: skipped");
+	out[N - 1] = 1e-9f;
+	CHECK(!slv_mix_encode_skip(1, out, N), "any non-zero sample: encoded");
+}
+
 int main(void) {
 	printf("== test_mix ==\n");
 	test_fill_frame();
+	test_encode_skip();
 	test_nminus1_excludes_self();
 	test_active_gating();
 	test_per_source_mute();

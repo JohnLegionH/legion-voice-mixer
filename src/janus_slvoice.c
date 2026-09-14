@@ -145,8 +145,8 @@
 /* O-81: packets decoded per tick at most, so a viewer's 10 ms packets fill a 20 ms frame.
  * 8 = 20 ms / 2.5 ms, the shortest Opus frame. */
 #define SLV_FILL_MAX_CHUNKS 8
-/* Energy threshold for the simple VAD (RMS of decoded float, 0..1). Also the
- * encode-skip silence floor for a listener's mix. */
+/* Energy threshold for the simple VAD (RMS of decoded float, 0..1). Not the
+ * encode-skip test, which has no level floor (O-82, slv_mix_encode_skip). */
 #define SLV_VAD_RMS         0.02f
 /* DTX/VAD cull release hold: keep a talker in the active set this long after
  * its last RTP, so a DTX gap / brief pause does not chop the next word onset
@@ -3198,12 +3198,9 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 				mutes, gainsL, gainsR, count, i);
 			slv_mix_clamp(frame, SLV_FRAME_TOTAL);
 		}
-		/* RMS of the finalized output frame relayed to this listener. slv_mix_is_silent
-		 * used to compute this and throw it away; compute it once via the same public
-		 * slv_mix_rms and RETAIN it for query_session (last_mix_rms). The silence test
-		 * below is byte-for-byte the same as slv_mix_is_silent (<= SLV_VAD_RMS), so the
-		 * encode-skip decision, the threshold, the mix, and everything audible are
-		 * identical. DIAGNOSTIC-ONLY — last_mix_rms drives nothing. */
+		/* RMS of the finalized output frame relayed to this listener, retained for
+		 * query_session (last_mix_rms). DIAGNOSTIC-ONLY: last_mix_rms drives nothing;
+		 * the encode-skip decision below does not use it (O-82). */
 		double out_rms = slv_mix_rms(frame, SLV_FRAME_TOTAL);
 		s->last_mix_rms = out_rms;
 		/* Phase 3b item 4: per-channel RMS of the interleaved output (even = left,
@@ -3219,7 +3216,10 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		}
 		s->last_mix_rms_l = sqrt(sumsq_l / (double)SLV_FRAME_SAMPLES);
 		s->last_mix_rms_r = sqrt(sumsq_r / (double)SLV_FRAME_SAMPLES);
-		gboolean silence = (summed == 0) || (out_rms <= SLV_VAD_RMS);
+		/* O-82: skip the encode only when nothing was summed or the frame is exactly zero. The
+		 * old floor (out_rms <= SLV_VAD_RMS) dropped quiet but audible mixes: falloff takes a
+		 * single talker toward zero at the cull edge, below any fixed floor. */
+		gboolean silence = slv_mix_encode_skip(summed, frame, SLV_FRAME_TOTAL) ? TRUE : FALSE;
 		if(!silence)
 			s->frames_mixed++;
 		janus_slvoice_encode_relay(s, frame, SLV_FRAME_SAMPLES, silence);

@@ -113,12 +113,21 @@ void slv_mix_apply_gain(float *buf, size_t n, float gain);
 void slv_mix_clamp(float *buf, size_t n);
 
 /*! \brief RMS (root-mean-square) energy of \p buf, in the same [0,~1] scale as
- * the samples. Returns 0 for an empty buffer. Used both for the per-participant
- * power/VAD report and for the encode-skip silence test. */
+ * the samples. Returns 0 for an empty buffer. Used for the per-participant
+ * power/VAD report and the per-listener mix-level diagnostics. */
 double slv_mix_rms(const float *buf, size_t n);
 
-/*! \brief Silence test for DTX / encode-skip: non-zero when the buffer's RMS is
- * at or below \p threshold (i.e. nothing audible to encode). */
+/*! \brief Threshold silence test: non-zero when the buffer's RMS is at or below
+ * \p threshold. Not the encode-skip decision (see \ref slv_mix_encode_skip). */
 int slv_mix_is_silent(const float *buf, size_t n, double threshold);
+
+/*! \brief Encode-skip decision for one listener's finished frame (O-82): non-zero
+ * when nothing was summed (\p summed <= 0) or every sample is exactly zero.
+ *
+ * There is deliberately no level threshold. Distance falloff drives a single
+ * talker's contribution toward zero at the cull edge, so any fixed floor would
+ * silence a mix that is quiet but audible. Opus DTX still suppresses a near-silent
+ * frame after the encode. */
+int slv_mix_encode_skip(int summed, const float *frame, size_t n);
 
 #endif /* SLV_MIX_H */
