@@ -8,6 +8,8 @@ so the image build can run this:
 ADDR_PROBE_DIR points at the directory holding addr_probe.py (default: ../entrypoint).
 """
 
+import contextlib
+import io
 import os
 import socket
 import struct
@@ -16,9 +18,11 @@ import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 sys.path.insert(0, os.environ.get("ADDR_PROBE_DIR", os.path.join(HERE, "..", "entrypoint")))
 
 import addr_probe  # noqa: E402
+import fakes  # noqa: E402
 
 TXID = bytes(range(12))
 
@@ -80,6 +84,12 @@ class Stun(unittest.TestCase):
     def test_xor_mapped_address(self):
         reply = stun_success(TXID, [xor_mapped("174.82.163.190", 65234)])
         self.assertEqual(addr_probe.parse_stun_response(reply, TXID), "174.82.163.190")
+
+    def test_mapped_port(self):
+        reply = stun_success(TXID, [xor_mapped("174.82.163.190", 10050)])
+        self.assertEqual(addr_probe.parse_stun_mapped(reply, TXID), ("174.82.163.190", 10050))
+        reply = stun_success(TXID, [mapped("198.51.100.4", 20000)])
+        self.assertEqual(addr_probe.parse_stun_mapped(reply, TXID), ("198.51.100.4", 20000))
 
     def test_xor_mapped_wins_over_mapped(self):
         reply = stun_success(TXID, [mapped("192.0.2.1", 1), xor_mapped("203.0.113.7", 2)])
@@ -144,6 +154,46 @@ class Participants(unittest.TestCase):
         self.assertIsNone(addr_probe.sum_participants({"error": "x"}))
         self.assertIsNone(addr_probe.sum_participants({"list": [{"room": 1}]}))
         self.assertIsNone(addr_probe.sum_participants({"list": [{"num_participants": True}]}))
+
+
+class ParticipantsPoll(unittest.TestCase):
+    """The poll the A.1 restart action waits on (A.2 carry-over): a failed or unauthorised poll is never a count."""
+
+    def setUp(self):
+        self.janus = fakes.FakeJanusHTTP(secret="s3cret", rooms=(2, 1))
+
+    def tearDown(self):
+        self.janus.close()
+
+    def test_counts_participants_with_the_secret(self):
+        self.assertEqual(addr_probe.participants_probe(self.janus.url, "s3cret", 5), (3, None))
+
+    def test_unauthorised_poll_is_not_zero(self):
+        total, reason = addr_probe.participants_probe(self.janus.url, "wrong", 5)
+        self.assertIsNone(total)
+        self.assertTrue(reason.startswith("unauthorized: Unauthorized request"), reason)
+        self.assertIn("JS_API_SECRET", reason)
+
+    def test_unreachable_poll_is_not_zero(self):
+        total, reason = addr_probe.participants_probe("http://127.0.0.1:%d/voice" % fakes.closed_tcp_port(), "s3cret", 2)
+        self.assertIsNone(total)
+        self.assertTrue(reason.startswith("no reply from"), reason)
+
+    def test_main_prints_no_count_for_an_unauthorised_poll(self):
+        out, err = io.StringIO(), io.StringIO()
+        old = os.environ.get("JS_API_SECRET")
+        os.environ["JS_API_SECRET"] = "wrong"
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = addr_probe.main(["addr_probe.py", "participants", self.janus.url])
+        finally:
+            if old is None:
+                del os.environ["JS_API_SECRET"]
+            else:
+                os.environ["JS_API_SECRET"] = old
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("addr_probe: participants: unauthorized", err.getvalue())
 
 
 class LoopbackServer(object):

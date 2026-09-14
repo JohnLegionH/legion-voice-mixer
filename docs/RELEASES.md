@@ -15,6 +15,62 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.2: startup self-check (untagged) — 2026-09-14
+
+| Deployed (CDT) | Image | Rollback |
+|---|---|---|
+| 18:47 | `de395537` | no tag. The A.1 image `d2669777` was dropped from the image store when the rebuild moved `:latest`. Rebuild commit `9831943` for A.1, or use `legion-voice-mixer:rollback-pre-a1` (V-4) with `.env.bak-a1` |
+
+This is an entrypoint-only change; the plugin code is the same as V-4. `legion-voice-selfcheck` checks
+six things: C1 the advertised address, C2 the outbound media mapping, C3 the RTP range, C4 signalling,
+C5 admin exposure and C6 STUN/TURN.
+- **At start:** it runs in the background and prints one `[selfcheck]` block.
+- **On demand:** `--json`, exit 0/1/2.
+- **Report file:** `/run/legion-voice/selfcheck.json`.
+
+Details are in `docs/docker-notes.md`, "Startup self-check".
+
+**Verified:**
+- **Image build:** C suites; `test_addr_probe.py` 24 tests, OK; `test_selfcheck.py` 41 tests, OK;
+  `entrypoint_test.sh` 91 passed, 0 failed.
+- **Startup block on Legion Grid** (2.3 s, bound 20 s):
+  - C1 PASS: `174.82.163.190`.
+  - **C2 FAIL:** local 10000/10100/10200 → `174.82.163.190:59257/59255/59258`, remapped. The next run
+    mapped them to 49934–49936.
+  - C3 PASS; C4 PASS; C5 PASS (admin port not reachable at the public address).
+  - C6 WARN: no TURN.
+- **On demand:** `legion-voice-selfcheck --json` → the same results, exit 1. Its stdout is identical to
+  the report file.
+- **Harness:** 11/11 in 272.7 s.
+- **Participant poll (A.1 restart action), against the live API with `JS_API_SECRET`, during the
+  harness:**
+  - counts of 1 and 2 were returned;
+  - a wrong secret returned `unauthorized: Unauthorized request (wrong or missing secret/token)`, exit 1,
+    no count;
+  - during S4's restart it returned `no reply … Connection refused`, exit 1, no count.
+
+**Open finding (C2).** Outbound UDP from the media range leaves with remapped, sequential ephemeral
+ports. That fits a remap by Docker Desktop's network layer before the router, but it is not proven. C2
+proves the outbound mapping only. Whether inbound UDP 10000-10200 reaches Janus through the router
+forward is for an external test (A.6).
+
+### Behaviour changes on upgrade
+- **Self-check at every start** (`JS_SELFCHECK=on`, `JS_SELFCHECK_TIMEOUT_S=20`). It only reports:
+  it changes no configuration and never delays Janus. Traffic it adds:
+  - brief UDP binds on sampled RTP ports;
+  - three STUN requests from the media range, plus one from an ephemeral port;
+  - one TCP connection per public address to the admin port.
+- **New files:** `/run/legion-voice/effective-config.json` (non-secret effective values) and
+  `/run/legion-voice/selfcheck.json`.
+- **A failed, unauthorised or malformed participant poll** under `JS_PUBLIC_IP_CHANGE_ACTION=restart`
+  is now logged with its reason, and is still never counted as zero.
+- **New knobs:** `JS_SELFCHECK`, `JS_SELFCHECK_TIMEOUT_S`.
+
+### One-time migrations
+- None.
+
+---
+
 ## Mixer A.1: address configuration (untagged) — 2026-09-14
 
 | Deployed (CDT) | Image | Rollback tag |

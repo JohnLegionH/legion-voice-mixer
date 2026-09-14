@@ -63,6 +63,9 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 : "${JS_PUBLIC_IP_REFRESH_S:=300}"
 : "${JS_PUBLIC_IP_CHANGE_ACTION:=warn}"
 : "${JS_PUBLIC_IP_RESTART_MAX_WAIT_S:=900}"
+# Slice A.2: the startup self-check (docs/docker-notes.md, "Startup self-check").
+: "${JS_SELFCHECK:=on}"
+: "${JS_SELFCHECK_TIMEOUT_S:=20}"
 
 # The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
 SLV_LIB_DIR=${SLV_LIB_DIR:-/usr/local/lib/legion-voice}
@@ -91,6 +94,19 @@ JS_PUBLIC_IP_DISCOVERY=$(printf '%s' "$JS_PUBLIC_IP_DISCOVERY" | tr '[:upper:]' 
 JS_PUBLIC_IP_CHANGE_ACTION=$(printf '%s' "$JS_PUBLIC_IP_CHANGE_ACTION" | tr '[:upper:]' '[:lower:]')
 JS_PUBLIC_IP_REFRESH_S=$(uint_or_default JS_PUBLIC_IP_REFRESH_S "$JS_PUBLIC_IP_REFRESH_S" 300)
 JS_PUBLIC_IP_RESTART_MAX_WAIT_S=$(uint_or_default JS_PUBLIC_IP_RESTART_MAX_WAIT_S "$JS_PUBLIC_IP_RESTART_MAX_WAIT_S" 900)
+# The self-check is diagnostics: a bad value WARNs and falls back, never stops the start.
+case "$(printf '%s' "$JS_SELFCHECK" | tr '[:upper:]' '[:lower:]')" in
+	on|true|yes|1)  JS_SELFCHECK=on ;;
+	off|false|no|0) JS_SELFCHECK=off ;;
+	*)
+		echo "[entrypoint] WARNING: JS_SELFCHECK='${JS_SELFCHECK}' is not on or off; using on" >&2
+		JS_SELFCHECK=on ;;
+esac
+JS_SELFCHECK_TIMEOUT_S=$(uint_or_default JS_SELFCHECK_TIMEOUT_S "$JS_SELFCHECK_TIMEOUT_S" 20)
+if [ "$JS_SELFCHECK_TIMEOUT_S" -eq 0 ]; then
+	echo "[entrypoint] WARNING: JS_SELFCHECK_TIMEOUT_S=0 is not a usable bound; using 20" >&2
+	JS_SELFCHECK_TIMEOUT_S=20
+fi
 
 secret_state() {
 	if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo EMPTY; else echo set; fi
@@ -110,6 +126,7 @@ echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH}
 echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
 echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
+echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json])"
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
@@ -297,6 +314,17 @@ ADDR_JSON=$(addr_json start "$ADDR_HOST" "$ADDR_HOST_VAR" "$JS_PUBLIC_IP_DISCOVE
 echo "[entrypoint] ADDRESS_RESOLUTION ${ADDR_JSON}"
 addr_write_state "$ADDR_JSON" "[entrypoint]"
 
+# ---- Effective configuration for the self-check (slice A.2) ----
+# legion-voice-selfcheck reads the values this start actually used. A `docker exec` shell has the .env
+# values but not the defaults assigned above. No secrets go in this file.
+: "${SLV_EFFECTIVE_CONFIG:=/run/legion-voice/effective-config.json}"
+slv_json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+EFFECTIVE_JSON=$(printf '{"JS_RTP_PORT_RANGE":"%s","JS_HTTP_PORT":"%s","JS_HTTP_BASEPATH":"%s","JS_ADMIN_PORT":"%s","JS_ADMIN_BASEPATH":"%s","JS_ADMIN_BIND":"%s","JS_STUN_SERVER":"%s","JS_SELFCHECK_TIMEOUT_S":"%s"}' \
+	"$(slv_json_escape "$JS_RTP_PORT_RANGE")" "$(slv_json_escape "$JS_HTTP_PORT")" "$(slv_json_escape "$JS_HTTP_BASEPATH")" \
+	"$(slv_json_escape "$JS_ADMIN_PORT")" "$(slv_json_escape "$JS_ADMIN_BASEPATH")" "$(slv_json_escape "$JS_ADMIN_BIND")" \
+	"$(slv_json_escape "$JS_STUN_SERVER")" "$(slv_json_escape "$JS_SELFCHECK_TIMEOUT_S")")
+slv_write_file "$SLV_EFFECTIVE_CONFIG" "$EFFECTIVE_JSON" "[entrypoint]"
+
 set_kv "$HTTP_JCFG" http            true
 set_kv "$HTTP_JCFG" port            "${JS_HTTP_PORT}"
 set_kv "$HTTP_JCFG" base_path       "\"${JS_HTTP_BASEPATH}\""
@@ -339,6 +367,24 @@ if [ -n "$ADDR_HOST" ] && [ "$JS_PUBLIC_IP_DISCOVERY" != static ] && [ "$JS_PUBL
 		sh "$SLV_LIB_DIR/public-address-watch.sh" &
 elif [ -n "$ADDR_HOST" ]; then
 	echo "[entrypoint] INFO: periodic public address re-check off (JS_PUBLIC_IP_REFRESH_S=${JS_PUBLIC_IP_REFRESH_S}, JS_PUBLIC_IP_DISCOVERY=${JS_PUBLIC_IP_DISCOVERY})"
+fi
+
+# ---- 5. Startup self-check (slice A.2) ----
+# Runs in the background, so Janus starts at once. The self-check waits for Janus's HTTP transport itself,
+# stays inside JS_SELFCHECK_TIMEOUT_S, and prints one [selfcheck] block. `timeout` is a backstop 5 s past
+# that bound, in case the check itself hangs. SLV_SELFCHECK_CMD is a test seam.
+: "${SLV_SELFCHECK_CMD:=/usr/local/bin/legion-voice-selfcheck}"
+if [ "$JS_SELFCHECK" = on ]; then
+	JANUS_CONF_DIR=$CONF_DIR
+	export SLV_EFFECTIVE_CONFIG SLV_ADDR_STATE_FILE JANUS_CONF_DIR
+	(
+		rc=0
+		timeout -k 2 "$((JS_SELFCHECK_TIMEOUT_S + 5))" "$SLV_SELFCHECK_CMD" --startup || rc=$?
+		case "$rc" in
+			124|137) echo "[selfcheck] ===== legion-voice self-check was stopped after $((JS_SELFCHECK_TIMEOUT_S + 5)) s (JS_SELFCHECK_TIMEOUT_S=${JS_SELFCHECK_TIMEOUT_S} plus 5 s): no results =====" ;;
+			126|127) echo "[selfcheck] ===== legion-voice self-check could not run (${SLV_SELFCHECK_CMD}, exit ${rc}) =====" ;;
+		esac
+	) &
 fi
 
 if [ "$JS_WS_ENABLED" = true ]; then ws_desc="${JS_WS_PORT}"; else ws_desc="off"; fi

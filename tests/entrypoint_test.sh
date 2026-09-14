@@ -62,7 +62,9 @@ case "$1" in
 		fi ;;
 	dns)          v=${STUB_DNS:-} ;;
 	system)       v=${STUB_CONTAINER:-} ;;
-	participants) v=${STUB_PARTICIPANTS:-} ;;
+	participants)
+		v=${STUB_PARTICIPANTS:-}
+		if [ -z "$v" ] && [ -n "${STUB_PARTICIPANTS_ERR:-}" ]; then echo "$STUB_PARTICIPANTS_ERR" >&2; exit 1; fi ;;
 	*)            exit 2 ;;
 esac
 [ -n "$v" ] || exit 1
@@ -82,7 +84,7 @@ run_ep() {
 	OUT=$(env -i PATH="$PATH" \
 		JANUS_CONF_DIR="$CONF" JANUS_TEMPLATE_DIR="$TPL" JANUS_OVERRIDE_DIR="$WORK/no-overrides" JANUS_BIN="$STUB" \
 		SLV_LIB_DIR="$LIB" SLV_ADDR_PROBE="$PROBE" SLV_ADDR_STATE_FILE="$CONF/state/public-address.json" \
-		JS_PUBLIC_IP_REFRESH_S=0 \
+		JS_PUBLIC_IP_REFRESH_S=0 JS_SELFCHECK=off SLV_EFFECTIVE_CONFIG="$CONF/state/effective-config.json" \
 		JS_API_SECRET=test-api-secret JS_ADMIN_SECRET=test-admin-secret \
 		"$@" sh "$EP" --stub-arg 2>&1)
 	RC=$?
@@ -264,6 +266,40 @@ check "A.1 watcher restart: zero participants -> restarts at once" 'has "restart
 printf '198.51.100.4\n198.51.100.4\n' > "$WORK/stun.seq"
 run_watch SLV_ADDR_WATCH_MAX_CHECKS=2 STUB_STUN_FILE="$WORK/stun.seq" JS_PUBLIC_IP_CHANGE_ACTION=restart STUB_PARTICIPANTS=3 JS_PUBLIC_IP_RESTART_MAX_WAIT_S=30
 check "A.1 watcher restart: participants stay -> restarts after the max wait, logging the outage" 'has "with 3 participant(s) still connected after 30 s: taking the outage" && has RESTART-CALLED'
+
+# ---- A.2: an unauthorised or malformed participant poll is logged and never read as zero ----
+printf '198.51.100.4\n198.51.100.4\n' > "$WORK/stun.seq"
+run_watch SLV_ADDR_WATCH_MAX_CHECKS=2 STUB_STUN_FILE="$WORK/stun.seq" JS_PUBLIC_IP_CHANGE_ACTION=restart JS_PUBLIC_IP_RESTART_MAX_WAIT_S=30 \
+	STUB_PARTICIPANTS_ERR="addr_probe: participants: unauthorized: Unauthorized request (wrong or missing secret/token) (check JS_API_SECRET)"
+check "A.2 watcher restart: unauthorised poll logged with its reason" 'has "WARNING: participant poll failed (addr_probe: participants: unauthorized: Unauthorized request" && has "not counted as zero participants"'
+check "A.2 watcher restart: unauthorised poll is not zero; bounded wait, then the logged outage" '! has "advertise 198.51.100.4: zero participants" && has "an unknown number of participant(s) still connected after 30 s: taking the outage" && has RESTART-CALLED'
+
+printf '198.51.100.4\n198.51.100.4\n' > "$WORK/stun.seq"
+run_watch SLV_ADDR_WATCH_MAX_CHECKS=2 STUB_STUN_FILE="$WORK/stun.seq" JS_PUBLIC_IP_CHANGE_ACTION=restart JS_PUBLIC_IP_RESTART_MAX_WAIT_S=15 STUB_PARTICIPANTS=garbage
+check "A.2 watcher restart: a non-numeric poll reply is not zero" 'has "participant poll failed (no reason given; reply '\''garbage'\'')" && ! has "advertise 198.51.100.4: zero participants" && has RESTART-CALLED'
+
+# ---- A.2: startup self-check launch and the effective config it reads ----
+SCSTUB="$WORK/selfcheck-stub"
+printf '#!/bin/sh\necho "SELFCHECK-STUB $*"\n' > "$SCSTUB"; chmod +x "$SCSTUB"
+SCSLOW="$WORK/selfcheck-slow"
+printf '#!/bin/sh\nexec sleep 30\n' > "$SCSLOW"; chmod +x "$SCSLOW"
+
+run_ep JS_SELFCHECK= SLV_SELFCHECK_CMD="$SCSTUB"
+check "A.2 self-check on by default, bound 20 s, in the effective values" 'has "INFO: selfcheck=on timeout_s=20"'
+check "A.2 self-check started in the background with --startup" 'has "SELFCHECK-STUB --startup" && has STUB-JANUS-RAN'
+check "A.2 effective config written for the self-check, without secrets" 'grep -Fq "\"JS_RTP_PORT_RANGE\":\"10000-10200\"" "$CONF/state/effective-config.json" && grep -Fq "\"JS_HTTP_PORT\":\"14223\"" "$CONF/state/effective-config.json" && grep -Fq "\"JS_STUN_SERVER\":\"stun.l.google.com:19302\"" "$CONF/state/effective-config.json" && ! grep -Fq "test-api-secret" "$CONF/state/effective-config.json" && json_ok "$CONF/state/effective-config.json"'
+
+run_ep JS_SELFCHECK=off SLV_SELFCHECK_CMD="$SCSTUB"
+check "A.2 JS_SELFCHECK=off -> not started" '! has "SELFCHECK-STUB" && has "INFO: selfcheck=off"'
+
+run_ep JS_SELFCHECK=maybe SLV_SELFCHECK_CMD="$SCSTUB"
+check "A.2 bad JS_SELFCHECK -> WARNING, and on" 'has "WARNING: JS_SELFCHECK='\''maybe'\'' is not on or off; using on" && has "SELFCHECK-STUB --startup"'
+
+run_ep JS_SELFCHECK=on JS_SELFCHECK_TIMEOUT_S=0 SLV_SELFCHECK_CMD="$SCSTUB"
+check "A.2 JS_SELFCHECK_TIMEOUT_S=0 -> WARNING, and 20" 'has "JS_SELFCHECK_TIMEOUT_S=0 is not a usable bound; using 20" && has "timeout_s=20"'
+
+run_ep JS_SELFCHECK=on JS_SELFCHECK_TIMEOUT_S=1 SLV_SELFCHECK_CMD="$SCSLOW"
+check "A.2 a self-check that overruns is stopped by the backstop (bound + 5 s)" 'has "[selfcheck] ===== legion-voice self-check was stopped after 6 s" && has STUB-JANUS-RAN'
 
 # ---- O-55: defaults reproduce pre-6m behaviour; narrowing is opt-in ----
 run_ep

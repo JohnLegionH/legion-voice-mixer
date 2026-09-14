@@ -204,16 +204,21 @@ addr_json() {
 		"$_kph" "$ADDR_VERDICT" "${9:+,$9}"
 }
 
-# addr_write_state JSON PREFIX: write the state file atomically (tmp + rename). Failure only WARNs.
-addr_write_state() {
-	_dir=$(dirname "$SLV_ADDR_STATE_FILE")
+# slv_write_file PATH CONTENT PREFIX: write PATH atomically (tmp + rename). Failure only WARNs.
+slv_write_file() {
+	_dir=$(dirname "$1")
 	if mkdir -p "$_dir" 2>/dev/null \
-		&& printf '%s\n' "$1" > "$SLV_ADDR_STATE_FILE.tmp" 2>/dev/null \
-		&& mv -f "$SLV_ADDR_STATE_FILE.tmp" "$SLV_ADDR_STATE_FILE" 2>/dev/null; then
+		&& printf '%s\n' "$2" > "$1.tmp" 2>/dev/null \
+		&& mv -f "$1.tmp" "$1" 2>/dev/null; then
 		return 0
 	fi
-	echo "$2 WARNING: could not write the address state file ${SLV_ADDR_STATE_FILE}" >&2
+	echo "$3 WARNING: could not write $1" >&2
 	return 0
+}
+
+# addr_write_state JSON PREFIX: write the address state file.
+addr_write_state() {
+	slv_write_file "$SLV_ADDR_STATE_FILE" "$1" "$2"
 }
 
 # addr_change_step RUNNING PENDING COUNT OBSERVED -> prints "PENDING COUNT ACTION"

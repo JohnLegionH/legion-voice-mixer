@@ -37,9 +37,20 @@ P="[address-watch]"
 : "${SLV_ADDR_EXTRAS:=}"
 : "${SLV_ADDR_KEEP_PRIVATE:=true}"
 
-# Participants across all rooms, or empty when the client API did not answer.
+# Participants across all rooms, or empty when the poll failed. A failed, unauthorised or malformed poll
+# is logged with its reason and is never read as zero participants: restart_janus then keeps waiting,
+# still bounded by JS_PUBLIC_IP_RESTART_MAX_WAIT_S.
 participants() {
-	"$SLV_ADDR_PROBE" participants "http://127.0.0.1:${JS_HTTP_PORT}${JS_HTTP_BASEPATH}" 2>/dev/null || true
+	_perr=$(mktemp 2>/dev/null) || _perr="/tmp/slv-participants.$$"
+	_pn=$("$SLV_ADDR_PROBE" participants "http://127.0.0.1:${JS_HTTP_PORT}${JS_HTTP_BASEPATH}" 2>"$_perr") || _pn=""
+	case "$_pn" in
+		''|*[!0-9]*)
+			_why=$(tr '\n' ' ' < "$_perr" 2>/dev/null)
+			echo "$P WARNING: participant poll failed (${_why:-no reason given}${_pn:+; reply '$_pn'}); not counted as zero participants" >&2
+			_pn="" ;;
+	esac
+	rm -f "$_perr"
+	printf '%s' "$_pn"
 }
 
 # mapping_for ADDRESS: the nat_1_1_mapping the entrypoint would build with ADDRESS discovered.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""addr_probe: address-discovery probes for the mixer entrypoint (slice A.1).
+"""addr_probe: address-discovery probes for the mixer entrypoint (slice A.1), reused by the self-check (A.2).
 
 Used by entrypoint/public-address.sh. One subcommand per source. Each prints ONE line and exits 0 on
-success, prints nothing and exits 1 when the source gave no usable answer, and exits 2 on a usage
-error:
+success, prints nothing on stdout and exits 1 when the source gave no usable answer, and exits 2 on a
+usage error:
 
   stun SERVER               STUN Binding request (RFC 5389) to SERVER (host, host:port or
                             stun:host:port; default port 3478). Prints the mapped (srflx) IPv4: the
@@ -12,7 +12,9 @@ error:
                             port 53), bypassing the container resolver. Prints the first A record.
   system NAME               The container resolver (getaddrinfo, IPv4), like `getent ahostsv4`.
   participants URL          Total participants across all slvoice rooms, via the Janus client API
-                            at URL (JS_API_SECRET from the environment). Prints an integer.
+                            at URL (JS_API_SECRET from the environment). Prints an integer. On a
+                            failed or unauthorised poll it prints the reason on stderr and exits 1:
+                            that is never a count, and never zero.
 
 SLV_ADDR_PROBE_TIMEOUT_S (default 3) bounds each network probe. It is a test seam, not an operator
 knob. The image's python3 is 3.6: no dataclasses, no assignment expressions.
@@ -58,8 +60,8 @@ def build_stun_request(txid):
     return struct.pack(">HHI", STUN_BINDING_REQUEST, 0, STUN_MAGIC) + txid
 
 
-def parse_stun_response(data, txid):
-    """The mapped IPv4 from a Binding success response to `txid`, or None.
+def parse_stun_mapped(data, txid):
+    """The mapped (IPv4, port) from a Binding success response to `txid`, or None.
     XOR-MAPPED-ADDRESS wins over MAPPED-ADDRESS; IPv6 answers are ignored."""
     if len(data) < 20:
         return None
@@ -78,13 +80,20 @@ def parse_stun_response(data, txid):
         if len(val) < alen:
             return None
         if atype in (ATTR_MAPPED_ADDRESS, ATTR_XOR_MAPPED_ADDRESS) and alen >= 8 and val[1] == FAMILY_IPV4:
+            port = struct.unpack(">H", val[2:4])[0]
             if atype == ATTR_XOR_MAPPED_ADDRESS:
                 raw = struct.unpack(">I", val[4:8])[0] ^ STUN_MAGIC
-                xor_mapped = socket.inet_ntoa(struct.pack(">I", raw))
+                xor_mapped = (socket.inet_ntoa(struct.pack(">I", raw)), port ^ (STUN_MAGIC >> 16))
             else:
-                mapped = socket.inet_ntoa(val[4:8])
+                mapped = (socket.inet_ntoa(val[4:8]), port)
         pos += 4 + alen + (-alen % 4)   # attributes are padded to a 4-byte boundary
     return xor_mapped or mapped
+
+
+def parse_stun_response(data, txid):
+    """The mapped IPv4 from a Binding success response to `txid`, or None."""
+    mapped = parse_stun_mapped(data, txid)
+    return mapped[0] if mapped else None
 
 
 def build_dns_query(name, tid):
@@ -143,8 +152,9 @@ def parse_dns_response(data, tid):
         return None
 
 
-def _udp_exchange(host, port, payload, check, timeout, attempts=3):
-    """Send `payload` up to `attempts` times within `timeout`; return the first check(reply) result."""
+def _udp_exchange(host, port, payload, check, timeout, attempts=3, sock=None):
+    """Send `payload` up to `attempts` times within `timeout`; return the first check(reply) result.
+    Uses `sock` when given (the caller owns it and closes it), else a new ephemeral socket."""
     try:
         infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
     except OSError:
@@ -152,8 +162,10 @@ def _udp_exchange(host, port, payload, check, timeout, attempts=3):
     if not infos:
         return None
     addr = infos[0][4]
-    per_attempt = max(timeout / attempts, 0.2)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    per_attempt = max(timeout / attempts, 0.05)
+    own = sock is None
+    if own:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         for _ in range(attempts):
             try:
@@ -174,14 +186,21 @@ def _udp_exchange(host, port, payload, check, timeout, attempts=3):
                 return None
         return None
     finally:
-        sock.close()
+        if own:
+            sock.close()
 
 
-def stun_probe(server, timeout):
+def stun_query(server, timeout, sock=None):
+    """The mapped (IPv4, port) for a Binding request sent from `sock` (or a new ephemeral socket), or None."""
     host, port = parse_hostport(server, 3478)
     txid = os.urandom(12)
     return _udp_exchange(host, port, build_stun_request(txid),
-                         lambda data: parse_stun_response(data, txid), timeout)
+                         lambda data: parse_stun_mapped(data, txid), timeout, sock=sock)
+
+
+def stun_probe(server, timeout):
+    mapped = stun_query(server, timeout)
+    return mapped[0] if mapped else None
 
 
 def dns_probe(name, resolver, timeout):
@@ -227,9 +246,28 @@ def _get(url, timeout):
         return json.loads(reply.read().decode("utf-8"))
 
 
+def _janus_error(reply):
+    """The reason for a janus:"error" reply ("unauthorized: ..." for 403), else None."""
+    if isinstance(reply, dict) and reply.get("janus") == "error":
+        error = reply.get("error") or {}
+        if error.get("code") == 403:
+            return "unauthorized: %s (check JS_API_SECRET)" % error.get("reason", "")
+        return "janus error %s: %s" % (error.get("code"), error.get("reason", ""))
+    return None
+
+
+def _total_or_reason(plugindata):
+    total = sum_participants(plugindata)
+    if total is None:
+        return None, "unexpected list reply: %.200s" % json.dumps(plugindata)
+    return total, None
+
+
 def participants_probe(url, secret, timeout):
     """Create a session, attach slvoice, send {"request":"list"}, sum the rooms, destroy the session.
-    The plugin answers "list" as an event, so a reply that is only an ack is followed by a long poll."""
+    The plugin answers "list" as an event, so a reply that is only an ack is followed by a long poll.
+    Returns (total, None), or (None, reason) for a failed, unauthorised or malformed poll: a poll that
+    did not produce a count never yields one."""
     url = url.rstrip("/")
     base = {"apisecret": secret} if secret else {}
 
@@ -237,28 +275,44 @@ def participants_probe(url, secret, timeout):
         return "addr-probe-%08x" % random.getrandbits(32)
 
     try:
-        session = _post(url, dict(base, janus="create", transaction=transaction()), timeout)["data"]["id"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        created = _post(url, dict(base, janus="create", transaction=transaction()), timeout)
+    except (OSError, ValueError) as err:
+        return None, "no reply from %s (%s)" % (url, err)
+    reason = _janus_error(created)
+    if reason:
+        return None, reason
     try:
-        handle = _post("%s/%d" % (url, session),
-                       dict(base, janus="attach", plugin="janus.plugin.slvoice", transaction=transaction()),
-                       timeout)["data"]["id"]
+        session = created["data"]["id"]
+    except (KeyError, TypeError):
+        return None, "unexpected reply to create: %.200s" % json.dumps(created)
+    try:
+        attached = _post("%s/%d" % (url, session),
+                         dict(base, janus="attach", plugin="janus.plugin.slvoice", transaction=transaction()), timeout)
+        reason = _janus_error(attached)
+        if reason:
+            return None, reason
+        handle = attached["data"]["id"]
         tx = transaction()
         reply = _post("%s/%d/%d" % (url, session, handle),
                       dict(base, janus="message", transaction=tx, body={"request": "list"}), timeout)
+        reason = _janus_error(reply)
+        if reason:
+            return None, reason
         if reply.get("janus") == "success":
-            return sum_participants((reply.get("plugindata") or {}).get("data"))
+            return _total_or_reason((reply.get("plugindata") or {}).get("data"))
         query = "?maxev=1" + ("&apisecret=" + urllib.parse.quote(secret) if secret else "")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             events = _get("%s/%d%s" % (url, session, query), timeout)
             for event in events if isinstance(events, list) else [events]:
+                reason = _janus_error(event)
+                if reason:
+                    return None, reason
                 if isinstance(event, dict) and event.get("janus") == "event" and event.get("transaction") == tx:
-                    return sum_participants((event.get("plugindata") or {}).get("data"))
-        return None
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+                    return _total_or_reason((event.get("plugindata") or {}).get("data"))
+        return None, "no reply to the list request within %.0f s" % timeout
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        return None, "poll failed (%s)" % err
     finally:
         try:
             _post("%s/%d" % (url, session), dict(base, janus="destroy", transaction=transaction()), timeout)
@@ -286,8 +340,11 @@ def main(argv):
         elif command == "system" and len(argv) == 3:
             result = system_probe(argv[2])
         elif command == "participants" and len(argv) == 3:
-            total = participants_probe(argv[2], os.environ.get("JS_API_SECRET", ""), max(timeout, 10.0))
-            result = None if total is None else str(total)
+            total, reason = participants_probe(argv[2], os.environ.get("JS_API_SECRET", ""), max(timeout, 10.0))
+            if total is None:
+                print("addr_probe: participants: %s" % reason, file=sys.stderr)
+                return 1
+            result = str(total)
         else:
             print(USAGE, file=sys.stderr)
             return 2
