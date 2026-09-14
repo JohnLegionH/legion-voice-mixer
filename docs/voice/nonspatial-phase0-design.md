@@ -1,0 +1,662 @@
+# Phase 0 wire format: arming, epochs, heartbeat, fail-closed rule
+
+**Slice 0.1, design only, 2026-09-14.** No code, build, deploy or restart was part of this slice.
+It is mirrored byte-identical at `D:\legion-voice-mixer\docs\voice\` (O-28).
+
+**Sources read:**
+- tranq-ais `feature/ais-v3` at `748b7fbb6f`;
+- legion-voice-mixer `main` at `69444f0`.
+
+Every `path:line` below was read at those commits.
+
+**Goal:** the mixer must be able to fail closed. It has to tell "this listener may hear everyone" from
+"the sim never said anything about this listener", and act on the difference.
+
+**Open question 3 (§10) must be settled before 0.2 starts.** Whether an avatar's sessions share one
+arming record is settled here (§1, §7.4). Open question 3 is how connector peers and recorder taps get
+armed. §8 flags the other things that make the design harder than the brief assumed.
+
+---
+
+## 0. The mechanism today
+
+### 0.1 Sim side: one feeder, sender and sink per region
+
+**Owner.** `VoiceVisibilityService` runs one per region, on one dedicated thread
+(`Addons/os-webrtc-janus/WebRtcVoiceRegionModule/VoiceVisibilityService.cs:110-132`).
+- The loop ticks the feeder, pumps the sender, then waits `m_cadenceMs` (`:181-209`, wait at `:203`).
+- The cadence is `[WebRtcVoice] VisibilityTickMs`, default 250 (`WebRtcVoiceRegionModule.cs:95`, `:128`).
+- The thread is registered with the OpenSim Watchdog with a 5000 ms alarm (`VoiceVisibilityService.cs:123-130`).
+- The region module builds one service per region when `VisibilityFeederEnabled` is set
+  (`WebRtcVoiceRegionModule.cs:251-266`).
+
+**Feeder.** `VoiceStateFeeder.Tick` rebuilds the whole matrix from live world state every tick and diffs
+it against the previous one (`Addons/os-webrtc-janus/Visibility/VoiceStateFeeder.cs:75-99`).
+- It raises a batch only when the diff is non-empty (`:96-97`).
+- A derivation exception keeps the last matrix and emits nothing (`:84-91`).
+
+**Population.** The population is every scene presence holding a voice session in this region
+(`FeederWorldFromScene.cs:61-66`, gated by `VoiceViewerSession.IsAgentInRegion`,
+`WebRtcVoice/VoiceViewerSession.cs:94-102`).
+
+**Matrix.** `VisibilityMatrix.Build` computes, for every ordered pair, whether the source is excluded
+(ban or visibility) or moderation-muted (`Visibility/VisibilityMatrix.cs:56-93`).
+- **A listener is stored only if it has at least one entry** (`:87-90`).
+- `Listeners` and `MutedListeners` therefore enumerate non-empty columns only (`:34-38`).
+- An agent that is allowed to hear everyone is not in the matrix at all.
+
+**Delta.** `DeltaComputer.Diff` names only listeners whose set changed (`Visibility/DeltaComputer.cs:18-39`).
+
+**Sender.** `VisibilityBatchSender` (`WebRtcVoiceRegionModule/VisibilityBatchSender.cs`) has three paths.
+- **Snapshot**, when not `_synced` (`:294-349`):
+  - a `replace` naming every non-empty listener, plus an explicit empty list for listeners it sent before
+    and that are now empty ("clear-tracking", `:314-319`);
+  - **when both channels are empty it sends nothing** and marks itself synced (`:321-325`).
+- **Delta** (`:270-292`): at most one `add` and one `remove` per tick.
+- **Join** (`:193-267`): a bounded blind re-send of the listener's column on provisioning success, 6
+  attempts (`:44`).
+  - **It skips a listener whose columns are both empty** (`:210-219`).
+  - The call site passes only "local" (spatial) provisions, not A2A (`WebRtcVoiceRegionModule.cs:785-795`).
+
+**Single-flight and resync.**
+- Sends are single-flight; a skipped tick forces a snapshot (`VisibilityBatchSender.cs:118-140`).
+- A send stuck for 8× the admin timeout is force-cleared, and the abandoned send "is left to complete or
+  hang harmlessly" (`:164-190`).
+- `_synced` goes false only on a transport error, a skipped tick or that guard.
+- Three consecutive `ProtocolError`s latch emission off until the region restarts (`:50`, `:407-423`).
+
+**Sink.** `JanusPeerCtlBatchSink` partitions each op by the listener's recorded room
+(`JanusPeerCtlBatchSink.cs:177-258`) and stamps `room` on each request (`:220`).
+- The recorded room comes from `AgentRoomTable`. An agent with no record falls back to the estate room,
+  as listener and as source (`Visibility/PeerCtlBatchPartitioner.cs:166-178`).
+- Each request goes through Janus Admin `message_plugin` (`JanusAdminClient.cs:140`).
+- Any `janus:"success"` maps to `Ok` (`JanusAdminClient.cs:151-173`).
+- The mixer's inner reply is parsed and logged, but **never changes the result** (`JanusPeerCtlBatchSink.cs:273-290`, `:321-329`).
+
+**Wire body.** Built by `PeerCtlBatchSerializer.BuildRequest`, with `room` added by the sink
+(`Visibility/PeerCtlBatchSerializer.cs:41-57`):
+
+```json
+{ "request":"peer_ctl_batch", "op":"add|remove|replace", "room":<int>,
+  "excl":{ "<L>":["<S>",...] }, "mute":{ "<L>":["<S>",...] } }
+```
+
+**What the sim never sends:**
+- anything for a listener with two empty columns;
+- anything on a quiet tick;
+- anything identifying the sender instance;
+- any per-room liveness signal;
+- anything at all for A2A rooms, static rooms, harness rooms or connector-only rooms.
+
+### 0.2 Mixer side
+
+**Parse.** `slv_visbatch_parse` (`src/visbatch.c:126-189`) requires `op` (`:149-164`) and an integer
+`room` (`:167-172`).
+- It parses the `excl` and `mute` channels (`:175-183`) and **ignores every other key**.
+- An old mixer therefore accepts extra fields silently.
+
+**Admin handler.** `janus_slvoice_handle_admin_message` (`src/janus_slvoice.c:1916`) dispatches
+`peer_ctl_batch` (`:1925`).
+- It applies the exclusion channel, then the mute channel.
+- The inner reply is `{slvoice:"applied", op, room, entries, mute_entries, skipped, deferred_listeners}`, or
+  `{slvoice:"error", reason:"unknown_room"}` (`:1944-1961`).
+- An unknown request gets `reason:"unknown_request"`.
+- Janus wraps every one of these in `janus:"success"`, so the sim sees `Ok` whatever the inner status.
+
+**Apply** (`:1597-1768`). The batch is applied under `room->mutex`, the lock the tick holds for its whole pass.
+- **Fan-out:** a listener key is a *display* (agent UUID) and is applied to every session in the room with
+  that display (`:1622-1650`).
+- **Deferral:** an entry whose listener is not in the room is deferred and replayed at join
+  (`:1722-1731`, `:1897-1914`, called from the join branch at `:2346`).
+- **Emptied records are discarded:** a deferred record whose two channels are both empty is removed
+  (`src/deferred.h:23`).
+
+**State.**
+- Each session owns `excluded` and `mod_muted` hash sets (`:490`, `:499`).
+- `create_session` creates them **empty** (`:1336-1337`).
+- Any room exit resets them (`:721-724`).
+- `vis_epoch` is a **count of applied batches**, not an authority identity (`:358`, `:1757`).
+- `vis_last_ts` records the last apply (`:359`).
+
+**Enforcement.**
+- The mix silences a source for listener `s` if it is in `s->mod_muted` (`:3250`) or `s->excluded` (`:3265`).
+- The roster, presence and backlog paths filter through `slv_roster_excludes` (`:892`, `:948`).
+- `slv_roster_excludes` treats a NULL or empty set as "excludes nothing" (`src/roster.h:26-28`).
+- **So an empty set means "hear everyone", whether the sim said so or never spoke.**
+
+**Staleness.** `query_session` reports `last_batch_age_ms` (`:1497-1498`). Nothing reads it.
+
+**Brief citation drift.** The brief's `:1315` is a blank line; the empty-set creation is at `:1336`. Its
+`:1475` is a comment in the `room_participants` block; the age is reported at `:1497-1498`. Ledger O-78
+carries the same stale `:1475`.
+
+---
+
+## 1. Identifiers
+
+All three are scoped to one mixer **room**. A listener is identified as the mixer already identifies it: by
+`display` (agent UUID), fanned out to every session in the room with that display.
+
+### 1.1 `room_epoch`
+
+**Meaning.** Identifies one incarnation of the sim's authority over a room. If it changes, every policy
+the mixer holds for that room is void.
+
+**Generated by** the sim, once per `VoiceVisibilityService` instance, when `StartLoop` builds the sender.
+- A region restart, a region-server restart, or a `RemoveRegion`/`RegionLoaded` cycle each produce a new value.
+- Every room addressed by that region's service carries the same value.
+- **Value:** `(unix_ms_at_start << 16) | random16`, an unsigned 64-bit integer.
+  - It is ordered, so a newer incarnation normally compares greater.
+  - The random low bits separate two services started in the same millisecond.
+
+**Carried** on every `peer_ctl_batch` and every heartbeat entry as a **string of 16 lowercase hex digits**:
+`"room_epoch":"0000018f3a2b4c5d"`.
+- It is a string because the sim builds bodies with `OSDInteger`, which is 32-bit (`JanusPeerCtlBatchSink.cs:220`).
+- A 64-bit value in a JSON number would also need care in jansson.
+
+**Stored** by the mixer as `room->auth_epoch` (u64; 0 = none yet). Adoption rules:
+- **Greater than stored (or none stored):** adopt it and **disarm every listener record in the room**.
+- **Equal:** normal processing.
+- **Less than stored:** reject with `stale_epoch`, *unless* the stored epoch is itself stale (no accepted
+  message for `JS_VIS_STALE_MS`). Then adopt it as a **takeover** and disarm everything.
+  - This rule stops a zombie instance from flapping authority.
+  - It also survives a sim clock that stepped backwards.
+
+**Naming.**
+- Do not reuse the mixer's existing `vis_epoch` batch counter (`:358`), or the sender's `_sendEpochSeq`
+  (`VisibilityBatchSender.cs:66`).
+- The admin output key for the new value is `authority_epoch`.
+
+### 1.2 `policy_generation`
+
+**Meaning.** The version of the sim's policy for one room within one epoch.
+
+**Generated by** the sim: one u32 counter per (epoch, room) in the sender.
+- It starts at 1 with the first arming batch.
+- It advances by one for every batch the sim sends to that room: `replace`, `add` or `remove`, including arming.
+- Room sends are already sequential per room: single-flight, and an `add` then a `remove` are awaited in
+  order (`VisibilityBatchSender.cs:286-289`). So generations reach a room in order unless a send is abandoned.
+- **Why u32 is enough:** at 4 batches per second it lasts about 17 years.
+
+**Carried** as the integer `"policy_generation"` on every batch, and in every heartbeat entry.
+
+**Stored** by the mixer as `room->policy_gen`, the highest applied.
+- It is used for observability, and to reject whole batches that arrive out of order (`gen <= policy_gen`).
+- A send abandoned by the in-flight guard (`VisibilityBatchSender.cs:184-189`) can complete after a newer
+  one. **Today that late delta is applied over newer state;** with this check it is rejected.
+
+### 1.3 `listener_generation`
+
+**Meaning.** The `policy_generation` of the last batch that set or changed **this listener's** column in
+this room and epoch. It lets one listener's policy be detected stale while the room stays live.
+
+**Generated by** the sim, tracked per (room, listener) in the sender. On a successful send, every listener
+named in the batch gets `listener_gen = batch.policy_generation`.
+
+**Carried in two places:**
+- **Deltas** (`add`/`remove`) carry `"base":{"<L>":<prev listener_gen>}` for every named listener: the
+  generation the sim believes the mixer holds for L.
+- **Heartbeats** carry `"listeners":{"<L>":<listener_gen>}` for **every** listener the sim addresses at
+  that room, including listeners with empty columns.
+
+`replace` needs no base, because it is absolute.
+
+**Stored** by the mixer per (room, display), in a room-level record: `{epoch, listener_gen, confirmed_us, stale}`.
+- It is a room-level record, not per session, so every session with that display follows one record (fan-out).
+- A reconnect in the same room keeps it (§7.4).
+- The record lives alongside the existing per-session sets; the mixer slice decides whether to move the sets
+  onto it too.
+
+**Mixer checks:**
+
+| Event | Check | Outcome |
+|---|---|---|
+| `replace` names L | `batch.policy_generation > L.listener_gen` | Set L's columns, `listener_gen`, `epoch = auth_epoch`; `confirmed_us = now`; clear `stale`. **This is arming.** |
+| `add`/`remove` names L | `base[L] == L.listener_gen` and L armed in the current epoch | Apply; set `listener_gen = batch.policy_generation`; `confirmed_us = now`. |
+| `add`/`remove` names L | base mismatch, or L unarmed | Do not apply L's entry; mark L `stale`; list L in the reply's `stale_listeners`. |
+| Heartbeat names L with `g` | `g == L.listener_gen` and `L.epoch == auth_epoch` | `confirmed_us = now`. |
+| Heartbeat names L with `g` | `g != L.listener_gen`, or L unarmed / from an older epoch | Mark `stale` (or leave unarmed); list L in `stale_listeners` / `unarmed_listeners`. |
+| Heartbeat omits an armed L | — | Disarm L (the authority no longer addresses it). |
+
+---
+
+## 2. Arming
+
+**Definition.** Arming is a `replace` naming listener L with `room_epoch = E` and a fresh
+`policy_generation`, **including when both of L's columns are empty**.
+- An empty arming `replace` is `"excl":{"<L>":[]}, "mute":{"<L>":[]}`.
+- It is the only thing that turns an unknown listener into one allowed to hear.
+
+**When the sim arms:**
+1. **Service start or new epoch.** The first send from a new `VoiceVisibilityService` goes to every room
+   that has at least one listener. It arms **every** listener in the population, not only non-empty columns.
+2. **Listener provisioned.** `OnListenerProvisioned` arms L at its recorded room, even with empty columns.
+   - This removes the empty-column skip at `VisibilityBatchSender.cs:210-219`.
+   - It applies to spatial provisions, the ones recorded today (`WebRtcVoiceRegionModule.cs:785-795`).
+3. **Resync.** Every snapshot after a transport error, a skipped tick or the in-flight guard arms every
+   listener. The "nothing to send" early return at `:321-325` goes away.
+4. **Mixer told us.** Arm the listed listeners on the next tick when a reply shows any of these:
+   - `unarmed_listeners` or `stale_listeners` non-empty;
+   - `reason:"unknown_room"` for a room that still has listeners (arm again once it exists);
+   - a `mixer_instance` different from the last one seen (arm **everything**, all rooms).
+5. **Room change.** When `AgentRoomTable` records a new room for L (newest wins), arm L at the new room.
+
+**Before arming** (fail-closed enabled, room declared, §6):
+- **As a listener,** the unarmed listener gets a silent mix, and no presence, power or roster entries for
+  any source.
+- **As a source,** it is inaudible and invisible to every armed listener (the pair rule in §4).
+
+**Pre-join arming** must survive deferral. An arming `replace` for a listener not yet in the room is deferred
+today (`:1722-1731`). But a deferred record with both channels empty is *removed* (`deferred.h:23`), so
+**an empty arming would be lost** and the joiner would wait for the next heartbeat's `unarmed_listeners` round
+trip.
+- **Fix:** the deferred store keeps a record carrying `{epoch, listener_gen}`, even with empty columns.
+- On join, replay sets the room-level record only if its epoch still equals `auth_epoch`.
+
+---
+
+## 3. Heartbeat
+
+**Purpose.** Proves the authority for a room is alive in epoch E, and states which listeners it addresses
+at which generation. **It is not a policy.**
+
+**Carrier.** A new admin request, one per region per interval, holding every room that region addresses.
+- Semantics stay strictly per room.
+- One message per region avoids adding R round-trips a second to the per-room cost the sink already
+  budgets (`JanusPeerCtlBatchSink.cs:52-58`).
+- **Size:** at most one entry per listener in the region, about 50 bytes each, far under
+  `SLV_VISBATCH_MAX_BYTES` (`visbatch.h:39`).
+
+```json
+{ "request":"peer_ctl_heartbeat",
+  "room_epoch":"0000018f3a2b4c5d",
+  "interval_ms":1000,
+  "rooms":{
+    "226001844":{ "policy_generation":42,
+                  "listeners":{ "4fbdfd2a-e0c6-4003-b2f8-8714fcc7b968":41, "<L2>":12 } } } }
+```
+
+**Interval:** 1000 ms (4 feeder ticks). The sim sends it from the feeder loop.
+- **It has its own in-flight flag, and does not use the sender's single-flight.** Otherwise a slow batch
+  send, bounded only by `AdminTimeoutMs` = 5000 (`WebRtcVoiceRegionModule.cs:104`, `:141`), would starve it.
+- **Rooms:** the distinct resolved rooms of the current population. A room with no listeners gets no entry (§7.5).
+- **Graceful stop:** `VoiceVisibilityService.Stop` sends a final heartbeat with `"state":"stopping"`. The
+  mixer then treats those rooms as stale at once instead of after the window.
+
+**What a heartbeat does at the mixer, per room entry:**
+1. Apply the epoch adoption rule (§1.1). A new epoch **disarms** everything. A heartbeat never arms.
+2. On an accepted epoch, record the entry as the room's last sign of life. Then, for each listener L in `listeners`:
+   - if `L.epoch == auth_epoch` and the generation matches, confirm L;
+   - otherwise mark L stale or unarmed and report it.
+3. Disarm any armed listener the entry omits.
+
+**Normative:** a heartbeat **MUST NOT** confirm, arm or revalidate a listener record whose `epoch` differs
+from the heartbeat's `room_epoch`.
+- After a sim restart, the new instance's heartbeat proves the authority is alive. It says nothing about
+  policies the dead instance set.
+- Those listeners stay silent until the new instance's arming `replace` arrives.
+- Matching generations do not help: a new epoch restarts `policy_generation` at 1, so a stale record could
+  *coincidentally* match. That is why the epoch is compared first.
+
+**Reply** (inner, inside `janus:"success"`):
+
+```json
+{ "slvoice":"heartbeat", "vis_protocol":2, "mixer_instance":"9c1d...",
+  "rooms":{ "226001844":{ "status":"ok|stale_epoch|unknown_room|undeclared_room",
+                          "authority_epoch":"0000018f3a2b4c5d", "policy_generation":42,
+                          "unarmed_listeners":[...], "stale_listeners":[...] } } }
+```
+
+- `mixer_instance` is a random u64, as hex, chosen at plugin init.
+- `peer_ctl_batch` replies gain the same `vis_protocol`, `mixer_instance`, `authority_epoch`,
+  `policy_generation`, `stale_listeners` and `status` keys.
+- The sim acts on these (§2 item 4). **This is new sim behaviour:** today the inner reply never changes
+  anything (`JanusPeerCtlBatchSink.cs:273-278`).
+
+---
+
+## 4. The decision rule
+
+Evaluated per (listener L, source S) pair on every mix tick, and by the same predicate for roster, presence,
+power and backlog (the single-source-of-truth rule, `roster.h`).
+
+**Gates, in order:**
+- **G0:** `JS_VIS_FAIL_CLOSED` is enabled.
+- **G1:** the room is declared (§6.2).
+
+If either gate fails, the table does not apply and **today's behaviour holds**: the exclusion and mute sets
+apply, and an empty set passes.
+
+**Terms:**
+- **armed:** the room holds a record for this display from an arming `replace`, or from a deferred arming
+  replayed at join.
+- **epoch match:** `record.epoch == room.auth_epoch`, and `auth_epoch` was not rejected or superseded.
+- **policy fresh:** `now - record.confirmed_us <= JS_VIS_STALE_MS` **and** `record.stale == false`.
+
+**Listener rule** (L's own standing):
+
+| # | armed? | epoch match? | policy fresh? | L's mix |
+|---|---|---|---|---|
+| 1 | no | — | — | **silence** |
+| 2 | yes | no | — (not evaluated) | **silence**; a current-epoch heartbeat does not change this |
+| 3 | yes | yes | no | **silence** |
+| 4 | yes | yes | yes | **pass**, subject to L's `excluded` and `mod_muted` sets and the viewer's own mutes |
+
+**Pair rule.** S is audible and visible to L only if **L satisfies row 4 and S also satisfies row 4** in the
+same room.
+- **Why:** a source the current authority has not armed has not been evaluated against anyone's policy.
+  Symmetric rules (SeeAVs, ban) are only present in L's set once the sim has included S in its matrix.
+
+**"Silence" means:**
+- no audio contribution to L's mix;
+- no presence (`j`/`l`) and no power (`p`/`v`) for sources;
+- no roster or backlog rows.
+
+The session stays joined and ICE stays up.
+
+**Transitions:** an unarmed source becoming armed emits a join presence, and the reverse emits a leave.
+These use the same transition machinery the exclusion set drives today (`:1650-1712`).
+
+**Knob disabled, "shadow mode":** the mixer still parses, stores and checks everything, and counts
+`would_silence_pairs` and `would_silence_listeners` per room in `query_session`. Audio is unaffected. That
+counter is how the deploy proves the sim is arming correctly before the knob is turned on (§6.3).
+
+---
+
+## 5. Staleness window
+
+**Proposal:** `JS_VIS_STALE_MS` = **8000 ms**, with a heartbeat interval of 1000 ms.
+
+**Constraint:** at startup the mixer refuses (WARN, then clamps) a window below
+`2 × interval + 5000 + 250`.
+
+**Reasoning.** The longest gap a *healthy* sim can leave between two confirmations of L:
+- **heartbeat interval,** 1000 ms;
+- **a slow or hung admin round-trip:** the heartbeat send is bounded by `AdminTimeoutMs` = 5000 ms before it
+  fails and the next one is attempted;
+- **one feeder tick of scheduling slip:** `VisibilityTickMs` = 250 ms, since the heartbeat is driven off the
+  tick loop (`VoiceVisibilityService.cs:203`);
+- **total: about 6250 ms.**
+
+8000 ms leaves 1750 ms of margin for:
+- a slow sim (GC pauses, a heavy tick, a derivation that throws and retries);
+- the mixer's own 20 ms tick granularity.
+
+It also tolerates **one lost heartbeat plus one slow one** (1000 + 1000 + 5000 + 250 = 7250 ms).
+
+**Ordering with the sim's own alarm.** The feeder thread's Watchdog alarm fires at 5000 ms
+(`VoiceVisibilityService.cs:123-130`). A sim whose tick thread really stalls has logged its own alarm
+before the mixer silences its rooms at 8 s.
+
+**Cost:** after a sim dies, listeners keep the last policy for up to 8 s, then go silent. That policy was
+correct when set, so this is bounded exposure to stale policy, not fail-open.
+- A graceful stop (`"state":"stopping"`) removes even that.
+- A shorter window would silence rooms whenever one admin call hits its timeout.
+
+**Tuning:** if `AdminTimeoutMs` is raised, the window must be raised with it; the clamp enforces this.
+The value to record in the config register is `[JanusWebRtcVoice] AdminTimeoutMs` 5000 against
+`JS_VIS_STALE_MS` 8000.
+
+---
+
+## 6. Compatibility and deploy
+
+### 6.1 Knobs
+
+| Knob | Where | Default | Meaning |
+|---|---|---|---|
+| `JS_VIS_FAIL_CLOSED` | mixer env (exported by the entrypoint like `JS_EMPTY_ROOM_GRACE_S`) | **`0`, DISABLED** | `1` enforces §4 in declared rooms. `0` is shadow mode: all state is kept and counted, and audio behaves exactly as today. |
+| `JS_VIS_STALE_MS` | mixer env | `8000` | Staleness window (§5). Clamped to the constraint. |
+
+The sim needs no new enable knob: 0.2's behaviour rides `VisibilityEmitEnabled`. The heartbeat interval is
+a sim constant (1000 ms). Promote it to `[WebRtcVoice] VisibilityHeartbeatMs` only if the config register
+rules require it. The mixer must reject an `interval_ms` that breaks the §5 constraint.
+
+The mixer banner prints both knobs at startup, following the `RECORDING_OPT_IN` precedent, including
+"fail-closed DISABLED (shadow mode)".
+
+### 6.2 Room declaration
+
+Fail-closed applies only to rooms whose creator declared a sim authority:
+- `AudioBridgeCreateRoomReq` (`Janus/JanusMessages.cs:503-521`) adds `"vis_authority": true` for spatial
+  "local" rooms when visibility emission is enabled;
+- the mixer stores `room->declared`;
+- the room-create log line gains `vis_authority=true|false`, following the O-83 `spatial_audio` line.
+
+**Undeclared rooms keep today's behaviour even with the knob on:** static jcfg rooms, integration-harness
+rooms, A2A "multiagent" rooms and rooms created by an old sim. Each is exempt for a reason:
+- A2A rooms get no visibility batches at all (`WebRtcVoiceRegionModule.cs:785-795`), so fail-closed there
+  would silence every call.
+- The harness has no sim.
+
+**Declaring at create, not on first batch,** is what closes the window between room creation and the first
+arming. A joiner in a declared room is silent from the first tick.
+
+The mixer logs once per room when the knob is on and a room is undeclared:
+`fail-closed enabled but room <id> has no vis_authority: NOT enforced`. It also reports
+`vis_authority:false` in `query_session`.
+
+### 6.3 Skew matrix
+
+| Sim | Mixer | Result |
+|---|---|---|
+| Old | Old | Today. |
+| New (0.2) | Old | Extra batch keys are ignored by `slv_visbatch_parse` (`visbatch.c:126-189`). The sim sends **no heartbeats** until a reply carries `vis_protocol >= 2`; this capability gate exists because an old mixer answers `unknown_request` and the sink would WARN every second (`JanusPeerCtlBatchSink.cs:321-342`). The extra `vis_authority` create key must be confirmed ignored by the old create parser (mixer slice check). |
+| Old | New, knob off | Rooms undeclared; shadow counters stay 0 because nothing is declared. Today's audio. |
+| Old | New, knob on | Rooms undeclared, so **not enforced**; the per-room WARN makes that visible. Today's audio. |
+| New | New, knob off | Shadow mode: full protocol, audio as today, `would_silence_*` counters live. |
+| New | New, knob on | Fail-closed. |
+
+### 6.4 Deploy order
+
+1. Mixer slice live, **knob off**. It can go before or after the sim: shadow mode is inert.
+2. **Sim 0.2 live:** arming, epochs, generations, heartbeats, `vis_authority`, acting on replies.
+3. **Soak:** with real traffic, `would_silence_listeners` stays 0 in steady state. It may be non-zero only
+   in the sub-second window between a join and its arming, and around restarts.
+4. Enable `JS_VIS_FAIL_CLOSED=1` (a mixer recreate, which is John's). **Never enable it before step 2 is
+   live.**
+
+**Rollback:** set the knob to 0. No sim change is needed.
+
+---
+
+## 7. Failure modes
+
+In all of these, "silenced" means §4 rows 1 to 3 with fail-closed enabled in a declared room.
+
+### 7.1 Region restart mid-call
+
+1. `RemoveRegion` stops the service (`WebRtcVoiceRegionModule.cs:184-195`, `VoiceVisibilityService.cs:155-170`).
+   Its final heartbeat says `"state":"stopping"`, so the mixer marks the region's rooms stale. The rooms'
+   listeners are silenced at once, or within 8 s if the stop was not graceful.
+2. Viewers normally lose the region and tear down, but any session left joined stays silenced.
+3. The region comes back with a new service and a new epoch E2, greater than E1.
+   - Its first message to each room is adopted, and **every E1 record is disarmed**.
+   - The new instance's startup snapshot arms its whole population (§2 item 1).
+   - Listeners still in the region become audible after their arming. Sessions of agents no longer
+     present are never armed and stay silent until torn down.
+4. **Hazard:** if the wall clock went backwards across the restart, E2 < E1. It is accepted only once E1 is
+   stale (the takeover rule), so the region is silent for up to 8 s, then proceeds.
+
+### 7.2 Sim process dies
+
+- No stop heartbeat is sent. Every declared room from every region in that process goes stale 8 s after its
+  last confirmation, then silent.
+- Nothing arms them until a region server comes back with a new epoch, which then behaves as §7.1 step 3.
+- An old sim still alive elsewhere (a zombie) cannot re-take a room from a newer epoch while that epoch is
+  fresh (`stale_epoch`).
+
+### 7.3 Mixer restarts while the sim is up
+
+1. The mixer loses every room, session and record. It picks a new `mixer_instance`.
+2. Viewers' PeerConnections fail; viewers re-provision. The sim re-creates rooms (declared) and joins them.
+   Joiners are **silenced**: the room has no epoch and no records.
+3. **Today the sim cannot see this:** `unknown_room` arrives as `janus:"success"`, which maps to `Ok`
+   (`JanusAdminClient.cs:163-166`), and `_synced` stays true. Under this design:
+   - the next heartbeat reply, or any batch reply, carries a new `mixer_instance`;
+   - the sim re-arms **every** listener in every room;
+   - re-provisions also arm through `OnListenerProvisioned`.
+   - Worst case to audible: re-provision time plus one tick plus one admin round-trip.
+4. A heartbeat to a room that is not re-created yet returns `unknown_room`; the sim keeps its per-room
+   state and arms when the listener's provision creates the room.
+
+### 7.4 A listener reconnects
+
+**Same room, same epoch.** The new session has the same display.
+- It joins the room-level record, so it is armed if that record is still confirmed. There is no silence gap
+  from the mixer side.
+- Re-provision also re-arms (`OnListenerProvisioned`), advancing `listener_gen`, and the next heartbeat
+  confirms it.
+- The O-68 leave reset (`:721-724`) clears the **session's** sets. The room-level record survives the leave
+  because it belongs to the avatar's standing in the room, not to the session.
+- An avatar the sim no longer addresses is removed from the record by the next heartbeat's omission rule.
+
+**Different room** (parcel change, relog into another parcel). The new room has no record, or an older one,
+so the listener is silenced until `AgentRoomTable` records the new room and the arming lands (§2 item 5).
+
+**Two overlapping sessions (relog overlap).** Both follow the one record (fan-out, `:1622-1650`), as
+exclusions do today.
+
+### 7.5 A room with no listeners
+
+- The sim sends no heartbeat entry for it (§3), so it goes stale. With no participants there is nothing to
+  silence.
+- The empty-room grace destroy still removes it after 60 s (`SLV_EMPTY_ROOM_GRACE_S`, `:118`, sweep
+  `:777-800`), and its records go with it.
+- **A later joiner:** provision creates or reuses the room (declared). The joiner is silent until its arming
+  `replace` arrives with the current epoch. That fresh message confirms the listener again.
+- **The fallback estate room:** a room addressed only because unrecorded agents resolve to it (§8 item 6)
+  gets heartbeats like any other room with listeners.
+
+---
+
+## 8. Harder than described
+
+1. **The sim cannot observe mixer outcomes.**
+   - Every inner status, `unknown_room` included, rides `janus:"success"`, which maps to `Ok`
+     (`JanusAdminClient.cs:151-173`), and the sink never acts on the inner reply
+     (`JanusPeerCtlBatchSink.cs:273-278`). Mixer restarts are invisible today.
+   - Fail-closed needs the sim to act on replies: `mixer_instance`, `stale_listeners`, `unarmed_listeners`.
+     That is a behaviour change in the sender, not only a wire change.
+   - `mixer-feed-protocol.md` §3.3.1's operational note still says an unknown room returns `applied`; the
+     code now returns `unknown_room` (`:1956-1961`). That doc drift should be corrected when 0.2 touches the protocol doc.
+2. **The sim's data model has no "empty listener".**
+   - `VisibilityMatrix` stores only non-empty columns (`VisibilityMatrix.cs:87-90`).
+   - The sender drops empties in three places: `Diff` (`DeltaComputer.cs:18-39`), the snapshot early return
+     (`VisibilityBatchSender.cs:321-325`), and the join skip (`:210-219`).
+   - Arming needs the population as a first-class set. The matrix must keep it (`Build` already enumerates
+     it at `:58-61`), and per-(room, listener) generations must be tracked alongside.
+3. **The deferred store discards empty arming.** A deferred record with both channels empty is removed
+   (`deferred.h:23`). It must keep `{epoch, listener_gen}`, and replay must check the epoch.
+4. **Policy is per session today, but must be per room-level display.** `excluded`/`mod_muted` live on each
+   session, are fanned out by display (`:1622-1650`), and are reset on leave (`:721-724`). Generations and
+   arming must be keyed (room, display) or reconnects and relog overlaps break. This is a state-model change
+   in the mixer, not a parser addition.
+5. **Many rooms have no sim authority:** A2A rooms (no batches, `WebRtcVoiceRegionModule.cs:785-795`),
+   static jcfg rooms, harness rooms, **connector peers and recorder taps** (SC-96).
+   - A global fail-closed would silence all of them. §6.2 scopes enforcement per declared room.
+   - A recorder tap or connector peer *inside a declared spatial room* is never armed by today's sim, so it
+     would record or hear silence. See open question 3.
+6. **Room addressing can be wrong without anyone noticing, and fail-closed makes that audible.**
+   - Unrecorded agents are addressed at the estate fallback room (`PeerCtlBatchPartitioner.cs:166-178`).
+   - A listener actually in a per-parcel room but unrecorded is armed in the wrong room and **silenced** in
+     its real one.
+   - This is loud rather than silently unenforced, which is the point, but it is a new outage surface. The
+     sink's fallback counters (`JanusPeerCtlBatchSink.cs:143-156`) should read 0 before the knob is enabled.
+7. **Abandoned sends can apply late.** The in-flight guard lets a stuck send complete later
+   (`VisibilityBatchSender.cs:184-189`), so today a late delta can overwrite a newer `replace`.
+   `policy_generation` / `base` fix this only if the mixer enforces them.
+8. **A 64-bit epoch does not fit the sim's `OSDInteger`** (32-bit, `JanusPeerCtlBatchSink.cs:220`), hence
+   the hex string.
+9. **Unarmed sources are audible today.** The pair rule (§4) is needed: without it, an armed listener hears
+   a new joiner before the authority has evaluated that joiner against the listener's policy.
+10. **The heartbeat cannot share the sender's single-flight** (`VisibilityBatchSender.cs:118-140`). A slow
+    batch would starve it up to `AdminTimeoutMs`, or 8× that under the hang guard. It needs its own
+    in-flight flag, and the window has to include the admin timeout (§5).
+11. **Brief line citations drifted:** `:1315` → `:1336`; `:1475` → `:1497-1498`. Ledger O-78 has the same stale `:1475`.
+
+---
+
+## 9. What 0.5's harness must assert
+
+Against the new mixer image; "the emulator" is the harness acting as the sim over the admin API. Unless
+stated otherwise, rooms are created declared and the knob is **on**. "Audible" and "silent" use the harness
+oracle (`last_mix_rms`), with a test tone as the source.
+
+1. **Knob off, no epoch fields (old-sim emulation):** an un-batched listener hears the source; an exclusion
+   `replace` still silences that source. This is today's behaviour, unchanged.
+2. **Knob off, full new protocol, listener never armed:** audio is identical to assertion 1, and
+   `query_session` reports `would_silence_listeners >= 1` for that room.
+3. **Knob on, undeclared room, no batches:** the listener hears the source. The mixer logs the
+   "NOT enforced" line once for that room and reports `vis_authority:false`.
+4. **Knob on, declared room, listener joined, no arming:** the listener's mix is silent, and it receives no
+   presence or power entries for the source.
+5. **Empty arming `replace`** for listener and source: the listener becomes audible within 3 mix ticks of
+   the reply, and gets the source's join presence.
+6. **Arming with S excluded:** L hears T and does not hear S; S is absent from L's roster.
+7. **Pair rule:** an armed L does not hear an unarmed S; after S is armed, L hears S.
+8. **Heartbeats alone keep policy fresh:** 1 s heartbeats with matching generations for 30 s and no batches
+   give continuous audio (no silent window over 100 ms beyond the source's own pauses).
+9. **Staleness:** stop heartbeats.
+   - L is still audible at `JS_VIS_STALE_MS` − 500 ms.
+   - L is silent by `JS_VIS_STALE_MS` + 100 ms.
+10. **Recovery in the same epoch:** after assertion 9, resuming heartbeats with matching generations makes L
+    audible again without a new arming.
+11. **A new-epoch heartbeat does not revalidate:**
+    - after arming in E1, a heartbeat with E2 > E1 listing L at the same generation leaves L **silent**;
+    - the reply lists L in `unarmed_listeners`;
+    - `authority_epoch` reads E2.
+12. **New-epoch arming:** after assertion 11, a `replace` in E2 makes L audible.
+13. **Lower epoch:**
+    - while E2 is fresh, a batch or heartbeat with E1 < E2 gets `status:"stale_epoch"` and changes nothing
+      (audio and `authority_epoch` unchanged);
+    - after E2 has been stale for the window, E1 is adopted (takeover) and all records are disarmed.
+14. **Per-listener staleness in a live room:** a heartbeat naming L with a generation greater than stored
+    silences L only; M in the same room stays audible. The reply lists L in `stale_listeners`, and a
+    `replace` for L restores it.
+15. **Omission:** a heartbeat that omits an armed L silences L.
+16. **Delta base check:**
+    - an `add` whose `base[L]` does not match L's stored generation is not applied, and L is silenced and
+      listed in `stale_listeners`;
+    - an `add` with a matching base is applied and advances `listener_gen`.
+17. **Out of order:** after a `replace` at generation 10, a delayed `add` at generation 9 is rejected and
+    leaves L's set unchanged.
+18. **Pre-join arming survives deferral:** an empty arming `replace` sent before L joins is replayed at join,
+    and L is audible within 3 ticks of joining with no heartbeat in between.
+19. **Reconnect:**
+    - L's second session (same display, same room) is audible immediately while the record is confirmed;
+    - after the first session leaves, the second stays audible;
+    - a session in a different room is silent until armed there.
+20. **Fan-out:** two sessions with the same display follow one record (both silenced or armed together).
+21. **Mixer restart** (container recreate under the harness):
+    - `mixer_instance` in replies differs from before;
+    - re-created rooms start with `authority_epoch` 0 and all joiners silent;
+    - an emulator that re-arms on the instance change restores audio.
+22. **Graceful stop:** a heartbeat with `"state":"stopping"` silences the room's listeners within 3 ticks,
+    without waiting for the window.
+23. **Room with no listeners:** no heartbeat for 70 s. The room is grace-destroyed as today; a new join plus
+    an arming `replace` is audible.
+24. **Recorder in a declared room:** silent until armed (documents today's decision; see open question 3).
+25. **Reply shape:**
+    - every `peer_ctl_batch` and heartbeat reply carries `vis_protocol` 2, a `mixer_instance` stable across
+      calls, `authority_epoch` and `policy_generation`;
+    - `policy_generation` echoes the highest applied value.
+26. **Old image regression catch:** against `legion-voice-mixer:rollback-pre-v3`, batches carrying
+    `room_epoch`, `policy_generation` and `base` are applied exactly as without them. The emulator sends no
+    heartbeat because no `vis_protocol` is advertised.
+27. **Window clamp:** starting the mixer with `JS_VIS_STALE_MS` below the §5 constraint logs the clamp, and
+    the effective window in `query_session` equals the constraint.
+
+---
+
+## 10. Open questions
+
+1. **Takeover rule.** The takeover rule for lower epochs trusts a stale window of 8 s. Is that enough for a
+   region moved between two sim processes, or does a move need an explicit release?
+2. **Move the sets?** Should the per-session `excluded`/`mod_muted` sets move onto the room-level record
+   (one copy per display)? Recommended, since fan-out already treats them as one.
+3. **Connector peers and recorder taps.** Should they be armed by the sim (the connector module already
+   reaches the service, `WebRtcVoiceRegionModule.cs:262-266`), or be exempt per session? An exemption is a
+   fail-open hole and needs its own authority.
+4. **A2A rooms.** They stay undeclared. Fail-closed for A2A needs the invitation registry to become an
+   authority, which is a later phase.
