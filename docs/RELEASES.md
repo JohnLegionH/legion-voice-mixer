@@ -15,31 +15,54 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
-## Mixer V-2 (untagged) — 2026-09-14
+## Mixer V-2 to V-4 (untagged) — 2026-09-14
 
-A local build, deployed 2026-09-14 14:29 CDT (image `14ccf97d`). The plugin still reports `1.1.0`; this
-slice has no version bump and no tag.
-- **Rollback:** `legion-voice-mixer:rollback-pre-v2` (`7936e030`, the 1.1.0 image).
-- **O-items:** **O-81** (`15f52cb`), **O-82** (`36eae88`), **O-80** (`34935a2`).
-- **Verified:** the full harness, S1–S8 and S10, passed 9/9 in 244.0 s against the deployed image.
+Three local builds were deployed on 2026-09-14. The plugin still reports `1.1.0`; none has a
+version bump or a tag.
+
+| Slice | Deployed (CDT) | Image | Commits | Rollback tag |
+|---|---|---|---|---|
+| V-2 | 14:29 | `14ccf97d` | O-81 `15f52cb`, O-82 `36eae88`, O-80 `34935a2` | `legion-voice-mixer:rollback-pre-v2` (`7936e030`, the 1.1.0 image) |
+| V-3 | 14:55 | `8f423e86` | O-83 `fc48ea6`, SC-87 `4fbfaf4`, SC-96 `ae159b0` | `legion-voice-mixer:rollback-pre-v3` (`14ccf97d`, the V-2 image) |
+| V-4 | 15:16 | `6c443c7d` | harness only: S11 fix `fd2289f`, S12 `dced461`; plugin code as V-3 | none: same plugin as V-3 |
+
+**Verified:**
+- **V-2:** the harness (S1–S8, S10) passed 9/9 in 244.0 s.
+- **V-3:** 9 passed and S11 failed. That was a harness receive bug, fixed in V-4 (ledger O-86).
+- **V-4:** the harness (S1–S8, S10–S12) passed 11/11 in 271.7 s.
+- **Regression check:** S11 and S12 both fail against the V-2 image.
 
 ### Behaviour changes on upgrade
-- **A room created without `spatial_audio=true` is now a flat mix (O-80):** no distance cull,
-  falloff or pan.
-  - The sim creates "local" rooms with the flag set and avatar-to-avatar rooms without it, so A2A
-    calls are now heard regardless of distance, as intended.
-  - A static jcfg room without the key, or any client that omits it, is now flat too.
-  - Room create logs `spatial_audio=true|false`.
+- **Spatialisation follows the room's flag (O-80, O-83).**
+  - A room created with `spatial_audio=false` is a flat mix: no distance cull, falloff or pan. The
+    sim creates avatar-to-avatar rooms that way, so A2A calls are heard regardless of distance.
+  - A room created without the key is spatial, as it was before O-80.
+  - From V-2 (14:29) to V-3 (14:55), a room without the key was flat instead (O-83). Static jcfg
+    rooms and the harness's rooms were affected in that window.
+  - Room create logs `spatial_audio=true|false`, and adds `(key absent: default)` when the key was
+    missing.
+- **Voice dots follow what the listener hears (SC-87).** A source that is moderation-muted for a
+  listener, muted by that listener, or distance-culled for it now reports `{p:0, v:false}` in that
+  listener's power batch. Excluded sources are still omitted.
+- **Recording needs an opt-in (SC-96).**
+  - The recorder, and the injector with `RECORD=1`, refuse to start until `RECORDING_OPT_IN=yes`.
+    This is a new connector knob, default off; the effective value is the peer's first start-up line.
+  - A recording peer joins with `"recorder": true`. The mixer logs `[slvoice] RECORDER <display>
+    joined/left room <id>` and adds `"recorder": true` to that participant's `listparticipants` row
+    and `handle_info`.
 - **Quiet but audible mixes are now encoded and sent (O-82).** Encode-skip no longer applies the
   0.02 RMS floor; it skips only an empty or exactly-zero mix.
   - Under the default curve, a talker at speech level (RMS 0.1) beyond ~33 m is now heard.
   - Encode CPU rises for listeners whose only in-range talker fell below the old floor. Opus DTX
     still suppresses silence on the wire.
 - **10 ms packets are now mixed correctly (O-81).** A 20 ms sender is unchanged.
-- No new knobs.
+- **New knob:** `RECORDING_OPT_IN` (connectors only). No new mixer knobs.
 
 ### One-time migrations
-- None.
+- **Recorder, or injector with `RECORD=1`:** once the room has been told, add
+  `RECORDING_OPT_IN=yes` to `recorder.env` or `injector.env`, then rebuild the connector image
+  (`docker compose --profile recorder build recorder`). The gate lives in the connector image,
+  which these slices did not rebuild.
 
 ---
 

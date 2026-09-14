@@ -11,6 +11,21 @@ room under a sim-registered connector NPC identity:
 
     [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...> identity=derived
 
+## Receiving SLData from the mixer
+
+The mixer's SLData (presence, power batches) does **not** come back on the `SLData` data channel a
+peer creates:
+1. The plugin relays SLData with no channel label.
+2. Janus substitutes its default label, `JanusDataChannel`, and finds no open channel by that name.
+3. It opens a new channel toward the peer and sends on that
+   (`vendor/janus-gateway/src/sctp.c`, `janus_sctp_send_data`).
+
+A connector that wants the mixer's SLData must therefore listen on channels the far side opens.
+`common/peer.py` registers `pc.on("datachannel")` and routes those messages to `_on_sldata`.
+
+The integration harness's S11 failed until it did this: the test peer received nothing while the
+mixer was sending correctly (ledger O-86).
+
 ## One-time migration (regionserver build 1.1.392+)
 
 Connector NPC ids are now derived and stable; on the first restart after upgrading,

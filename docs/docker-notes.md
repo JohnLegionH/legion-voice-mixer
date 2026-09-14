@@ -184,11 +184,22 @@ its knobs have no "before".
 | `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
 | `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
 
+| `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
+
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` are test
 seams for `tests/entrypoint_test.sh`, not operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Untagged V-2 to V-4 (2026-09-14): `34935a2` (O-80), `fc48ea6` (O-83), `4fbfaf4` (SC-87), `ae159b0` (SC-96)**
+  - **A recorder, or an injector with `RECORD=1`, refuses to start until `RECORDING_OPT_IN=yes`**
+    is set in its env file (SC-96). It logs `recorder: RECORDING_OPT_IN=<unset> (recording opt-in,
+    default off)` and then a FATAL line. Set it only after the room has been told it is being
+    recorded.
+  - A room created with `spatial_audio=false` is a flat mix (O-80). A room created without the key
+    stays spatial (O-83); V-2 alone briefly made it flat.
+  - Voice dots: each listener receives `{p:0, v:false}` for sources it cannot hear (SC-87). This
+    changes the protocol payload only; there is no config change.
 - **`3618e9a` (O-75), released in 1.1.0**
   - **A participant whose PeerConnection never comes up is reaped** `JS_JOIN_MEDIA_TIMEOUT_S`
     (default 30 s) after joining, logging `[slvoice] <display> reaped from room <id>: no media <n>s
