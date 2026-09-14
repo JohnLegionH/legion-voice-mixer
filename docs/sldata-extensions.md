@@ -2,22 +2,23 @@
 
 The SL WebRTC voice client sends small JSON objects on the peer's **data
 channel** carrying spatial/presence state ("SLData"). `janus.plugin.slvoice`
-parses each object and stores the latest values per participant. This document
-describes what the plugin parses (Phase 1) and the one slvoice-specific
-**extension** it adds: the `echo` toggle.
+parses each object and merges the values it carries into the participant's state.
+This document describes what the plugin parses, how per-source mute and gain are
+applied, and the one slvoice-specific **extension** it adds: the `echo` toggle.
 
 > **Source.** Reconciled against the vendored spec
 > `docs/voice/webrtc-voice-spec.md`. §9 fixes the client→mixer field set
 > (`j/l/sp/sh/lp/lh/m/ug`, "per the published format") and the Opus fmtp; §6
 > confirms `lh` is the listener-heading quaternion; §4.2 defines the echo test.
-> Phase 1 **stores** these values but does not act on the geometry (no spatial
-> logic until Phase 2). Per `docs/voice/current-architecture.md` §4 the OpenSim
+> The plugin **merges** these values per participant (a message updates only the
+> fields it carries, O-64), and each room's mix tick uses the geometry to
+> spatialise the mix. Per `docs/voice/current-architecture.md` §4 the OpenSim
 > C# side does **not** interpret SLData at all — it forwards the viewer's SDP
 > (including the `m=application` data-channel section) verbatim — so this
 > plugin is the first and only thing that answers the data channel and parses
 > these messages.
 
-## Recognised fields (Phase 1)
+## Recognised fields
 
 The parser (`src/sldata.c`, unit-tested by `tests/test_sldata.c`) recognises:
 
@@ -185,7 +186,7 @@ repurposing of an existing one.
 
 ### `echo_autostart` (bring-up convenience)
 
-A stock SL viewer does **not** send `{"echo":true}`. For Phase-1 bring-up the
+A stock SL viewer does **not** send `{"echo":true}`. For bring-up and diagnosis the
 plugin can auto-enable echo the moment a participant's PeerConnection is up, so
 a normal viewer hears itself without any special client:
 
@@ -195,29 +196,35 @@ a normal viewer hears itself without any special client:
 Default is **off**. The runtime `{"echo":true}`/`{"echo":false}` toggle still
 works regardless of this setting. See `docs/phase1-bringup.md`.
 
-## What's implemented vs deferred
+## What's implemented (1.0.0) and what is not
 
-**Mixer→client SLData** (Phase 1A → 2): the plugin pushes the per-peer batch
-`{ "<uuid>": {"p":<level*128>,"v":<VAD>} }` every ~100 ms (spec §9). In Phase 2
-`p`/`v` are the real level/VAD of **every ACTIVE participant**, computed by the
-mix tick from decoded audio — so other avatars' dots animate when they talk, not
-just the echoed one. Per-peer `j`/`l` join/leave notices are pushed (`j` now the
-correct object form).
+**Mixer→client SLData:** every ~100 ms (spec §9) the plugin pushes the per-peer
+batch `{ "<uuid>": {"p":<level*128>,"v":<VAD>} }`.
+- `p`/`v` are the real level/VAD of **every ACTIVE participant**, computed by the
+  mix tick from decoded audio.
+- Each listener's copy omits the sources its visibility exclusions remove.
+- Per-peer `j`/`l` join/leave notices are pushed (`j` in its object form), plus a
+  join backlog for a late joiner.
 
-**Implemented in Phase 2** (`src/janus_slvoice.c`, math in `src/mixer/mix.c`):
-- Cross-participant flat **N-minus-one mixing**, per-listener, on a 20 ms
-  per-room tick (replaces the Phase-1B echo-to-self).
+**Implemented** (`src/janus_slvoice.c`, maths in `src/mixer/`):
+- Cross-participant **N-minus-one mixing**, per listener, on a 20 ms per-room tick
+  (echo-to-self is a per-participant diagnostic override).
 - **`m`/`ug` acted on**: per-source mute/gain applied in the mix loop (above).
 - DTX/VAD cull (150 ms release hold) and encode-skip on silent mixes.
+- **Geometry** from `sp/sh/lp/lh` (each component an int = value×100 on the wire),
+  merged per field (O-64):
+  - a camera-position leash (§7.1);
+  - distance cull with hysteresis;
+  - distance attenuation;
+  - constant-power azimuth panning.
+
+  The spatial constants are tunable in the plugin jcfg `general:` section.
 - Per-connection **diag vector** + per-room tick-duration histogram in
   `query_session` (spec §4.1): `ice_state`, `dtls_state`, `datachannel_open`,
   `rtp_in_rate`, `rtp_out_rate`, `decode_ok`, `active`, `mix_memberships`,
   `frames_mixed`, `last_rms`, `tick_histogram`.
 
-**Deferred to Phase 3:**
-- Use of `sp/sh/lp/lh` geometry (distance attenuation, panning, HRTF). The
-  parser stores them (each component is an int = value×100 on the wire); the mix
-  is flat until then.
-- The `diag` state member pushed on the **data channel** (§4.1); diagnostics are
-  exposed via `query_session` / the admin API for now (see
-  `docs/phase1-bringup.md`).
+**Not implemented:**
+- HRTF, ITD, distance tiers and azimuth binning.
+- The `diag` state member pushed on the **data channel** (§4.1). Diagnostics are
+  exposed via `query_session` / the admin API (see `docs/phase1-bringup.md`).

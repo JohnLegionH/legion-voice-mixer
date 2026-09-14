@@ -1,42 +1,49 @@
 /*! \file    janus_slvoice.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Janus SLVoice plugin — Phase 1A (hold a WebRTC voice session)
+ * \brief    Janus SLVoice plugin — per-listener spatial voice mixer for OpenSimulator
  *
- * \details  \c janus.plugin.slvoice is a spatial voice mixer for OpenSimulator
- * grids speaking the Second Life WebRTC voice protocol. Phase 1A's goal is to
- * make a real Firestorm viewer ESTABLISH AND HOLD a voice session — a stable
- * PeerConnection with a working voice dot and silence. No audio processing yet.
+ * \details  \c janus.plugin.slvoice is the server side of Second Life WebRTC voice
+ * for OpenSimulator grids. The sim's os-webrtc-janus addon creates rooms and joins
+ * participants; each viewer holds one PeerConnection (Opus audio + the SLData
+ * DataChannel) per region room. What the plugin does:
  *
- * The critical piece is full JSEP negotiation INCLUDING the SCTP DataChannel:
- * the viewer's offer carries both m=audio (Opus) and m=application (the SLData
- * DataChannel it creates before negotiation, per docs/webrtc-voice-spec.md §9).
- * Both must be answered. If the m=application line is not answered (port>0,
- * DTLS/SCTP proto), the Janus core logs "Skipping unsupported application media
- * line" (vendor/janus-gateway/src/sdp.c:1625) and the viewer tears the session
- * down and retries — the join/leave loop this phase fixes.
- *
- * We answer the application m-line by calling janus_sdp_generate_answer_mline()
- * with JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION — the pattern used by
- * janus_videoroom.c:13113 (janus_textroom is the DataChannel reference for the
- * relay_data/incoming_data/data_ready lifecycle, but it is offer-only, so the
- * answer pattern is modelled on videoroom). No plugin capability flag exists;
- * the core wires up SCTP purely from the answer's accepted application m-line
- * (sdp.c:1611-1637), provided Janus was built with HAVE_SCTP (data_channels:true).
- *
- * Protocol: handle_message() implements a superset of the audiobridge request
- * protocol the OpenSim C# side emits (create/destroy/join/leave/configure/list/
- * listparticipants), with the SAME field names, the SAME response envelope key
- * ("audiobridge"), and the SAME error codes (486 room-exists, 485 no-such-room)
- * so the C# side flips audiobridge <-> slvoice by config alone. See
- * docs/protocol-compat.md and docs/voice/current-architecture.md §3.
- *
- * Phase 1B adds ECHO on the held session: incoming_rtp -> fixed-lag jitter
- * buffer -> Opus decode (48k float) -> 500ms delay ring -> Opus encode (stereo,
- * spec §9 fmtp) -> relay_rtp back to the SAME participant. Real RMS*128 power +
- * VAD flow into the mixer->client SLData batch. Echo is per-participant, toggled
- * by {"echo":true/false} on SLData or auto-started via SLV_ECHO_AUTOSTART.
- * OUT OF SCOPE: cross-participant mixing and spatialization (Phase 2).
+ *  - Negotiation. A full JSEP answer for BOTH m=audio (Opus, spec §9 fmtp,
+ *    a=ptime:20/a=maxptime:20) and m=application (the SLData DataChannel the viewer
+ *    creates before negotiating). An unanswered application line makes the core log
+ *    "Skipping unsupported application media line" (vendor sdp.c:1625) and the viewer
+ *    tear down and retry. The answer uses janus_sdp_generate_answer_mline() with
+ *    JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION as janus_videoroom.c:13113 does; the
+ *    core wires SCTP from the accepted line (sdp.c:1611-1637, HAVE_SCTP).
+ *  - Protocol. handle_message() is a superset of the audiobridge request protocol
+ *    the C# side emits (create/destroy/join/leave/configure/list/listparticipants):
+ *    same field names, envelope key ("audiobridge") and error codes (486 room
+ *    exists, 485 no such room), so the sim switches audiobridge <-> slvoice by
+ *    config alone. See docs/protocol-compat.md, docs/voice/current-architecture.md §3.
+ *  - Mixing. One 20 ms tick thread per room. Each tick decodes every ACTIVE
+ *    participant once (fixed-lag jitter buffer; DTX/VAD cull with a 150 ms release
+ *    hold) and builds a per-listener N-minus-one stereo mix, encodes and relays it;
+ *    a silent mix is encode-skipped. Summing/gain/RMS maths in src/mixer/mix.c.
+ *  - Spatialisation. sp/sh/lp/lh from SLData persist per participant (a message
+ *    merges only the fields it carries, O-64). The tick snapshots them, clamps the
+ *    listener to a camera-position leash (§7.1), culls by distance with hysteresis,
+ *    attenuates by distance and pans by horizontal azimuth (constant-power). The
+ *    listener's per-source m (mute) and ug (gain) apply in the mix. No HRTF or ITD.
+ *  - Mixer->client SLData. A ~100 ms per-room power/VAD batch {uuid:{p,v}}, j/l
+ *    presence notices, and a join backlog so a late joiner sees everyone present.
+ *  - Sim-authoritative control. The Admin API "peer_ctl_batch" message
+ *    (src/visbatch.c) carries per-listener visibility exclusions and moderation
+ *    mutes. An excluded source is culled from audio and roster alike (the one
+ *    predicate in src/roster.h); entries for a listener not yet joined are deferred
+ *    and replayed on join (src/deferred.c); moderation mutes are their own set (O-49).
+ *  - Lifecycle. Hangup leaves the room (O-56); leave and destroy reset all
+ *    room-scoped state (O-68); a non-permanent room empty for JS_EMPTY_ROOM_GRACE_S
+ *    (default 60 s) is destroyed by the sender thread's once-a-second sweep, which
+ *    stops its tick thread (O-54).
+ *  - Diagnostics. The query_session diag vector and per-room tick histogram; the
+ *    full SDP dumps at LOG_VERB with ICE credentials redacted (O-66). Echo-to-self
+ *    ({"echo":true} on SLData, or SLV_ECHO_AUTOSTART) remains a per-participant
+ *    diagnostic that replaces that participant's mix.
  *
  * Written against the Janus 1.4.1 plugin API (JANUS_PLUGIN_API_VERSION 106);
  * the vendored headers and in-tree plugins are the authority.
@@ -70,10 +77,11 @@
 #include "mixer/pan.h"     /* Phase 3b item 4: constant-power stereo pan gains */
 #include "sdp_redact.h"    /* O-66: ICE credential / fingerprint redaction for the SDP dumps */
 
-/* Plugin information */
-#define JANUS_SLVOICE_VERSION         9
-#define JANUS_SLVOICE_VERSION_STRING  "0.9.0"
-#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol (Phase 3b: per-room N-minus-one mixing with DTX/VAD cull, per-source mute/gain and encode-skip; sim-authoritative per-listener visibility exclusion; distance culling with hysteresis, distance attenuation and constant-power azimuth panning from viewer geometry, with a camera-position leash; no HRTF, ITD, distance tiers or azimuth binning yet; echo remains a per-participant diagnostic override)."
+/* Plugin information. JANUS_SLVOICE_VERSION is MAJOR*100 + MINOR*10 + PATCH (1.0.0 = 100;
+ * releases up to 0.9.0 used the minor number alone). */
+#define JANUS_SLVOICE_VERSION         100
+#define JANUS_SLVOICE_VERSION_STRING  "1.0.0"
+#define JANUS_SLVOICE_DESCRIPTION     "Spatial voice mixer for OpenSimulator, speaking the Second Life WebRTC voice protocol: per-listener N-minus-one mixing on a per-room 20 ms tick with DTX/VAD cull, per-source mute/gain and encode-skip; sim-authoritative visibility exclusion and moderation mute via peer_ctl_batch; distance culling with hysteresis, distance attenuation and constant-power azimuth panning from viewer geometry, with a camera-position leash; empty-room grace destroy; no HRTF or ITD; echo remains a per-participant diagnostic override."
 #define JANUS_SLVOICE_NAME            "Legion SLVoice mixer"
 #define JANUS_SLVOICE_AUTHOR          "Legion Voice Mixer project"
 #define JANUS_SLVOICE_PACKAGE         "janus.plugin.slvoice"
@@ -291,7 +299,7 @@ static guint slv_empty_room_grace_s = SLV_EMPTY_ROOM_GRACE_S;
 /* ---- Rooms (slv_regions) and participants (folded into the session) -------
  * One WebRTC peer = one participant. A room is a lightweight membership +
  * metadata holder keyed by the room number the C# side computes (CalcRoomNumber).
- * The per-region mix thread (src/mixer/mixer.h) is Phase 2. */
+ * Each room runs its own 20 ms mix tick thread (below; the design record is src/mixer/mixer.h). */
 typedef struct janus_slvoice_room {
 	guint64 room_id;
 	char *description;
@@ -2452,9 +2460,10 @@ respond:
 
 /* ---- Mixer->client periodic power/VAD ticker -----------------------------
  * Every ~100ms (spec §9) push each room's participants a well-formed per-peer
- * batch keyed by display (agent UUID): { "<uuid>": {"p":<RMS*128>,"V":<VAD>} }.
- * Phase 1A has no audio, so p=0 and V=false for everyone — the point is that the
- * viewer receives valid state and renders a (silent) voice dot. */
+ * batch keyed by display (agent UUID): { "<uuid>": {"p":<level*128>,"v":<VAD>} }.
+ * p and v are the real level/VAD the room tick computes for each active participant;
+ * each listener's copy omits the sources its exclusion set removes. The same thread
+ * runs the once-a-second empty-room grace sweep (O-54). */
 static void *janus_slvoice_sender(void *data) {
 	JANUS_LOG(LOG_VERB, "[%s] Joining sender thread\n", JANUS_SLVOICE_PACKAGE);
 	guint sweep_ticks = 0;
@@ -3280,7 +3289,7 @@ void janus_slvoice_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp *
 }
 
 void janus_slvoice_incoming_rtcp(janus_plugin_session *handle, janus_plugin_rtcp *packet) {
-	/* Phase 1A: RTCP is not acted on. */
+	/* RTCP is not acted on; the mix runs on the room tick's own clock. */
 }
 
 void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data *packet) {
@@ -3380,8 +3389,8 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 		SLV_MEDIA_LOG("[%s-%p] SLData fields=[%s] (status=%d)\n", JANUS_SLVOICE_PACKAGE, handle, fbuf, st);
 	}
 #endif
-	/* Phase 1A stores sp/sh/lp/lh/m/ug (in session->last_data) but does not act
-	 * on the geometry — spatial mixing is Phase 2. */
+	/* The merged sp/sh/lp/lh geometry and m/ug in session->last_data are consumed by
+	 * the room tick (geometry snapshot, per-source mute/gain); nothing more to do here. */
 }
 
 void janus_slvoice_data_ready(janus_plugin_session *handle) {

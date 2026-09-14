@@ -1,0 +1,138 @@
+name: ci
+
+# Every push to main and every pull request:
+#   1. build the image. The Dockerfile runs the C unit suites (`make test`) and
+#      tests/entrypoint_test.sh, so a unit failure fails this step;
+#   2. start that image through docker-compose.yml with a .env this job writes;
+#   3. run the two-peer integration harness (tests/integration) against it.
+# Any scenario FAIL fails the job (run.py exits 1).
+#
+# The tag-triggered image publish is release.yml; this workflow never pushes an image.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The tag docker-compose.yml runs. Built and loaded locally here, never pushed.
+  IMAGE: ghcr.io/johnlegionh/legion-voice-mixer:latest
+
+jobs:
+  build-and-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (with the pinned Janus submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (runs the unit suites and the entrypoint tests)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=ci
+          cache-to: type=gha,mode=max,scope=ci
+
+      # The job writes its own .env and never reads a developer's: .env is git-ignored,
+      # so none exists on the runner. Every knob the harness depends on is set here
+      # explicitly, and the secrets are random per run.
+      #   - JS_EMPTY_ROOM_GRACE_S must equal the harness --grace below (S5 waits it out).
+      #   - JS_PUBLIC_IP=127.0.0.1: the peers run on this host (keep_private_host also
+      #     advertises the container address, which the Linux host can route to).
+      #   - JS_ADMIN_BIND / JS_WS_ENABLED narrow on purpose: the harness uses
+      #     127.0.0.1 and no WebSockets.
+      #   - No O-75 knob (JS_JOIN_MEDIA_TIMEOUT_S) or --join-timeout: neither exists
+      #     yet; add both here when O-75 lands.
+      - name: Write the CI .env (explicit knobs, ephemeral secrets)
+        run: |
+          api_secret="$(openssl rand -hex 24)"
+          admin_secret="$(openssl rand -hex 24)"
+          echo "::add-mask::${api_secret}"
+          echo "::add-mask::${admin_secret}"
+          umask 077
+          cat > .env <<EOF
+          JS_API_SECRET=${api_secret}
+          JS_ADMIN_SECRET=${admin_secret}
+          ALLOW_INSECURE_DEV=false
+          JS_SERVER_NAME=GridVoiceCI
+          JS_HTTP_PORT=24223
+          JS_HTTP_BASEPATH=/voice
+          JS_ADMIN_PORT=24225
+          JS_ADMIN_BASEPATH=/voiceAdmin
+          JS_ADMIN_BIND=127.0.0.1
+          JS_WS_ENABLED=false
+          JS_WS_PORT=8188
+          JS_RTP_PORT_RANGE=10000-10200
+          JS_PUBLIC_IP=127.0.0.1
+          JS_PUBLIC_HOST=
+          JS_NAT_EXTRA_IPS=
+          JS_EMPTY_ROOM_GRACE_S=10
+          SLV_ECHO_AUTOSTART=false
+          EOF
+          # Compose resolves env_file for the profile-gated recorder/injector services
+          # too; empty files keep those (inactive) definitions valid.
+          touch connectors/recorder/recorder.env connectors/injector/injector.env
+
+      - name: Start the mixer
+        run: |
+          docker compose up -d --pull never janus
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:24223/voice/info >/dev/null; then
+              echo "Janus answered /voice/info after ${i}s"
+              docker compose logs --no-log-prefix janus | grep '\[entrypoint\]'
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Janus did not answer /voice/info within 90 s"
+          docker compose logs --no-log-prefix janus | tail -200
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/integration/requirements.txt
+
+      - name: Install harness requirements
+        run: pip install -r tests/integration/requirements.txt
+
+      # --no-restart leaves out S4 (mixer restart mid-session). S4 restarts the
+      # service under test (`docker compose restart janus`) and then waits for the
+      # peers to recover. On a shared runner that makes the job's pass/fail depend on
+      # container restart and ICE re-gather timing rather than on the code. S4 is run
+      # locally against the real mixer before a deploy instead.
+      # --grace 10 matches JS_EMPTY_ROOM_GRACE_S in the .env above.
+      - name: Integration harness (S1-S3, S5-S8)
+        run: |
+          python -m tests.integration.run \
+            --env .env \
+            --compose-file docker-compose.yml \
+            --janus-url http://127.0.0.1:24223/voice \
+            --admin-url http://127.0.0.1:24225/voiceAdmin \
+            --grace 10 \
+            --no-restart
+
+      - name: Mixer log (on failure)
+        if: failure()
+        run: docker compose logs --no-log-prefix janus | tail -400
+
+      - name: Stop the mixer
+        if: always()
+        run: docker compose down

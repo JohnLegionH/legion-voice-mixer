@@ -1,20 +1,25 @@
 # legion-voice-mixer — `janus.plugin.slvoice`
 
-A [Janus Gateway](https://janus.conf.meetecho.com/) plugin that will become a
-**spatial voice mixer for OpenSimulator grids**, speaking the **Second Life
-WebRTC voice protocol**. It is the server-side counterpart to the OpenSim
-`os-webrtc-janus` addon, intended as a drop-in alternative to the stock
-`janus.plugin.audiobridge`.
+A [Janus Gateway](https://janus.conf.meetecho.com/) plugin that is a **spatial
+voice mixer for OpenSimulator grids**, speaking the **Second Life WebRTC voice
+protocol**. It is the server-side counterpart to the OpenSim `os-webrtc-janus`
+addon and a drop-in alternative to the stock `janus.plugin.audiobridge`.
 
-> **Status: Phase 1B — holds a WebRTC voice session and echoes audio.** The
-> plugin negotiates Opus + the SLData **DataChannel** (both m-lines answered, so
-> a real Firestorm viewer establishes and *holds* a session — no join/leave
-> loop), speaks the audiobridge-compatible request protocol, and **echoes each
-> participant's audio back to itself ~500 ms delayed** (jitter buffer → Opus
-> decode → delay ring → Opus encode → relay), with real RMS/VAD in the
-> mixer→client power batch. Toggle echo with `SLV_ECHO_AUTOSTART` or an
-> `{"echo":true}` SLData message. Cross-participant mixing and spatialization are
-> Phase 2. See `docs/phase1-bringup.md` for the in-world runbook.
+> **Status: 1.0.0, in production on Legion Grid.** Each viewer holds one
+> PeerConnection (Opus + the SLData **DataChannel**) per region room.
+> - **Mixing:** every room runs a 20 ms tick that builds a **per-listener
+>   N-minus-one stereo mix**.
+> - **Spatialisation:** from the viewers' SLData geometry (camera leash, distance
+>   cull with hysteresis, distance attenuation, constant-power azimuth panning),
+>   honouring each listener's per-source mute and gain.
+> - **Sim control:** the sim sends **visibility exclusions and moderation mutes**
+>   as Admin API `peer_ctl_batch` messages; an excluded source disappears from
+>   both audio and roster.
+> - **Room lifecycle:** empty rooms are destroyed after `JS_EMPTY_ROOM_GRACE_S`.
+> - **Not implemented:** HRTF/ITD.
+> - **Diagnostic:** echo-to-self (`SLV_ECHO_AUTOSTART` or `{"echo":true}`).
+>
+> Release history and upgrade notes: [`docs/RELEASES.md`](docs/RELEASES.md).
 
 The published container image bundles Janus **v1.4.1** and this plugin, so
 operators deploy it **without cloning, submodules, or build tools**.
@@ -128,19 +133,41 @@ sudo make install JANUS_PREFIX=/opt/janus
 The `.so` is dlopen()ed by the Janus core; its `janus_*` symbols resolve from
 the core at load time, so it links only glib + jansson.
 
-### Release / publishing
+### CI and releases
 
-Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the
-image and pushes `ghcr.io/johnlegionh/legion-voice-mixer:{version}` and
-`:latest` (linux/amd64). That published image is what the Install section pulls.
+- **`.github/workflows/ci.yml`** runs on every push to `main` and every pull
+  request.
+  - It builds the image, which runs the C unit suites and
+    `tests/entrypoint_test.sh`.
+  - It starts the image through `docker-compose.yml` with a job-written `.env`
+    (explicit knobs, random secrets).
+  - It runs the two-peer integration harness (`tests/integration`, every scenario
+    except S4). Any FAIL fails the job.
+- **Pushing a `v*` tag** triggers `.github/workflows/release.yml`. It builds the
+  image and pushes `ghcr.io/johnlegionh/legion-voice-mixer:{version}` and
+  `:latest`, plus the `-DSLV_DEBUG_MEDIA` `:debug` variant (linux/amd64). That
+  published image is what the Install section pulls.
+- **Every release** is recorded in `docs/RELEASES.md` with its "Behaviour changes
+  on upgrade" and "One-time migrations". This follows the compatibility rule in
+  `docs/docker-notes.md`.
 
 ### Layout
 
 ```
-src/janus_slvoice.c      the plugin (Phase 1B: rooms, JSEP+datachannel, SLData, echo, diagnostics)
-src/sldata.{c,h}          SLData data-channel parser (jansson-only; unit-tested)
-src/mixer/mixer.h         Phase-2 per-region tick model (declarations only)
-tests/test_sldata.c       SLData parser unit tests (`make test`)
+src/janus_slvoice.c       the plugin: negotiation, audiobridge-superset protocol, rooms,
+                          per-room mix tick, SLData, peer_ctl_batch, grace destroy, diagnostics
+src/sldata.{c,h}          SLData data-channel parser and per-field merge (jansson-only)
+src/visbatch.{c,h}        Admin API peer_ctl_batch parser (visibility exclusions, moderation mutes)
+src/deferred.{c,h}        per-room store of batch columns for listeners not yet joined
+src/roster.h              the single exclusion predicate shared by audio and roster
+src/sdp_redact.h          ICE-credential redaction for the VERB SDP dumps
+src/mixer/mix.{c,h}       N-minus-one summing, gain and RMS
+src/mixer/vec3.h, azimuth.h, pan.h   geometry, azimuth and constant-power pan maths
+src/mixer/mixer.h         design record of the tick model (realised in janus_slvoice.c)
+tests/test_*.c            unit suites (`make test`; also run by the image build)
+tests/entrypoint_test.sh  docker-entrypoint.sh tests (bash, no Docker; also run by the image build)
+tests/integration/        two-peer aiortc harness against a live mixer (`make integration`; CI)
+tests/bench_tick.c        tick-cost load harness (`make bench_tick`; not a test)
 Makefile                  out-of-tree plugin build (pkg-config against Janus)
 Dockerfile                Janus (from the pinned submodule) + plugin + entrypoint
 docker-entrypoint.sh      generates Janus *.jcfg from env at container start
@@ -148,7 +175,8 @@ docker-compose.yml        operator deployment (pulls the published image)
 env.sample                operator config template (copy to .env)
 etc/janus/                janus.plugin.slvoice.jcfg (baked into the image)
 build-janus.sh            developer local image build
-.github/workflows/        release.yml — tag-triggered image publish
+connectors/               recorder and injector peers (profile-gated compose services)
+.github/workflows/        ci.yml (push/PR: build + suites + harness), release.yml (tag: publish)
 vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
 ```
 
@@ -162,17 +190,25 @@ vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
   (incl. the **§3 message table** that fixes the wire shapes this plugin accepts).
 - `docs/protocol-compat.md` — the audiobridge-superset compatibility constraint
   and its expiry.
-- `docs/docker-notes.md` — image/config-precedence details and divergences from
+- `docs/docker-notes.md` — image/config-precedence details, the configuration
+  compatibility rule and knob register, and divergences from
   `Misterblue/os-webrtc-janus-docker`.
-- `docs/sldata-extensions.md` — the data-channel SLData field set and the
-  slvoice `echo` extension (Phase 1B).
-- `docs/phase1-bringup.md` — the in-world Phase-1 runbook: CHECK 1 (session
-  holds) then CHECK 2 (echo), INI, per-stage log trails, failure signatures.
+- `docs/RELEASES.md` — every deployed release with its O-items, behaviour changes
+  on upgrade and one-time migrations.
+- `docs/sldata-extensions.md` — the data-channel SLData field set, per-source
+  mute/gain, and the slvoice `echo` diagnostic extension.
+- `docs/voice-mute-wiring.md` — how the moderation mute channel is wired.
+- `docs/phase1-bringup.md` — the original in-world bring-up runbook (CHECK 1
+  session holds, CHECK 2 echo, CHECK 3 two-party mix); still the reference for
+  diagnosing a single viewer.
+- `tests/integration/README.md` — the two-peer integration harness and its
+  scenarios.
 
-> The three OpenSim C# surveys live in `docs/voice/`; the other docs are
-> maintained here. Phase 1 was reconciled against them — message shapes/error
-> codes against `current-architecture.md` §3, and the SLData field set / Opus
-> fmtp against `webrtc-voice-spec.md` §9/§6/§4.2.
+> The OpenSim C# surveys and the voice programme ledger live in `docs/voice/`
+> (mirrored from the sim tree); the other docs are maintained here. The plugin
+> was reconciled against them: message shapes/error codes against
+> `current-architecture.md` §3, and the SLData field set / Opus fmtp against
+> `webrtc-voice-spec.md` §9/§6/§4.2.
 
 ## License
 

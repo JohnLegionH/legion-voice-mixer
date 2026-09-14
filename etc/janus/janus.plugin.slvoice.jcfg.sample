@@ -1,24 +1,21 @@
 # Configuration for the janus.plugin.slvoice spatial voice mixer.
 #
-# Phase 1 (echo test): rooms are primarily DYNAMIC — the OpenSim C# side
-# creates them at runtime with the audiobridge-compatible `create`/`join`
-# requests. This file is optional; the plugin runs with no config at all.
+# Rooms are DYNAMIC: the OpenSim C# side creates them at runtime with the
+# audiobridge-compatible `create`/`join` requests, and the plugin destroys an
+# empty one after JS_EMPTY_ROOM_GRACE_S. This file is optional; the plugin runs
+# with no config at all.
 #
 # The file uses the same libconfig/jcfg format as the stock Janus plugins.
+# The spatial tuning keys (spatial_*_distance_m, spatial_falloff_exp) are
+# documented in etc/janus/janus.plugin.slvoice.jcfg.
 
 general: {
-	# Human-readable label surfaced in logs/admin (optional).
-	#name = "Legion SLVoice mixer"
-
-	# Phase 1B: auto-enable echo (participant hears itself ~500ms delayed) as soon
+	# Diagnostic: auto-enable echo (participant hears itself ~500ms delayed) as soon
 	# as its PeerConnection is up, so a stock viewer that can't send the
 	# {"echo":true} SLData toggle still gets echo. Default false. Under the Docker
 	# model the SLV_ECHO_AUTOSTART env var (add it to .env) is the easier knob and
 	# overrides this. See docs/phase1-bringup.md (CHECK 2).
 	#echo_autostart = false
-
-	# Set to true for very verbose per-tick logging once the mixer exists (Phase 2).
-	#events = true
 }
 
 # ---- Optional static rooms -------------------------------------------------
@@ -31,14 +28,14 @@ general: {
 #	description = "Test Region"
 #	sampling_rate = 48000          # advertised in `list`; internal mix is always 48k
 #	is_private = false             # if true, hidden from `list`
-#	spatial_audio = true           # advertised only; spatial mixing is Phase 2
+#	spatial_audio = true           # advertised in `list` only; every room is spatialised
 #}
 
 # ---- Notes -----------------------------------------------------------------
-# Echo mode (Phase 1) is toggled per-participant over the WebRTC data channel
+# Echo (a per-participant diagnostic) is toggled over the WebRTC data channel
 # via an {"echo": true} / {"echo": false} SLData message, NOT from this file.
 # See docs/sldata-extensions.md.
 #
-# Phase 2 will grow per-region defaults here (spatial rolloff, max distance,
-# stereo width, denoise). Extensions to the message protocol are added as NEW
-# fields only — see docs/protocol-compat.md.
+# Spatial tuning is process-wide; there are no per-room spatial settings.
+# Extensions to the message protocol are added as NEW fields only — see
+# docs/protocol-compat.md.

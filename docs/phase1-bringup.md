@@ -1,5 +1,11 @@
 # Phase 1 bring-up runbook — hold the session, then echo
 
+> **Historical runbook, still useful for diagnosis.** It was written for the
+> Phase 1–2 bring-up. The shipped plugin (1.0.0) also spatialises the mix, applies
+> the sim's visibility/moderation batches and destroys empty rooms; see
+> `README.md` and `docs/RELEASES.md`. CHECK 1–3 below remain the quickest way to
+> isolate a single viewer's session, echo and two-party mix problems.
+
 In-world checks against a real **Firestorm 7.2.2** viewer on
 `janus.plugin.slvoice`:
 
@@ -256,5 +262,8 @@ becomes `p = RMS*128` and a simple energy VAD in the mixer→client batch.
 
 ## Scope
 
-Phase 1B echoes each participant to **itself** only. Cross-participant **mixing**
-and **spatialization** are Phase 2 (`src/mixer/mixer.h`).
+This runbook covers bring-up: a held session, echo-to-self, and a two-party mix.
+The shipped plugin goes further (it spatialises from SLData geometry, applies the
+sim's `peer_ctl_batch` exclusions and moderation mutes, and destroys empty rooms
+after the grace period). For those, see `README.md`, `docs/voice/phase3b-design-brief.md`
+and the integration harness in `tests/integration/`.

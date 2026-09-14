@@ -148,7 +148,8 @@ defaults and wrote down the rule:
   wrong value is visible in `docker compose logs janus` before anyone logs in.
   Secrets are shown as `set`/`EMPTY`, never printed.
 - **Every release note lists "Behaviour changes on upgrade" and "One-time
-  migrations"**, even when a list is empty.
+  migrations"**, even when a list is empty. The release notes are
+  `docs/RELEASES.md`; the two sections below summarise them for configuration.
 
 A change that must break compatibility for safety (O-65 below) is allowed only if
 it fails loud at start, names the exact keys to set and the override, and appears
