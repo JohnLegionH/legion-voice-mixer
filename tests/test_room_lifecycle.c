@@ -331,6 +331,23 @@ static void test_spatial_pair(void) {
 	/* flat and spat stay in rooms; the global teardown in main frees them. */
 }
 
+/* O-83: absent spatial_audio means spatial; only an explicit false narrows to a flat mix. */
+static void test_spatial_default(void) {
+	CHECK(janus_slvoice_spatial_from_json(NULL), "create without spatial_audio: spatial");
+	json_t *t = json_true(), *f = json_false(), *s = json_string("false"), *n = json_null();
+	CHECK(janus_slvoice_spatial_from_json(t), "create with spatial_audio true: spatial");
+	CHECK(!janus_slvoice_spatial_from_json(f), "create with spatial_audio false: flat");
+	CHECK(janus_slvoice_spatial_from_json(s), "a non-boolean spatial_audio does not narrow");
+	CHECK(janus_slvoice_spatial_from_json(n), "a null spatial_audio does not narrow");
+	json_decref(t);
+	json_decref(f);
+	json_decref(s);
+	json_decref(n);
+	CHECK(janus_slvoice_spatial_from_cfg(NULL), "static room without the key: spatial");
+	CHECK(janus_slvoice_spatial_from_cfg("true") && janus_slvoice_spatial_from_cfg("yes"), "static room true/yes: spatial");
+	CHECK(!janus_slvoice_spatial_from_cfg("false") && !janus_slvoice_spatial_from_cfg("No"), "static room false/no: flat");
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -340,6 +357,7 @@ int main(void) {
 	test_grace_destroy();
 	test_hangup_leaves_room();
 	test_spatial_pair();
+	test_spatial_default();
 
 	/* O-67: the shared global teardown (destroy() and a failed init) with no worker threads
 	 * started and rooms still live (1002 permanent, 1006 empty) leaves nothing behind. */

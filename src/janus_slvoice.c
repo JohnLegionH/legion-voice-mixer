@@ -223,6 +223,18 @@ static slv_spatial_settings slv_spatial = {
 	.falloff_exp = SLV_FALLOFF_EXP_DEFAULT,              /* 2.0  */
 };
 
+/* O-83: a room's spatial_audio setting. Absent means spatial, as every room was before O-80
+ * read the flag; only an explicit false gives a flat mix (narrowing is opt-in). JSON: false
+ * narrows, anything else (absent, true, a string) stays spatial. jcfg: "false" or "no"
+ * (any case) narrows. */
+static gboolean janus_slvoice_spatial_from_json(json_t *value) {
+	return !(value != NULL && json_is_false(value));
+}
+
+static gboolean janus_slvoice_spatial_from_cfg(const char *value) {
+	return !(value != NULL && (!strcasecmp(value, "false") || !strcasecmp(value, "no")));
+}
+
 /* Packet-level logging is gated behind a compile-time flag so the RTP-ingest
  * path stays silent in production. Build with -DSLV_DEBUG_MEDIA to enable. */
 #ifdef SLV_DEBUG_MEDIA
@@ -1016,7 +1028,7 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 		const char *spatial_s = janus_slvoice_cfg_item(config, cat, "spatial_audio");
 		guint32 rate = rate_s ? (guint32)g_ascii_strtoull(rate_s, NULL, 10) : 48000;
 		gboolean is_private = priv_s && (!strcasecmp(priv_s, "true") || !strcasecmp(priv_s, "yes"));
-		gboolean spatial = spatial_s && (!strcasecmp(spatial_s, "true") || !strcasecmp(spatial_s, "yes"));
+		gboolean spatial = janus_slvoice_spatial_from_cfg(spatial_s);
 		janus_mutex_lock(&rooms_mutex);
 		if(g_hash_table_lookup(rooms, &room_id) == NULL) {
 			janus_slvoice_room *room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, TRUE);
@@ -1028,9 +1040,10 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 				guint64 *key = g_malloc(sizeof(guint64));
 				*key = room_id;
 				g_hash_table_insert(rooms, key, room);
-				JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config, spatial_audio=%s\n",
+				JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config, spatial_audio=%s%s\n",
 					JANUS_SLVOICE_PACKAGE, room_id, room->description,
-					room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)");
+					room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)",
+					spatial_s == NULL ? " (key absent: default)" : "");
 			}
 		}
 		janus_mutex_unlock(&rooms_mutex);
@@ -2150,7 +2163,8 @@ static void *janus_slvoice_handler(void *data) {
 				room_id = janus_random_uint64();
 			const char *desc = json_string_value(json_object_get(root, "description"));
 			gboolean is_private = json_is_true(json_object_get(root, "is_private"));
-			gboolean spatial = json_is_true(json_object_get(root, "spatial_audio"));
+			json_t *spatial_j = json_object_get(root, "spatial_audio");
+			gboolean spatial = janus_slvoice_spatial_from_json(spatial_j);
 			json_t *rate_j = json_object_get(root, "sampling_rate");
 			guint32 rate = (rate_j && json_is_integer(rate_j)) ? (guint32)json_integer_value(rate_j) : 48000;
 			gboolean permanent = json_is_true(json_object_get(root, "permanent"));
@@ -2179,9 +2193,10 @@ static void *janus_slvoice_handler(void *data) {
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = room_id;
 			g_hash_table_insert(rooms, key, room);
-			JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s) spatial_audio=%s\n",
+			JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s) spatial_audio=%s%s\n",
 				JANUS_SLVOICE_PACKAGE, room_id, room->description,
-				room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)");
+				room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)",
+				spatial_j == NULL ? " (key absent: default)" : "");
 			janus_mutex_unlock(&rooms_mutex);
 
 			event = json_object();
@@ -3051,8 +3066,9 @@ static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
  * mix: distance cull with hysteresis, falloff past the reference distance, constant-power azimuth
  * pan. Writes the per-channel gains and returns TRUE when the pair is culled. A pair without
  * geometry on both sides keeps the flat gain. O-80: so does every pair in a non-spatial room
- * (spatial_audio false at create, e.g. an avatar-to-avatar call), which never reaches the cull, so
- * no hysteresis slot is written. s->mutex held; src's snapshot is tick-owned. */
+ * (an explicit spatial_audio false at create, e.g. an avatar-to-avatar call; absent is spatial,
+ * O-83), which never reaches the cull, so no hysteresis slot is written. s->mutex held; src's
+ * snapshot is tick-owned. */
 static gboolean janus_slvoice_spatial_pair_locked(janus_slvoice_room *room, janus_slvoice_session *s,
 		janus_slvoice_session *src, const char *disp, float gain, float *gainL, float *gainR) {
 	*gainL = gain;
