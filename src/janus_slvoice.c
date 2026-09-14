@@ -2523,12 +2523,70 @@ respond:
 	return NULL;
 }
 
+/* SC-87: TRUE when the last tick evaluated this (listener, source) pair and culled it. The tick
+ * stamps seen_tick with room->tick_seq on every evaluation; a latch it did not reach this tick (the
+ * pair was muted first, lost geometry, or the room is flat) is stale and says nothing about what the
+ * listener hears. room->mutex held. */
+static gboolean janus_slvoice_cull_latched_locked(janus_slvoice_room *room, const slv_cull_hyst *slot) {
+	return slot->culled && slot->seen_tick == room->tick_seq;
+}
+
+/* SC-87: darken one source's dot in a listener's batch copy, if the batch carries it. */
+static void janus_slvoice_dot_darken(json_t *filt, const char *display, json_t *dark) {
+	if(json_object_get(filt, display) == NULL)
+		return;
+	if(dark != NULL)
+		json_object_set(filt, display, dark);   /* increfs dark */
+	else
+		json_object_del(filt, display);        /* OOM building dark: hide the dot rather than light it */
+}
+
+/* SC-87: listener L's dot batch, derived from the same state its mix uses. A source L gets no audio
+ * from, because it is moderation-muted for L, personally muted by L, or distance-culled for L by the
+ * last tick, reports {p:0,v:false}. A source excluded from L's roster is omitted. Returns NULL when
+ * none of that applies, so L gets the shared batch unchanged; otherwise a new object the caller
+ * decrefs. dark is the shared {p:0,v:false} value. room->mutex and L->mutex held. */
+static json_t *janus_slvoice_dot_batch_for_listener_locked(janus_slvoice_room *room,
+		janus_slvoice_session *L, json_t *batch, json_t *dark) {
+	gboolean any = (L->excluded != NULL && g_hash_table_size(L->excluded) > 0)
+		|| (L->mod_muted != NULL && g_hash_table_size(L->mod_muted) > 0);
+	for(int k = 0; !any && k < L->n_peer_ctl; k++)
+		any = L->peer_ctl[k].muted;
+	for(int k = 0; !any && k < L->n_cull_hyst; k++)
+		any = janus_slvoice_cull_latched_locked(room, &L->cull_hyst[k]);
+	if(!any)
+		return NULL;
+	json_t *filt = json_copy(batch);   /* shallow: shares the {p,v} values with batch */
+	if(filt == NULL)
+		return NULL;
+	GHashTableIter it;
+	gpointer key;
+	if(L->mod_muted != NULL) {
+		g_hash_table_iter_init(&it, L->mod_muted);
+		while(g_hash_table_iter_next(&it, &key, NULL))
+			janus_slvoice_dot_darken(filt, (const char *)key, dark);
+	}
+	for(int k = 0; k < L->n_peer_ctl; k++)
+		if(L->peer_ctl[k].muted)
+			janus_slvoice_dot_darken(filt, L->peer_ctl[k].uuid, dark);
+	for(int k = 0; k < L->n_cull_hyst; k++)
+		if(janus_slvoice_cull_latched_locked(room, &L->cull_hyst[k]))
+			janus_slvoice_dot_darken(filt, L->cull_hyst[k].uuid, dark);
+	if(L->excluded != NULL) {
+		g_hash_table_iter_init(&it, L->excluded);
+		while(g_hash_table_iter_next(&it, &key, NULL))
+			json_object_del(filt, (const char *)key);   /* roster omission, as before SC-87 */
+	}
+	return filt;
+}
+
 /* ---- Mixer->client periodic power/VAD ticker -----------------------------
  * Every ~100ms (spec §9) push each room's participants a well-formed per-peer
  * batch keyed by display (agent UUID): { "<uuid>": {"p":<level*128>,"v":<VAD>} }.
- * p and v are the real level/VAD the room tick computes for each active participant;
- * each listener's copy omits the sources its exclusion set removes. The same thread
- * runs the once-a-second empty-room grace sweep (O-54). */
+ * p and v are the real level/VAD the room tick computes for each active participant.
+ * Each listener's copy omits the sources its exclusion set removes and reports no
+ * power for sources it cannot hear (SC-87). The same thread runs the once-a-second
+ * empty-room grace sweep (O-54). */
 static void *janus_slvoice_sender(void *data) {
 	JANUS_LOG(LOG_VERB, "[%s] Joining sender thread\n", JANUS_SLVOICE_PACKAGE);
 	guint sweep_ticks = 0;
@@ -2626,34 +2684,30 @@ static void *janus_slvoice_sender(void *data) {
 				}
 			}
 			g_hash_table_destroy(dot_up);
-			/* Send per listener. A listener with NO exclusions gets the shared full
-			 * batch (fast path — the common case). A listener with exclusions gets a
-			 * filtered copy omitting excluded sources' {p,v} dots — roster omission
-			 * from the SAME set that culls its audio (single source of truth §1).
-			 * p->excluded is read under room->mutex, which we hold here; the batch
-			 * apply also takes room->mutex, so the two never overlap. */
+			/* Send per listener (SC-87): each listener's batch reflects what it hears, from the
+			 * same state its mix uses (single source of truth, §7.3). A listener with nothing
+			 * excluded, muted or culled gets the shared full batch (the common case). Otherwise
+			 * janus_slvoice_dot_batch_for_listener_locked darkens the sources it cannot hear and
+			 * omits the ones excluded from its roster. room->mutex, held here, excludes the tick
+			 * and the batch apply; p->mutex guards the listener's peer_ctl. */
 			char *full_text = json_dumps(batch, JSON_COMPACT);
 			size_t full_len = full_text ? strlen(full_text) : 0;
+			json_t *dark = json_pack("{sisb}", "p", 0, "v", 0);
 			g_hash_table_iter_init(&piter, room->participants);
 			while(g_hash_table_iter_next(&piter, NULL, &pvalue)) {
 				janus_slvoice_session *p = pvalue;
 				if(!g_atomic_int_get(&p->dc_open))
 					continue;
-				if(p->excluded == NULL || g_hash_table_size(p->excluded) == 0) {
+				janus_mutex_lock(&p->mutex);
+				json_t *filt = janus_slvoice_dot_batch_for_listener_locked(room, p, batch, dark);
+				janus_mutex_unlock(&p->mutex);
+				if(filt == NULL) {
 					if(full_text != NULL && full_len < 65536) {
 						janus_plugin_data d = { .label = NULL, .protocol = NULL, .binary = FALSE,
 							.buffer = full_text, .length = (uint16_t)full_len };
 						gateway->relay_data(p->handle, &d);
 					}
 					continue;
-				}
-				json_t *filt = json_object();
-				const char *bk;
-				json_t *bv;
-				json_object_foreach(batch, bk, bv) {
-					if(slv_roster_excludes(p->excluded, bk))
-						continue;   /* omit an excluded source's dot for this listener */
-					json_object_set(filt, bk, bv);   /* increfs bv */
 				}
 				char *ftext = json_dumps(filt, JSON_COMPACT);
 				if(ftext != NULL) {
@@ -2669,6 +2723,8 @@ static void *janus_slvoice_sender(void *data) {
 			}
 			if(full_text != NULL)
 				free(full_text);
+			if(dark != NULL)
+				json_decref(dark);
 			json_decref(batch);
 			janus_mutex_unlock(&room->mutex);
 		}

@@ -188,6 +188,8 @@ class TestPeer(ConnectorPeer):
         self.room = room
         self.display = display
         self.crashed = False
+        #: SC-87: every {p, v} this peer received for each source display, in arrival order.
+        self.dots: dict[str, list] = {}
         self._join_result: asyncio.Future = asyncio.get_running_loop().create_future()
         self._task: asyncio.Task | None = None
 
@@ -197,6 +199,19 @@ class TestPeer(ConnectorPeer):
 
     def local_track(self):
         return ToneTrack()
+
+    def _on_sldata(self, message) -> None:
+        super()._on_sldata(message)
+        try:
+            obj = json.loads(message)
+        except Exception:
+            return
+        if not isinstance(obj, dict):
+            return
+        # A power batch is {"<display>": {"p": <int>, "v": <bool>}}; presence is {"<display>": {"j": ...}}.
+        for display, entry in obj.items():
+            if isinstance(entry, dict) and isinstance(entry.get("p"), int) and not isinstance(entry.get("p"), bool):
+                self.dots.setdefault(display, []).append((entry["p"], entry.get("v") is True))
 
     def on_plugin_event(self, data: dict) -> None:
         if self._join_result.done():

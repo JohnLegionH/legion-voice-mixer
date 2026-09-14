@@ -348,6 +348,78 @@ static void test_spatial_default(void) {
 	CHECK(!janus_slvoice_spatial_from_cfg("false") && !janus_slvoice_spatial_from_cfg("No"), "static room false/no: flat");
 }
 
+static json_int_t dot_p(json_t *batch, const char *key) {
+	json_t *e = json_object_get(batch, key);
+	return e != NULL ? json_integer_value(json_object_get(e, "p")) : -1;
+}
+
+static gboolean dot_v(json_t *batch, const char *key) {
+	json_t *e = json_object_get(batch, key);
+	return e != NULL && json_is_true(json_object_get(e, "v"));
+}
+
+/* SC-87: each listener's dot batch matches what it hears; culled and muted are checked separately. */
+static void test_dot_batch_filter(void) {
+	janus_slvoice_room *room = add_room_ex(1201, FALSE, TRUE);
+	janus_slvoice_room_stop(room);   /* freeze tick_seq: this test sets it */
+	janus_slvoice_session *l = make_session();
+	janus_slvoice_session *far = make_session();
+	far->display = g_strdup("src-culled");
+	json_t *dark = json_pack("{sisb}", "p", 0, "v", 0);
+	json_t *batch = json_pack("{s{sisb}s{sisb}s{sisb}s{sisb}s{sisb}}",
+		"src-heard", "p", 40, "v", 1, "src-modmuted", "p", 40, "v", 1, "src-muted", "p", 40, "v", 1,
+		"src-culled", "p", 40, "v", 1, "src-excluded", "p", 40, "v", 1);
+
+	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark) == NULL,
+		"dots: nothing excluded, muted or culled, so the listener gets the shared batch");
+
+	/* Moderation mute on its own. */
+	g_hash_table_add(l->mod_muted, g_strdup("src-modmuted"));
+	json_t *f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	CHECK(f != NULL && dot_p(f, "src-modmuted") == 0 && !dot_v(f, "src-modmuted"),
+		"dots: a moderation-muted source reports no power to that listener");
+	CHECK(f != NULL && dot_p(f, "src-heard") == 40 && dot_v(f, "src-heard") && dot_p(f, "src-culled") == 40,
+		"dots: the other sources are unchanged beside a moderation mute");
+	CHECK(dot_p(batch, "src-modmuted") == 40 && dot_v(batch, "src-modmuted"), "dots: the shared batch is not modified");
+	json_decref(f);
+	g_hash_table_remove_all(l->mod_muted);
+
+	/* Distance cull on its own: the tick at seq 7 culls the far source for l. */
+	l->snap_valid = TRUE;
+	far->snap_valid = TRUE;
+	l->snap_lh = (slv_quat){ 0.0, 0.0, 0.0, 1.0 };
+	far->snap_sp = (slv_vec3){ slv_spatial.cutoff_dist + 100.0, 0.0, 0.0 };
+	room->tick_seq = 7;
+	float gl = 0.0f, gr = 0.0f;
+	CHECK(janus_slvoice_spatial_pair_locked(room, l, far, far->display, 1.0f, &gl, &gr), "dots: the far source is culled at tick 7");
+	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	CHECK(f != NULL && dot_p(f, "src-culled") == 0 && !dot_v(f, "src-culled"),
+		"dots: a source distance-culled for that listener reports no power to it");
+	CHECK(f != NULL && dot_p(f, "src-heard") == 40 && dot_p(f, "src-modmuted") == 40,
+		"dots: the other sources are unchanged beside a cull");
+	json_decref(f);
+	room->tick_seq = 8;
+	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark) == NULL,
+		"dots: a cull latch the last tick did not re-evaluate does not darken the dot");
+
+	/* A personal mute darkens; an exclusion still omits. */
+	g_strlcpy(l->peer_ctl[0].uuid, "src-muted", SLV_UUID_LEN);
+	l->peer_ctl[0].muted = TRUE;
+	l->n_peer_ctl = 1;
+	g_hash_table_add(l->excluded, g_strdup("src-excluded"));
+	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	CHECK(f != NULL && dot_p(f, "src-muted") == 0 && !dot_v(f, "src-muted"),
+		"dots: a source the listener muted reports no power to it");
+	CHECK(f != NULL && json_object_get(f, "src-excluded") == NULL && dot_p(f, "src-heard") == 40,
+		"dots: an excluded source is omitted and a heard source is unchanged");
+	json_decref(f);
+
+	json_decref(batch);
+	json_decref(dark);
+	free_session(l);
+	free_session(far);
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -358,6 +430,7 @@ int main(void) {
 	test_hangup_leaves_room();
 	test_spatial_pair();
 	test_spatial_default();
+	test_dot_batch_filter();
 
 	/* O-67: the shared global teardown (destroy() and a failed init) with no worker threads
 	 * started and rooms still live (1002 permanent, 1006 empty) leaves nothing behind. */

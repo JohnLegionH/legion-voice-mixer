@@ -1,4 +1,4 @@
-"""The churn scenarios S1-S8 and S10 -- the mixer's robustness contract (README.md in this directory).
+"""The churn scenarios S1-S8, S10 and S11 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down
 in a finally block. Every expectation is a poll of the oracle (Admin API handle_info, or the
@@ -266,6 +266,39 @@ async def s10_no_media_reap(ctx: Ctx) -> None:
                                  "a fresh join by G's display is admitted and gets media (one row)")
 
 
+async def s11_muted_source_dot_dark(ctx: Ctx) -> None:
+    """SC-87: a source moderation-muted for one listener lights no dot for that listener, while an
+    unmuted listener in the same room still sees it lit."""
+    r = ctx.new_room()
+    da, db, dc = new_display(), new_display(), new_display()
+    a = await ctx.join("A", r, da)   # the listener the source is muted for
+    b = await ctx.join("B", r, db)   # the talking source
+    c = await ctx.join("C", r, dc)   # a listener it is not muted for
+    await ctx.ready(a, b, c)
+
+    async def lit(peer):
+        return [e for e in peer.dots.get(db, []) if e[0] > 0]
+    await until(lambda: lit(a), lambda xs: len(xs) > 0, "B's tone lights A's dot before the mute")
+
+    resender = BatchResender(ctx.admin, r, {da: [db]})
+    ctx.background.append(resender)
+    resender.start()
+    await ctx.until_info(a, lambda i: i.get("mod_muted_entries") == 1, "A mod_muted_entries 1 from the mute batch")
+
+    # Judge only batches that arrive after the mute has landed.
+    a.dots[db] = []
+    c.dots[db] = []
+
+    async def fresh(peer):
+        return list(peer.dots.get(db, []))
+    after_a = await until(lambda: fresh(a), lambda xs: len(xs) >= 10, "A receives 10 batches after the mute")
+    after_c = await until(lambda: fresh(c), lambda xs: len(xs) >= 10, "C receives 10 batches after the mute")
+    if any(p > 0 or v for p, v in after_a):
+        raise Fail("A's dot for the moderation-muted B stays dark (p=0, v=false) in every batch", after_a)
+    if not any(p > 0 for p, _ in after_c):
+        raise Fail("C, for whom B is not muted, still sees B's dot lit", after_c)
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -276,4 +309,5 @@ SCENARIOS = [
     Scenario("S7", "geometry persistence", "O-64", s7_geometry_persistence),
     Scenario("S8", "hangup then rejoin with the same display", "O-56, O-13", s8_hangup_rejoin_same_display),
     Scenario("S10", "join whose PeerConnection never comes up is reaped", "O-75", s10_no_media_reap),
+    Scenario("S11", "a moderation-muted source lights no dot for that listener", "SC-87", s11_muted_source_dot_dark),
 ]
