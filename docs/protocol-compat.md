@@ -1,6 +1,6 @@
 # Protocol compatibility constraint (audiobridge superset)
 
-**Status:** ACTIVE (still in force at 1.0.0). **Planned expiry:** after the
+**Status:** ACTIVE (still in force at 1.1.0). **Planned expiry:** after the
 flat-mix parity milestone (see below).
 
 ## The constraint
@@ -36,7 +36,7 @@ construct:
 Session-level ICE `trickle` is core Janus (not a plugin request) and is
 unaffected by this constraint.
 
-> **Reconciled (Phase 1; still true at 1.0.0).** The plugin implements exactly these shapes and the
+> **Reconciled (Phase 1; still true at 1.1.0).** The plugin implements exactly these shapes and the
 > audiobridge **response** envelopes (top-level `audiobridge` key, `error_code`
 > matching audiobridge's numeric codes — incl. `create` on an existing room
 > returning **486**, which `JanusAudioBridge.CreateRoom` treats as success,

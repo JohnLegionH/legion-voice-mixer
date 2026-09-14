@@ -182,14 +182,14 @@ its knobs have no "before".
 | `JS_WS_ENABLED` | `true` | WebSockets transport loaded and published | `b96e7b3` (default `false`; restored to `true` by hotfix 6m-1) |
 | `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
 | `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
-| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | the O-75 commit (`fix(mixer): O-75 reap participants with no media 30s after join; harness S10`) |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` are test
 seams for `tests/entrypoint_test.sh`, not operator knobs.
 
 ## Behaviour changes on upgrade
 
-- **O-75 commit (`fix(mixer): O-75 reap participants with no media 30s after join; harness S10`)**
+- **`3618e9a` (O-75), released in 1.1.0**
   - **A participant whose PeerConnection never comes up is reaped** `JS_JOIN_MEDIA_TIMEOUT_S`
     (default 30 s) after joining, logging `[slvoice] <display> reaped from room <id>: no media <n>s
     after join`. Before, it held its roster row and mix slot, and kept the room from its grace destroy,

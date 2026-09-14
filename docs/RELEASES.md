@@ -15,27 +15,27 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
-## Mixer O-75 — 2026-09-14 (join-media reap)
+## Mixer 1.1.0 — 2026-09-14
 
-Commit `fix(mixer): O-75 reap participants with no media 30s after join; harness S10`. Deployed
-2026-09-14 07:39 CDT (image `0a3624b9`; full local harness S1–S8 and S10 passed against it). The
-plugin still reports version `1.0.0`.
+Plugin version `1.1.0` (`JANUS_SLVOICE_VERSION` 110). O-items: **O-75** (join-without-media reap).
+- Code: `3618e9a` (`fix(mixer): O-75 reap participants with no media 30s after join; harness S10`).
+- Release commit: `release(mixer): 1.1.0 — O-75 join-without-media reap` (version bump and these
+  notes only).
 
-O-items: **O-75** (a participant whose PeerConnection never comes up no longer holds a room slot
-indefinitely). New integration scenario **S10**; CI sets `JS_JOIN_MEDIA_TIMEOUT_S` and runs S10.
+The O-75 code was first deployed at 07:39 CDT still reporting `1.0.0`; 1.1.0 is the same code under
+its own version.
 
 ### Behaviour changes on upgrade
-- **New knob `JS_JOIN_MEDIA_TIMEOUT_S`, default 30, and its default changes behaviour.** A participant
-  whose PeerConnection is not up 30 s after its join is removed from the room exactly as a hangup
-  removes it (leave notice, roster row and mix slot freed, room-scoped state reset, the room's grace
-  clock started if it was the last member). The mixer logs `[slvoice] <display> reaped from room <id>:
-  no media <n>s after join`. Before, such a participant stayed until its Janus session ended, which
-  the sim's long-poll could keep alive indefinitely (seen twice on 2026-09-13, ledger O-74/O-75).
-  - This deliberately departs from the compatibility rule's "default reproduces the previous release":
-    the old behaviour is the defect being fixed.
-  - `JS_JOIN_MEDIA_TIMEOUT_S=0` restores it.
-  - Participants that had media and lost it are not affected; that is the O-56 hangup path.
-- The entrypoint's effective-value line and start line now also print `join_media_timeout_s`.
+- **A participant that joins a room and never establishes media is now removed** after
+  `JS_JOIN_MEDIA_TIMEOUT_S` seconds (default 30), exactly as a hangup removes it, logging
+  `[slvoice] <display> reaped from room <id>: no media <n>s after join`. Previously such a participant
+  persisted for the life of its Janus session, holding a roster row and a mix slot and keeping the room
+  from its grace destroy.
+  - This default deliberately changes behaviour: the old behaviour is the defect being fixed.
+    `JS_JOIN_MEDIA_TIMEOUT_S=0` restores it.
+  - A participant that had media and lost it is not affected (the O-56 hangup path).
+- **`JS_JOIN_MEDIA_TIMEOUT_S` is a new knob** (default 30, `0` disables). The entrypoint exports it
+  and prints its effective value at start.
 
 ### One-time migrations
 - None.

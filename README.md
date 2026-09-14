@@ -5,7 +5,7 @@ voice mixer for OpenSimulator grids**, speaking the **Second Life WebRTC voice
 protocol**. It is the server-side counterpart to the OpenSim `os-webrtc-janus`
 addon and a drop-in alternative to the stock `janus.plugin.audiobridge`.
 
-> **Status: 1.0.0, in production on Legion Grid.** Each viewer holds one
+> **Status: 1.1.0, in production on Legion Grid.** Each viewer holds one
 > PeerConnection (Opus + the SLData **DataChannel**) per region room.
 > - **Mixing:** every room runs a 20 ms tick that builds a **per-listener
 >   N-minus-one stereo mix**.

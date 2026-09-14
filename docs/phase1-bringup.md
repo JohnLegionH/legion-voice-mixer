@@ -1,7 +1,7 @@
 # Phase 1 bring-up runbook — hold the session, then echo
 
 > **Historical runbook, still useful for diagnosis.** It was written for the
-> Phase 1–2 bring-up. The shipped plugin (1.0.0) also spatialises the mix, applies
+> Phase 1–2 bring-up. The shipped plugin (1.1.0) also spatialises the mix, applies
 > the sim's visibility/moderation batches and destroys empty rooms; see
 > `README.md` and `docs/RELEASES.md`. CHECK 1–3 below remain the quickest way to
 > isolate a single viewer's session, echo and two-party mix problems.
