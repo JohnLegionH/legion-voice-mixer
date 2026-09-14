@@ -1,7 +1,26 @@
 # Spatial WebRTC Voice Service — Feature Specification
 
-**Status:** Draft for review
-**Scope:** A server-side WebRTC voice service (mixer plugin + region/grid integration) implementing the published Second Life WebRTC voice protocol, for OpenSimulator-derived grids. Designed to run unchanged from a single-region standalone to a large multi-mixer grid.
+**Status:** Draft for review; amended 2026-09-14 (see the status block below)
+**Scope:** A server-side WebRTC voice service (mixer plugin + region/grid integration) implementing the published Second Life WebRTC voice protocol, for OpenSimulator-derived grids. Designed to run unchanged from a single-region standalone to a large multi-mixer grid. *[The large multi-mixer end is DESCOPED 2026-09-14: the scale tier is not needed for the target deployment.]*
+
+> **Status, 2026-09-14.** This spec is amended to match the service as built.
+> - Text marked **DESCOPED 2026-09-14** was deliberately not built. It is kept for the record, not
+>   deleted.
+> - Descoped items are decisions, not defects.
+>
+> What the service does today:
+> - **Spatial mix:** each listener gets its own stereo mix. Sources are distance-culled, attenuated by
+>   distance falloff, and placed with a constant-power pan from viewer geometry, with a server-side
+>   camera leash. There is no HRTF.
+> - **Permissions enforced in the mix:** the simulator computes per-listener exclusions (bans, SeeAVs
+>   hiding) and moderation mutes and pushes them to the mixer. The mixer applies them to each
+>   listener's audio, participant list and voice dots.
+> - **Avatar-to-avatar calls:** two-party calls in non-spatial rooms on the same mixer.
+> - **Connectors:** WebRTC recorder and injector peers that join under a simulator-registered NPC
+>   identity. Recording needs an explicit operator opt-in.
+> - **Moderation:** per-parcel moderation mute and mute-everyone, enforced by the mixer.
+>
+> The row-by-row state of every claim below is in `Docs/voice/spec-coverage-20260914.md`.
 
 ---
 
@@ -103,20 +122,21 @@ The most common quality complaint in the record **[REC]** is "muddy / talking th
 - Talker ingest ≥ 32 kbps Opus; listener mix 64–96 kbps stereo Opus, 20 ms frames.
 - DTX/VAD-gated decode: silent talkers cost nothing before the RTP layer. A 100–200 ms release hold prevents word-onset chopping from DTX hangover.
 - **Encode-skip:** listeners whose entire audible set is silent receive DTX and cost near-zero encode. Encode cost therefore scales with *audible* listeners, not connected listeners — the single largest scaling lever in the design.
-- **Degradation ladder** under CPU pressure, in order: frame size up (20→30 ms) → distance tiers widened → far-field talkers shed from mixes → admission refusal (last resort). Per-region tick isolation so one saturated region cannot starve its neighbors.
+- **Degradation ladder** under CPU pressure, in order: frame size up (20→30 ms) → distance tiers widened → far-field talkers shed from mixes → admission refusal (last resort). *[DESCOPED 2026-09-14: DSP deferred by decision.]*
+- Per-region tick isolation so one saturated region cannot starve its neighbors.
 
 ---
 
 ## 6. Tier 3 — Spatial engine
 
-Design conclusions from earlier analysis **[ENG]**: no global spatial index (shared pre-mix structures don't amortize when every listener is a separate viewpoint with per-listener exceptions); culling and per-listener rendering with load-adaptive aggregation instead.
+Design conclusions from earlier analysis **[ENG]**: no global spatial index (shared pre-mix structures don't amortize when every listener is a separate viewpoint with per-listener exceptions); culling and per-listener rendering with load-adaptive aggregation instead. *[Load-adaptive aggregation DESCOPED 2026-09-14: DSP deferred by decision. Culling and per-listener rendering are built.]*
 
 - Cull first: distance, VAD, inbound level. Typical active-talker counts after culling are single digits even in busy regions.
-- **Direct per-source HRTF below a talker-count threshold.** Azimuth binning engages only above it (binning only pays when talkers exceed bin count), with crossfades over several 10 ms frames at bin crossings, pre-staged from position derivatives. At low occupancy — where most regions live — the binning path and its artifacts simply don't run.
-- **Distance tiers:** full HRTF with ITD near; amplitude panning + lowpass mid; single mono ambience sum far. Perceptually honest (nobody localizes a voice at 40 m) and cheap at every occupancy level.
-- Dirty-flagged coefficient recompute: stationary listener + stable talker set skips HRIR selection/interpolation setup per frame.
+- **Direct per-source HRTF below a talker-count threshold.** Azimuth binning engages only above it (binning only pays when talkers exceed bin count), with crossfades over several 10 ms frames at bin crossings, pre-staged from position derivatives. At low occupancy — where most regions live — the binning path and its artifacts simply don't run. *[DESCOPED 2026-09-14: DSP deferred by decision. The mixer renders distance falloff and constant-power pan, with no HRTF, binning or crossfades.]*
+- **Distance tiers:** full HRTF with ITD near; amplitude panning + lowpass mid; single mono ambience sum far. Perceptually honest (nobody localizes a voice at 40 m) and cheap at every occupancy level. *[DESCOPED 2026-09-14: DSP deferred by decision.]*
+- Dirty-flagged coefficient recompute: stationary listener + stable talker set skips HRIR selection/interpolation setup per frame. *[DESCOPED 2026-09-14: DSP deferred by decision.]*
 - Listener orientation honored from the SLData `lh` quaternion — head-tracked spatialization is where this exceeds Vivox rather than merely replacing it.
-- Per-(listener, source) crossfade state kept in flat preallocated arrays sized at session setup; no per-transition allocation.
+- Per-(listener, source) crossfade state kept in flat preallocated arrays sized at session setup; no per-transition allocation. *[DESCOPED 2026-09-14: DSP deferred by decision.]*
 
 ---
 
@@ -131,6 +151,8 @@ Restores the Vivox-era "hear from camera" behavior whose loss is an explicit com
 
 ### 7.2 Performer mode **[REC]**
 
+**[DESCOPED 2026-09-14: feature not built.]** The client-signalled NS/AGC part was already blocked by the stock-viewer constraint.
+
 Per-avatar, estate-grantable flag: high-bitrate stereo ingest; client signaled to disable NS/AGC for that stream; exempt from far-tier degradation. Serves live music, which WebRTC's default processing chain audibly damages — a documented pain point that motivated SL's own user-controllable noise-reduction setting.
 
 ### 7.3 Parcel and estate voice zones **[OPS]**
@@ -138,6 +160,8 @@ Per-avatar, estate-grantable flag: high-bitrate stereo ingest; client signaled t
 Per-listener visibility matrix over a shared estate/region mix: avatars can be hidden from each other based on parcel access, enforced in the mix (§3.4). Because participant lists, voice dots, and power levels are driven by the same SLData visibility set, a hidden avatar is absent from both audio and UI consistently — computed from one source of truth so a dot never lights with no audio behind it. Note this is deliberately *stronger* than the SL model, which implements parcel privacy as connection topology; enforcing it in the mix removes SL's parcel-boundary reconnection stutter **[REC]** as a side effect.
 
 ### 7.4 Voice morphing
+
+**[DESCOPED 2026-09-14: feature not built.]**
 
 Per-talker pitch/formant shifting applied at decode, before spatial encode — so cost scales with morphed active talkers (typically 0–3), not listeners.
 
@@ -151,13 +175,13 @@ Per-talker pitch/formant shifting applied at decode, before spatial encode — s
 
 A tap-and-inject API on the mixer (plain RTP or WebSocket), generalizing the requested post-processing hooks:
 
-- **Taps:** recording (consent-gated per §3.5), transcription, future translation.
+- **Taps:** recording (consent-gated per §3.5), transcription, future translation. *[Transcription DESCOPED 2026-09-14: feature not built.]*
 - **Injectors:** NPC/bot TTS voices as first-class positioned sources; external DJ/stream sources entering spatial voice as positioned audio rather than parcel media URLs.
-- **Effects sends:** parcel-property environmental processing (reverb, echo zones) — post-processing as *content*, configurable by land settings.
+- **Effects sends:** parcel-property environmental processing (reverb, echo zones) — post-processing as *content*, configurable by land settings. *[DESCOPED 2026-09-14: feature not built.]*
 
 ### 7.6 Moderation surface **[OPS]**
 
-Estate-level mute/gain enforced in the mix; "podium" mode granting designated speakers gain priority; per-parcel voice zones (§7.3). All mixer-enforced and therefore not bypassable by modified viewers — a property the previous voice provider never had.
+Estate-level mute/gain enforced in the mix; "podium" mode granting designated speakers gain priority *[podium mode DESCOPED 2026-09-14: feature not built]*; per-parcel voice zones (§7.3). All mixer-enforced and therefore not bypassable by modified viewers — a property the previous voice provider never had.
 
 ---
 
@@ -171,15 +195,17 @@ One mixer process serves spatial + group + P2P. Diagnostics are the console comm
 
 ### 8.2 Medium (grid, tens–hundreds of regions)
 
-Spatial mixers scale horizontally by region — spatial voice is embarrassingly parallel by region, which is the design's structural mercy. The group/adhoc pool scales independently (different load profile). A simple placement map (region → mixer) replaces the single process; adjacent regions preferentially co-located on one mixer so border-dwellers and cross-region listening (multiple neighbor sessions summed client-side per the protocol) stay cheap.
+Spatial mixers scale horizontally by region — spatial voice is embarrassingly parallel by region, which is the design's structural mercy. The group/adhoc pool scales independently (different load profile). A simple placement map (region → mixer) replaces the single process; adjacent regions preferentially co-located on one mixer so border-dwellers and cross-region listening (multiple neighbor sessions summed client-side per the protocol) stay cheap. *[The placement map and co-location are DESCOPED 2026-09-14: the scale tier is not needed for the target deployment. Cross-region listening through neighbour sessions is built.]*
 
 ### 8.3 Large (InWorldz/SL scale)
 
-- **Placement service:** bin-packing regions onto mixers by predicted load; sessions carry enough state to migrate.
+**[DESCOPED 2026-09-14: the scale tier is not needed for the target deployment.]** The exceptions are admission control, rate-limited provisioning and RTP source validation, which stay in scope. The individual markers below say which is which.
+
+- **Placement service:** bin-packing regions onto mixers by predicted load; sessions carry enough state to migrate. *[DESCOPED 2026-09-14.]*
 - **Admission control with backpressure:** saturated mixers shed *new* sessions to other capacity; established sessions are protected. (The load-cascade outage in the record **[REC]** is the failure mode this prevents.)
-- **TURN fleet:** at consumer scale a meaningful fraction of users ride TURN relays; this is real bandwidth and its own capacity plan. The diag vector (§4.1) distinguishes relay-path from direct-path sessions because a chunk of "connected but silent" lives there.
-- **Encode economics:** encode CPU is the dominant cost line at scale. The mitigation to wire in early (brutal to retrofit): optional **first-order ambisonic delivery** — orientation-independent B-format mixes, rotated and binauralized viewer-side, SDP-negotiated with fallback to server-side binaural stereo for stock viewers. B-format mixes dedupe across co-located listeners, collapsing encode counts precisely in the crowded venues that cost the most.
-- **Abuse controls:** rate-limited provisioning, per-account session caps, RTP source validation.
+- **TURN fleet:** at consumer scale a meaningful fraction of users ride TURN relays; this is real bandwidth and its own capacity plan. The diag vector (§4.1) distinguishes relay-path from direct-path sessions because a chunk of "connected but silent" lives there. *[DESCOPED 2026-09-14, including the relay-vs-direct diagnostics.]*
+- **Encode economics:** encode CPU is the dominant cost line at scale. The mitigation to wire in early (brutal to retrofit): optional **first-order ambisonic delivery** — orientation-independent B-format mixes, rotated and binauralized viewer-side, SDP-negotiated with fallback to server-side binaural stereo for stock viewers. B-format mixes dedupe across co-located listeners, collapsing encode counts precisely in the crowded venues that cost the most. *[DESCOPED 2026-09-14. The viewer-side decode part stays blocked by the stock-viewer constraint.]*
+- **Abuse controls:** rate-limited provisioning, per-account session caps, RTP source validation. *[Per-account session caps DESCOPED 2026-09-14. Rate-limited provisioning and RTP source validation stay in scope.]*
 
 ---
 
@@ -187,12 +213,12 @@ Spatial mixers scale horizontally by region — spatial voice is embarrassingly 
 
 - Caps: `ProvisionVoiceAccountRequest` (JSEP offer/answer, `channel_type` local/multiagent, `parcel_local_id`, logout), `VoiceSignalingRequest` (trickled ICE, completion marker).
 - SDP: fmtp mangle honored (`minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxplaybackrate=48000`).
-- SLData channel: client→mixer `j/l/sp/sh/lp/lh/m/ug` per the published format; mixer→client per-peer `p/V/j/l` batched ~100 ms. **Extensions (all optional, ignored by stock viewers):** `diag` (§4.1), echo-test control (§4.2), morph state (§7.4), trust-domain disclosure (§3.2).
+- SLData channel: client→mixer `j/l/sp/sh/lp/lh/m/ug` per the published format; mixer→client per-peer `p/V/j/l` batched ~100 ms. **Extensions (all optional, ignored by stock viewers):** `diag` (§4.1), echo-test control (§4.2), morph state (§7.4) *[DESCOPED 2026-09-14 with §7.4]*, trust-domain disclosure (§3.2).
 - Cross-region: neighbor connections with primary flag, client-side summing, per the published model. Parcel changes within a region do **not** trigger connection changes (§7.3).
 
 ## 10. Open questions
 
 1. Hypergrid group/P2P policy: which grid's pool hosts a call between users of two federated grids, and what does each party's client disclose?
-2. FOA viewer-side decode: target viewer(s) and negotiation details; who carries the viewer patch.
+2. FOA viewer-side decode: target viewer(s) and negotiation details; who carries the viewer patch. *[Moot while ambisonic delivery is DESCOPED, 2026-09-14.]*
 3. Recording/consent defaults per jurisdiction for the connector layer.
-4. Session migration mechanics for live mixer drain at scale (needed for §8.3; over-engineering for §8.1 — gate behind the placement service).
+4. Session migration mechanics for live mixer drain at scale (needed for §8.3; over-engineering for §8.1 — gate behind the placement service). *[Moot while §8.3 migration is DESCOPED, 2026-09-14.]*
