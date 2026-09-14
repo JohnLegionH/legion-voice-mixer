@@ -24,10 +24,30 @@ Copy `npc=` into `DISPLAY` and `room=` into `ROOM`. Do **not** invent a DISPLAY:
 the sim's policy record owns the identity; an unregistered UUID records without
 exclusions (and is exactly the O-46 shape the ledger tracks).
 
+## Recording opt-in (SC-96)
+
+The recorder **refuses to start** unless `RECORDING_OPT_IN=yes`. The default is off. Its first log
+line prints the effective value, e.g. `recorder: RECORDING_OPT_IN=<unset> (recording opt-in,
+default off)`, followed by a FATAL line and a non-zero exit when the gate refuses. The injector
+applies the same gate when `RECORD=1`.
+
+Setting `RECORDING_OPT_IN=yes` is the operator's statement that the people in the room have been
+told they are being recorded and have agreed (spec §3.5). The gate does not collect consent
+from each participant; that needs the sim (see the ledger). It only stops an accidental or
+unreviewed start.
+
+A running recorder declares itself at join (`"recorder": true`), and the mixer marks it:
+- an INFO line `[slvoice] RECORDER <display> joined room <id>` (and a matching `left` line);
+- `"recorder": true` on its row in `listparticipants` and in its `handle_info`.
+
+The in-world disclosure that participants see comes from the sim registering the connector NPC
+(the `[CONNECTOR]` record), so still join under the registered `DISPLAY`.
+
 ## Running
 
     cp connectors/recorder/recorder.env.example connectors/recorder/recorder.env
-    # fill in JANUS_API_SECRET (= JS_API_SECRET in the mixer .env), ROOM, DISPLAY
+    # fill in RECORDING_OPT_IN=yes (after telling the room), JANUS_API_SECRET
+    # (= JS_API_SECRET in the mixer .env), ROOM, DISPLAY
     docker compose --profile recorder up -d recorder
 
 The service sits behind `profiles: [recorder]`, so a plain `docker compose up -d`

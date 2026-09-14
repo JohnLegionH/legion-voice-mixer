@@ -408,6 +408,7 @@ typedef struct janus_slvoice_session {
 	guint64 user_id;             /* participant id; 0 until joined */
 	janus_slvoice_room *room;    /* ref held while joined; NULL otherwise (guarded by mutex) */
 	char *display;               /* display name from join = the agent UUID string (§3.2) */
+	gboolean recorder;           /* SC-96: joined with "recorder": true, i.e. a recording tap */
 	int opus_pt;                 /* negotiated Opus payload type; -1 until join */
 	gboolean has_datachannel;    /* offer contained an m=application line */
 	gboolean dc_answered;        /* our answer accepted the m=application line */
@@ -672,6 +673,7 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	room = session->room;
 	uid = session->user_id;
 	who = session->display ? g_strdup(session->display) : NULL;
+	gboolean recorder = session->recorder;
 	session->room = NULL;
 	janus_mutex_unlock(&session->mutex);
 	if(room == NULL) {
@@ -680,6 +682,8 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 	}
 	if(who != NULL)
 		janus_slvoice_push_presence(room, who, FALSE);
+	if(recorder)   /* SC-96 */
+		JANUS_LOG(LOG_INFO, "[slvoice] RECORDER %s left room %"PRIu64"\n", who ? who : "??", room->room_id);
 	g_free(who);
 	g_atomic_int_set(&session->backlog_confirmed, 0);   /* M-A2A-3: next room re-proves */
 	janus_mutex_lock(&room->mutex);
@@ -1396,6 +1400,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "id", json_integer((json_int_t)session->user_id));
 	if(session->display)
 		json_object_set_new(info, "display", json_string(session->display));
+	json_object_set_new(info, "recorder", session->recorder ? json_true() : json_false());   /* SC-96 */
 	json_object_set_new(info, "opus_pt", json_integer(session->opus_pt));
 	/* Inbound / outbound liveness. */
 	json_object_set_new(info, "rtp_in_count", json_integer((json_int_t)session->rtp_in_count));
@@ -2110,6 +2115,8 @@ static json_t *janus_slvoice_participant_summary(janus_slvoice_session *p) {
 	json_object_set_new(pl, "setup", g_atomic_int_get(&p->webrtc_up) ? json_true() : json_false());
 	json_object_set_new(pl, "muted",
 		(p->last_data_fields & SLV_FIELD_M) && p->last_data.m ? json_true() : json_false());
+	if(p->recorder)   /* SC-96: only on a recording tap, so the audiobridge row shape is unchanged */
+		json_object_set_new(pl, "recorder", json_true());
 	return pl;
 }
 
@@ -2298,6 +2305,7 @@ static void *janus_slvoice_handler(void *data) {
 			session->user_id = user_id;
 			g_free(session->display);
 			session->display = display ? g_strdup(display) : NULL;
+			session->recorder = json_is_true(json_object_get(root, "recorder"));
 			session->room = room;
 			/* O-75: start this join's media clock. media_seen follows webrtc_up rather than being cleared, so a
 			 * PeerConnection that is (implausibly) already up at join is never counted as missing. */
@@ -2396,6 +2404,9 @@ static void *janus_slvoice_handler(void *data) {
 			}
 			JANUS_LOG(LOG_INFO, "[%s-%p] Participant %"PRIu64" (%s) joined room %"PRIu64"\n",
 				JANUS_SLVOICE_PACKAGE, msg->handle, user_id, display ? display : "??", room_id);
+			if(session->recorder)   /* SC-96: a recording tap is never silent in the log */
+				JANUS_LOG(LOG_INFO, "[slvoice] RECORDER %s joined room %"PRIu64": this participant writes the room's audio to disk\n",
+					display ? display : "??", room_id);
 			goto respond;
 		} else if(!strcasecmp(request_text, "configure")) {
 			if(msg->jsep != NULL) {

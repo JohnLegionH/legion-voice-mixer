@@ -34,7 +34,7 @@ import time
 import av
 from aiortc.mediastreams import MediaStreamTrack
 
-from common.config import base_env
+from common.config import base_env, require_recording_opt_in
 from common.peer import ConnectorPeer
 from common.receive import consume_audio
 from common.segments import WavSegmentWriter
@@ -53,6 +53,8 @@ def env_config() -> dict:
         "out_dir": os.environ.get("OUT_DIR", "/recordings"),
         "segment_seconds": int(os.environ.get("SEGMENT_SECONDS", "600")),
     })
+    if cfg["record"]:
+        require_recording_opt_in("injector")   # SC-96: RECORD=1 is a recording tap too
     return cfg
 
 
@@ -204,6 +206,10 @@ class Injector(ConnectorPeer):
                         if cfg["record"] else None)
         self._rx_task: asyncio.Task | None = None
         self.shutdown_note = ", close wav" if cfg["record"] else ""
+
+    def join_extra(self) -> dict:
+        # SC-96: with RECORD=1 this peer is a recording tap; the mixer marks and logs it.
+        return {"recorder": True} if self._cfg["record"] else {}
 
     def local_track(self):
         self._reader.start()

@@ -420,6 +420,20 @@ static void test_dot_batch_filter(void) {
 	free_session(far);
 }
 
+/* SC-96: a recording tap is marked on its participant row; any other row keeps the audiobridge shape. */
+static void test_recorder_row(void) {
+	janus_slvoice_session *s = make_session();
+	s->display = g_strdup("rec-display");
+	json_t *row = janus_slvoice_participant_summary(s);
+	CHECK(json_object_get(row, "recorder") == NULL, "recorder: an ordinary participant row has no recorder key");
+	json_decref(row);
+	s->recorder = TRUE;
+	row = janus_slvoice_participant_summary(s);
+	CHECK(json_is_true(json_object_get(row, "recorder")), "recorder: a recording tap's row carries recorder true");
+	json_decref(row);
+	free_session(s);
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -431,6 +445,7 @@ int main(void) {
 	test_spatial_pair();
 	test_spatial_default();
 	test_dot_batch_filter();
+	test_recorder_row();
 
 	/* O-67: the shared global teardown (destroy() and a failed init) with no worker threads
 	 * started and rooms still live (1002 permanent, 1006 empty) leaves nothing behind. */

@@ -20,7 +20,7 @@ import logging
 import os
 import signal
 
-from common.config import base_env
+from common.config import base_env, require_recording_opt_in
 from common.peer import ConnectorPeer
 from common.receive import consume_audio
 from common.segments import WavSegmentWriter
@@ -29,6 +29,7 @@ log = logging.getLogger("recorder")
 
 
 def env_config() -> dict:
+    require_recording_opt_in("recorder")   # SC-96: before anything else, so no config can bypass it
     cfg = base_env("recorder")
     cfg["out_dir"] = os.environ.get("OUT_DIR", "/recordings")
     cfg["segment_seconds"] = int(os.environ.get("SEGMENT_SECONDS", "600"))
@@ -45,6 +46,10 @@ class Recorder(ConnectorPeer):
 
     # local_track() stays None: the base peer negotiates the sendrecv m-line
     # with no track — the silent-participant shape (never active, audible=0).
+
+    def join_extra(self) -> dict:
+        # SC-96: declare the tap at join so the mixer marks and logs it as a recorder.
+        return {"recorder": True}
 
     def on_audio_track(self, track) -> None:
         log.info("audio track received; writing segments to %s", self._cfg["out_dir"])

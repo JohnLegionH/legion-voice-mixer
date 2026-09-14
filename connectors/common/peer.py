@@ -57,6 +57,10 @@ class ConnectorPeer:
     def local_track(self):
         return None
 
+    def join_extra(self) -> dict:
+        """Extra members merged into the join request (SC-96: a recording peer adds "recorder": true)."""
+        return {}
+
     def on_audio_track(self, track) -> None:
         pass
 
@@ -97,7 +101,7 @@ class ConnectorPeer:
             await self._pc.setLocalDescription(offer)
 
             await janus.message(
-                {"request": "join", "room": cfg["room"], "display": cfg["display"]},
+                {"request": "join", "room": cfg["room"], "display": cfg["display"], **self.join_extra()},
                 jsep={"type": self._pc.localDescription.type,
                       "sdp": self._pc.localDescription.sdp})
             await janus.trickle_completed()
