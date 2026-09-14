@@ -48,7 +48,8 @@ ERR_ROOM_EXISTS = 486
 #: the handle_info plugin_specific keys a FAIL line prints (the rest is noise)
 ORACLE_KEYS = ("room", "display", "id", "ice_state", "webrtc_up", "datachannel_open", "rtp_in_count",
                "last_rms", "peer_ctl_entries", "peer_ctl_full_drops", "mod_muted_entries",
-               "excluded_entries", "last_data_fields_seen", "last_msg_fields_seen", "room_participants")
+               "excluded_entries", "last_data_fields_seen", "last_msg_fields_seen", "room_participants",
+               "last_mix_rms", "last_mix_rms_l", "last_mix_rms_r")
 
 log = logging.getLogger("integration")
 

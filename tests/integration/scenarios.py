@@ -1,4 +1,4 @@
-"""The churn scenarios S1-S8, S10 and S11 -- the mixer's robustness contract (README.md in this directory).
+"""The churn scenarios S1-S8 and S10-S12 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down
 in a finally block. Every expectation is a poll of the oracle (Admin API handle_info, or the
@@ -299,6 +299,38 @@ async def s11_muted_source_dot_dark(ctx: Ctx) -> None:
         raise Fail("C, for whom B is not muted, still sees B's dot lit", after_c)
 
 
+async def s12_spatial_cull_and_pan(ctx: Ctx) -> None:
+    """The spatial path runs: in a room created WITHOUT spatial_audio (spatial by default, O-83), a
+    source inside the cull distance is audible to the listener and panned, the same source beyond
+    the cutoff is culled, and moving back inside the re-add distance makes it audible again. Observed
+    through the listener's handle_info mix levels, not by ear."""
+    r = ctx.new_room()
+    a = await ctx.join("A", r)   # the listener
+    b = await ctx.join("B", r)   # the talking source
+    await ctx.ready(a, b)
+
+    def geometry_seen(i):
+        return {"sp", "lp"} <= fields(i.get("last_data_fields_seen"))
+
+    a.send_geometry(128.0, 128.0, 25.0)
+    b.send_geometry(128.0, 138.0, 25.0)   # 10 m to A's side: full volume, hard-panned
+    await ctx.until_info(a, geometry_seen, "A's geometry reached the mixer")
+    await ctx.until_info(b, geometry_seen, "B's geometry reached the mixer")
+
+    def panned(i):
+        lvl, l, rr = i.get("last_mix_rms") or 0.0, i.get("last_mix_rms_l") or 0.0, i.get("last_mix_rms_r") or 0.0
+        return lvl > 0.01 and max(l, rr) > 0.05 and min(l, rr) < 0.1 * max(l, rr)
+    await ctx.until_info(a, panned, "B 10 m to the side is audible in A's mix and hard-panned (one channel near 0)")
+
+    b.send_geometry(128.0, 238.0, 25.0)   # 110 m: beyond the 60 m cutoff
+    await ctx.until_info(a, lambda i: i.get("last_mix_rms") == 0.0,
+                         "B at 110 m is culled: A's mix level is exactly 0")
+
+    b.send_geometry(128.0, 148.0, 25.0)   # 20 m: inside the 58 m re-add distance
+    await ctx.until_info(a, lambda i: (i.get("last_mix_rms") or 0.0) > 0.01,
+                         "B back at 20 m is re-added: A's mix is audible again")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -310,4 +342,6 @@ SCENARIOS = [
     Scenario("S8", "hangup then rejoin with the same display", "O-56, O-13", s8_hangup_rejoin_same_display),
     Scenario("S10", "join whose PeerConnection never comes up is reaped", "O-75", s10_no_media_reap),
     Scenario("S11", "a moderation-muted source lights no dot for that listener", "SC-87", s11_muted_source_dot_dark),
+    Scenario("S12", "spatial path: in-range source audible and panned, beyond the cutoff culled",
+             "O-80, O-83, spatial coverage", s12_spatial_cull_and_pan),
 ]
