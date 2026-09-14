@@ -142,6 +142,9 @@
 #define SLV_JB_LAG          3       /* play SLV_JB_LAG packets behind the newest (~60ms) */
 #define SLV_JB_MAX_LEAD     16      /* resync if the playout cursor falls this far behind (DTX resume) */
 #define SLV_JB_PAYLOAD_MAX  1500    /* max Opus payload bytes per slot */
+/* O-81: packets decoded per tick at most, so a viewer's 10 ms packets fill a 20 ms frame.
+ * 8 = 20 ms / 2.5 ms, the shortest Opus frame. */
+#define SLV_FILL_MAX_CHUNKS 8
 /* Energy threshold for the simple VAD (RMS of decoded float, 0..1). Also the
  * encode-skip silence floor for a listener's mix. */
 #define SLV_VAD_RMS         0.02f
@@ -2832,6 +2835,25 @@ static int janus_slvoice_jb_pull(janus_slvoice_session *s, const unsigned char *
 	return status;
 }
 
+/* O-81: slv_mix_fill_frame's source. Decode the next jitter-buffer packet into out (cap
+ * samples/ch); a missing packet is concealed for the last packet's duration, at most want
+ * samples. Returns 0 when the buffer has nothing this tick. session->mutex held. */
+static int janus_slvoice_decode_chunk_locked(void *ctx, float *out, int cap, int want) {
+	janus_slvoice_session *s = (janus_slvoice_session *)ctx;
+	const unsigned char *pl = NULL;
+	int pn = 0;
+	int st = janus_slvoice_jb_pull(s, &pl, &pn);
+	if(st == SLV_JB_SILENCE)
+		return 0;
+	if(st == SLV_JB_FRAME)
+		return opus_decode_float(s->dec, pl, pn, out, cap, 0);
+	opus_int32 last = 0;
+	if(opus_decoder_ctl(s->dec, OPUS_GET_LAST_PACKET_DURATION(&last)) != OPUS_OK || last <= 0)
+		last = SLV_FRAME_SAMPLES;
+	int plc = (int)last < want ? (int)last : want;
+	return opus_decode_float(s->dec, NULL, 0, out, plc < cap ? plc : cap, 0);   /* PLC */
+}
+
 /* Pass 1 of the tick: decode this participant's next source frame (or PLC),
  * update its active-set membership (DTX/VAD cull with release hold) and its
  * power/VAD. Leaves the decoded PCM in s->decbuf / s->dec_samples for pass 2.
@@ -2849,21 +2871,21 @@ static void janus_slvoice_tick_decode_locked(janus_slvoice_session *s, gint64 no
 		}
 		goto membership;
 	}
-	const unsigned char *pl = NULL;
-	int pn = 0;
-	int st = janus_slvoice_jb_pull(s, &pl, &pn);
-	if(st == SLV_JB_SILENCE) {
+	/* O-81: decode packets until this tick's frame is full. The answer offers minptime=10, so a
+	 * viewer may send 10 ms packets, and pass 2 mixes SLV_FRAME_SAMPLES from decbuf; a tail the
+	 * source did not fill is zeroed, never left stale. A 20 ms packet fills the frame in one call. */
+	int decode_err = 0;
+	int samples = slv_mix_fill_frame(s->decbuf, SLV_DECODE_MAX, SLV_FRAME_SAMPLES, SLV_CHANNELS,
+		SLV_FILL_MAX_CHUNKS, janus_slvoice_decode_chunk_locked, s, &decode_err);
+	if(decode_err < 0) {
+		s->decode_ok = FALSE;
+		JANUS_LOG(LOG_WARN, "[%s-%p] Opus decode error: %s\n",
+			JANUS_SLVOICE_PACKAGE, s->handle, opus_strerror(decode_err));
 		g_atomic_int_set(&s->power_p, 0);
 		g_atomic_int_set(&s->vad, 0);
 		goto membership;
 	}
-	int samples = (st == SLV_JB_FRAME)
-		? opus_decode_float(s->dec, pl, pn, s->decbuf, SLV_DECODE_MAX, 0)
-		: opus_decode_float(s->dec, NULL, 0, s->decbuf, SLV_FRAME_SAMPLES, 0);  /* PLC */
-	if(samples < 0) {
-		s->decode_ok = FALSE;
-		JANUS_LOG(LOG_WARN, "[%s-%p] Opus decode error: %s\n",
-			JANUS_SLVOICE_PACKAGE, s->handle, opus_strerror(samples));
+	if(samples == 0) {
 		g_atomic_int_set(&s->power_p, 0);
 		g_atomic_int_set(&s->vad, 0);
 		goto membership;

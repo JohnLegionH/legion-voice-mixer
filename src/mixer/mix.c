@@ -65,6 +65,36 @@ int slv_mix_nminus1(float *out, size_t n,
 	                              gains, gains, nsrc, self);
 }
 
+int slv_mix_fill_frame(float *out, int cap, int frame, int channels, int max_chunks,
+                       slv_mix_chunk_fn chunk, void *ctx, int *err) {
+	if(err != NULL)
+		*err = 0;
+	if(out == NULL || chunk == NULL || cap <= 0 || frame <= 0 || channels <= 0)
+		return 0;
+	int total = 0;
+	for(int k = 0; k < max_chunks && total < frame && total < cap; k++) {
+		int n = chunk(ctx, out + (size_t)total * (size_t)channels, cap - total, frame - total);
+		if(n < 0) {
+			if(err != NULL)
+				*err = n;
+			return 0;
+		}
+		if(n == 0)
+			break;
+		total += n;
+	}
+	if(total > cap)
+		total = cap;
+	/* A source that ran out part-way: zero the rest of the frame rather than leave
+	 * whatever an earlier frame decoded there. */
+	if(total > 0 && total < frame) {
+		int end = frame < cap ? frame : cap;
+		for(size_t i = (size_t)total * (size_t)channels; i < (size_t)end * (size_t)channels; i++)
+			out[i] = 0.0f;
+	}
+	return total;
+}
+
 void slv_mix_apply_gain(float *buf, size_t n, float gain) {
 	if(buf == NULL || gain == 1.0f)
 		return;

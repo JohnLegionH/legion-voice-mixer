@@ -76,6 +76,34 @@ int slv_mix_nminus1_stereo(float *out, size_t n,
                            const float *gainsL, const float *gainsR,
                            int nsrc, int self);
 
+/*! \brief One chunk of decoded audio for \ref slv_mix_fill_frame.
+ *
+ * Writes up to \p cap samples per channel into \p out; \p want is how many samples
+ * per channel the frame still needs (a concealment chunk should produce that many).
+ * \returns samples per channel written (> 0), 0 when no more audio is available
+ * this frame, or a negative error code. */
+typedef int (*slv_mix_chunk_fn)(void *ctx, float *out, int cap, int want);
+
+/*! \brief Fill one mix frame from a source whose packets may be shorter than the frame
+ * (O-81: a viewer may send 10 ms packets into a 20 ms tick).
+ *
+ * Calls \p chunk up to \p max_chunks times, appending each chunk to \p out, until
+ * \p frame samples per channel are present. If the source runs out part-way, the
+ * rest of the frame is zeroed, so the first \p frame samples never hold stale data.
+ *
+ * \param out        interleaved destination, capacity \p cap samples per channel
+ * \param cap        capacity of \p out in samples per channel (>= \p frame)
+ * \param frame      samples per channel in one mix frame
+ * \param channels   interleaved channel count
+ * \param max_chunks upper bound on \p chunk calls (bounds work per frame)
+ * \param chunk      the source callback
+ * \param ctx        passed through to \p chunk
+ * \param err        if non-NULL, set to 0, or to \p chunk's negative return on error
+ * \returns samples per channel decoded (0 on error or when the source had nothing);
+ *          may exceed \p frame when the last chunk overruns it. */
+int slv_mix_fill_frame(float *out, int cap, int frame, int channels, int max_chunks,
+                       slv_mix_chunk_fn chunk, void *ctx, int *err);
+
 /*! \brief Multiply \p buf in place by a scalar linear \p gain. */
 void slv_mix_apply_gain(float *buf, size_t n, float gain);
 

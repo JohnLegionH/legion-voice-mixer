@@ -183,8 +183,76 @@ static void test_stereo_path(void) {
 	CHECK(identical, "wrapper output identical to stereo core with gainsL==gainsR");
 }
 
+/* ---- O-81: a frame is filled from packets shorter than the frame --------- */
+typedef struct {
+	int   chunk;   /* samples/ch per packet */
+	int   left;    /* packets still available */
+	float next;    /* value written by the next packet */
+	int   fail;    /* return this (< 0) instead of decoding */
+} fake_src;
+
+static int fake_chunk(void *ctx, float *out, int cap, int want) {
+	fake_src *f = (fake_src *)ctx;
+	(void)want;
+	if(f->fail < 0)
+		return f->fail;
+	if(f->left == 0)
+		return 0;
+	int n = f->chunk < cap ? f->chunk : cap;
+	fill(out, (size_t)n * 2, f->next);
+	f->next += 1.0f;
+	f->left--;
+	return n;
+}
+
+static void test_fill_frame(void) {
+	printf("test_fill_frame\n");
+	enum { CAP = 5760, FRAME = 960, CH = 2 };
+	static float buf[CAP * CH];
+	int err = 99;
+
+	/* 10 ms packets into a 20 ms frame: two packets, no stale sample left. */
+	fill(buf, CAP * CH, 9.0f);   /* what an earlier tick left behind */
+	fake_src ten = { 480, 4, 1.0f, 0 };
+	int n = slv_mix_fill_frame(buf, CAP, FRAME, CH, 8, fake_chunk, &ten, &err);
+	CHECK(n == FRAME && err == 0, "10 ms: two 480-sample packets fill a 960-sample frame");
+	CHECK(ten.left == 2, "10 ms: exactly two packets consumed for one frame");
+	int first = 1, second = 1, stale = 0;
+	for(int i = 0; i < FRAME * CH; i++) {
+		if(i < 480 * CH && buf[i] != 1.0f) first = 0;
+		if(i >= 480 * CH && buf[i] != 2.0f) second = 0;
+		if(buf[i] == 9.0f) stale = 1;
+	}
+	CHECK(first && second, "10 ms: first half is packet 1, second half is packet 2");
+	CHECK(!stale, "10 ms: no stale sample in the frame");
+
+	/* 20 ms packets: one packet per frame, behaviour unchanged. */
+	fill(buf, CAP * CH, 9.0f);
+	fake_src twenty = { 960, 2, 1.0f, 0 };
+	n = slv_mix_fill_frame(buf, CAP, FRAME, CH, 8, fake_chunk, &twenty, &err);
+	CHECK(n == FRAME && twenty.left == 1, "20 ms: one packet fills the frame");
+
+	/* The source pauses after one 10 ms packet: the tail is zeroed. */
+	fill(buf, CAP * CH, 9.0f);
+	fake_src part = { 480, 1, 1.0f, 0 };
+	n = slv_mix_fill_frame(buf, CAP, FRAME, CH, 8, fake_chunk, &part, &err);
+	int tail_zero = 1;
+	for(int i = 480 * CH; i < FRAME * CH; i++)
+		if(buf[i] != 0.0f) tail_zero = 0;
+	CHECK(n == 480 && buf[0] == 1.0f && tail_zero, "partial: the unfilled tail is zeroed, not stale");
+
+	/* Nothing available, and a decode error. */
+	fake_src none = { 480, 0, 1.0f, 0 };
+	n = slv_mix_fill_frame(buf, CAP, FRAME, CH, 8, fake_chunk, &none, &err);
+	CHECK(n == 0 && err == 0, "empty source: 0 samples, no error");
+	fake_src bad = { 480, 4, 1.0f, -3 };
+	n = slv_mix_fill_frame(buf, CAP, FRAME, CH, 8, fake_chunk, &bad, &err);
+	CHECK(n == 0 && err == -3, "decode error: 0 samples and the error is reported");
+}
+
 int main(void) {
 	printf("== test_mix ==\n");
+	test_fill_frame();
 	test_nminus1_excludes_self();
 	test_active_gating();
 	test_per_source_mute();
