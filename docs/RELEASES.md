@@ -15,6 +15,34 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer V-2 (untagged) — 2026-09-14
+
+A local build, deployed 2026-09-14 14:29 CDT (image `14ccf97d`). The plugin still reports `1.1.0`; this
+slice has no version bump and no tag.
+- **Rollback:** `legion-voice-mixer:rollback-pre-v2` (`7936e030`, the 1.1.0 image).
+- **O-items:** **O-81** (`15f52cb`), **O-82** (`36eae88`), **O-80** (`34935a2`).
+- **Verified:** the full harness, S1–S8 and S10, passed 9/9 in 244.0 s against the deployed image.
+
+### Behaviour changes on upgrade
+- **A room created without `spatial_audio=true` is now a flat mix (O-80):** no distance cull,
+  falloff or pan.
+  - The sim creates "local" rooms with the flag set and avatar-to-avatar rooms without it, so A2A
+    calls are now heard regardless of distance, as intended.
+  - A static jcfg room without the key, or any client that omits it, is now flat too.
+  - Room create logs `spatial_audio=true|false`.
+- **Quiet but audible mixes are now encoded and sent (O-82).** Encode-skip no longer applies the
+  0.02 RMS floor; it skips only an empty or exactly-zero mix.
+  - Under the default curve, a talker at speech level (RMS 0.1) beyond ~33 m is now heard.
+  - Encode CPU rises for listeners whose only in-range talker fell below the old floor. Opus DTX
+    still suppresses silence on the wire.
+- **10 ms packets are now mixed correctly (O-81).** A 20 ms sender is unchanged.
+- No new knobs.
+
+### One-time migrations
+- None.
+
+---
+
 ## Mixer 1.1.0 — 2026-09-14
 
 Plugin version `1.1.0` (`JANUS_SLVOICE_VERSION` 110). O-items: **O-75** (join-without-media reap).
