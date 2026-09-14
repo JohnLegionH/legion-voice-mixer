@@ -96,6 +96,10 @@ class ConnectorPeer:
             channel.on("message", self._on_sldata)
             self.channel = channel
             self._pc.on("track", self._on_track)
+            # The mixer's SLData (presence, power batches) does not come back on the channel created
+            # above: the plugin sends with no label, so Janus opens its own "JanusDataChannel" toward
+            # us (vendor/janus-gateway/src/sctp.c janus_sctp_send_data). Listen on whatever it opens.
+            self._pc.on("datachannel", self._on_remote_channel)
 
             offer = await self._pc.createOffer()
             await self._pc.setLocalDescription(offer)
@@ -182,6 +186,10 @@ class ConnectorPeer:
         if track.kind != "audio":
             return
         self.on_audio_track(track)
+
+    def _on_remote_channel(self, channel) -> None:
+        self._log.debug("remote data channel opened: %s", channel.label)
+        channel.on("message", self._on_sldata)
 
     def _on_sldata(self, message) -> None:
         try:
