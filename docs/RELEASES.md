@@ -15,6 +15,59 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.1: address configuration (untagged) — 2026-09-14
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 18:06 | `d2669777` | `legion-voice-mixer:rollback-pre-a1` (`6c443c7d`, the V-4 image) |
+
+It is an entrypoint-only change: the plugin code is as in V-4, and the plugin still reports `1.1.0`. A
+hostname in `JS_PUBLIC_HOST` (or `JS_PUBLIC_IP`) is now discovered in this order:
+1. STUN;
+2. an external DNS resolver;
+3. the container resolver.
+
+The first public answer wins. The verdict judges the final `nat_1_1_mapping`. A background watcher
+re-checks the address every 300 s. Each start records the resolution as one `ADDRESS_RESOLUTION`
+JSON log line and in `/run/legion-voice/public-address.json`. Details are in `docs/docker-notes.md`,
+"External access".
+
+**Verified:**
+- **Image build:** every C suite, `test_addr_probe.py` (19 tests, OK) and `entrypoint_test.sh`
+  (81 passed, 0 failed) ran inside the build.
+- **Legion Grid, with `JS_NAT_EXTRA_IPS` commented out** (`.env` backed up to `.env.bak-a1`):
+  - STUN `174.82.163.190` (public), DNS via `1.1.1.1` `174.82.163.190` (public), container resolver
+    `192.168.1.225` (private); winner stun.
+  - `nat_1_1_mapping = 174.82.163.190,192.168.1.225`, verdict `public`.
+  - The private-address WARNING is gone.
+- **The previous hand fix is no longer needed:** before this, the mapping held the router address
+  only because `JS_NAT_EXTRA_IPS=174.82.163.190` was added by hand.
+- **Harness:** 11/11 passed in 272.9 s. S4's restart re-ran discovery with the same result.
+
+### Behaviour changes on upgrade
+- **A DDNS name that hairpins to the LAN now yields the router's public address** in
+  `nat_1_1_mapping` (deliberate: it is the fix).
+  - A literal `JS_PUBLIC_IP` is kept after the discovered address; before, `JS_PUBLIC_HOST` overrode it.
+  - `JS_PUBLIC_IP_DISCOVERY=static` restores container-resolver-only resolution.
+- **Outbound UDP** to `JS_STUN_SERVER` (default `stun.l.google.com:19302`) and
+  `JS_PUBLIC_IP_DNS_RESOLVER` (default `1.1.1.1`) at start and every `JS_PUBLIC_IP_REFRESH_S`
+  (default 300; `0` disables).
+- **Log and verdict changes:**
+  - No public address in the final mapping logs an ERROR with remediation (it used to be a WARNING).
+  - A 100.64.0.0/10 address logs a CGNAT WARNING (TURN required).
+  - The per-address "is private/loopback" WARNING is removed.
+- **New knobs:** `JS_PUBLIC_IP_DISCOVERY`, `JS_STUN_SERVER`, `JS_PUBLIC_IP_DNS_RESOLVER`,
+  `JS_PUBLIC_IP_REFRESH_S`, `JS_PUBLIC_IP_CHANGE_ACTION` (default `warn`) and
+  `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` (default 900).
+  - `restart` needs the compose restart policy `unless-stopped` or `always`.
+
+### One-time migrations
+- None required. An install that added its router address to `JS_NAT_EXTRA_IPS` as a workaround can
+  remove it once the start log shows discovery finding that address. Legion Grid's is commented out
+  in `.env`.
+
+---
+
 ## Mixer V-2 to V-4 (untagged) — 2026-09-14
 
 Three local builds were deployed on 2026-09-14. The plugin still reports `1.1.0`; none has a

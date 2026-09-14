@@ -46,10 +46,16 @@ over the whole config dir by default (that was the old model).
 
 | `.env` variable | Janus file → key | Default |
 |---|---|---|
-| `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping` (only if set) | *(unset)* |
-| `JS_PUBLIC_HOST` | resolved to IPv4 at start → `nat_1_1_mapping` (overrides `JS_PUBLIC_IP`) | *(unset)* |
+| `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping`. An IPv4 literal is used as-is, with no lookup. Since A.1 a hostname here is discovered like `JS_PUBLIC_HOST` (when that is unset) | *(unset)* |
+| `JS_PUBLIC_HOST` | a DNS/DDNS hostname. Its public address is discovered at start (`JS_PUBLIC_IP_DISCOVERY`) and goes first in `nat_1_1_mapping`, with a literal `JS_PUBLIC_IP` kept after it. Before A.1 it was resolved by the container resolver and *overrode* `JS_PUBLIC_IP` | *(unset)* |
+| `JS_PUBLIC_IP_DISCOVERY` | no jcfg key: how a hostname becomes an address. `auto` = STUN, then DNS via `JS_PUBLIC_IP_DNS_RESOLVER`, then the container resolver; the first public answer wins. `stun` / `dns` = that source only. `static` = the container resolver only, at start, with no re-check (the pre-A.1 behaviour). Any other value is FATAL | `auto` |
+| `JS_STUN_SERVER` | no jcfg key: the STUN server discovery asks (`host[:port]` or `stun:host:port`). Janus itself is not given it | `stun.l.google.com:19302` |
+| `JS_PUBLIC_IP_DNS_RESOLVER` | no jcfg key: the external DNS resolver discovery asks directly (`host[:port]`), bypassing the container resolver | `1.1.1.1` |
+| `JS_PUBLIC_IP_REFRESH_S` | no jcfg key: seconds between re-checks of a discovered address; `0` disables. A change counts after 2 consecutive agreeing checks | `300` |
+| `JS_PUBLIC_IP_CHANGE_ACTION` | no jcfg key: what a confirmed change does. `warn` = WARN with the old and new address; `restart` = restart Janus once nobody is connected, which needs the compose restart policy (see "External access"). Any other value is FATAL | `warn` |
+| `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | no jcfg key: with `restart`, the longest wait for zero participants before restarting anyway | `900` |
 | `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
-| `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the public address (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
+| `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the discovered and literal addresses (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
 | `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
 | `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
 | `ALLOW_INSECURE_DEV` | no jcfg key — `true` lets the container start with an empty secret. **Dev only** | `false` |
@@ -109,28 +115,47 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   **behaviour change on upgrade** (see below). **`ALLOW_INSECURE_DEV=true` is a
   dev-only override**: it starts anyway, with a WARNING. Use it only on a throwaway
   local box that nothing else can reach, never on the grid host.
-- **`nat_1_1_mapping` guard and `JS_NAT_EXTRA_IPS`.** After resolving
-  `JS_PUBLIC_HOST` (or taking `JS_PUBLIC_IP`), the entrypoint WARNs for each mapped
-  address that is RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) or loopback
-  (`127/8`). When *no* mapped address is public it adds
-  `off-LAN viewers will fail ICE`: they receive only unreachable candidates. This
-  happens when a hosts-file or split-horizon DNS pin makes the DDNS name resolve to
-  the LAN IP inside the container (Legion Grid today: `legiongrid.ddns.net` →
-  `192.168.1.225`). `JS_NAT_EXTRA_IPS` (comma list) appends addresses, e.g.
-  `JS_NAT_EXTRA_IPS=<router public IPv4>` gives `nat_1_1_mapping =
-  "192.168.1.225,<public>"`. Janus 1.x splits the list and advertises a host
-  candidate per address, so LAN and off-LAN viewers both get a reachable one. A
-  static public IP goes stale when a dynamic address changes; restart the container
-  with the new value. With a public mapping and no extras, the generated config is
-  unchanged.
+- **`nat_1_1_mapping` verdict and `JS_NAT_EXTRA_IPS` (A.1).** The entrypoint builds
+  the mapping in this order:
+  1. the address discovered for a hostname (see "External access" below);
+  2. any literal `JS_PUBLIC_IP`;
+  3. `JS_NAT_EXTRA_IPS`.
+
+  It then judges the **final** mapping, not any one lookup:
+  - **No public address:** two ERROR lines, `nat_1_1_mapping=<m> has no public address: off-LAN
+    viewers will fail ICE`, then the remediation.
+  - **A public address:** one INFO line naming the public addresses.
+  - **An address in `100.64.0.0/10`:** a CGNAT WARNING. Direct paths fail, port forwarding cannot
+    help, and a TURN server is required.
+
+  Private addresses next to a public one (a LAN literal, or a hairpinned DNS answer)
+  are expected with `keep_private_host`, and are no longer warned about one by one.
+  Janus 1.x splits the list and advertises a host candidate per address, so LAN
+  and off-LAN viewers both get a reachable one. `JS_NAT_EXTRA_IPS` still appends
+  literals, but a hand-added router address goes stale when a dynamic IP changes;
+  discovery exists so it is not needed.
+- **Resolution record (A.1).** Every start writes one line, `[entrypoint] ADDRESS_RESOLUTION
+  {json}`, and the same JSON to `/run/legion-voice/public-address.json` in the container.
+  - **Fields:** `event`, `time`, `host`, `host_var`, `discovery`, `sources[]`
+    (`name`/`via`/`status`/`address`/`class`), `winner`, `literal_ips`, `extra_ips`,
+    `nat_1_1_mapping`, `keep_private_host` and `verdict` (`public` | `cgnat` | `no_public` | `none`).
+  - **The re-check watcher** logs the same line with `event: change` on a confirmed change. It
+    rewrites the file after every check (`event: refresh`) with `running_address`,
+    `observed_address` and `agreeing_checks`.
+  - **To read it:** `docker exec <container> cat /run/legion-voice/public-address.json`.
 - **SDP logging (O-66).** The plugin's full offer/answer SDP dumps are at
   `LOG_VERB` (debug level 5+), with `a=ice-ufrag`, `a=ice-pwd` and the
   `a=fingerprint` value redacted. Each join still logs one INFO line:
   `Answer sent: audio Opus pt=<pt> ptime=20 maxptime=20; m=application answered=YES`.
-- **Tests.** `bash tests/entrypoint_test.sh` runs the entrypoint without Docker
-  against a scratch config dir and a stub Janus (the `JANUS_CONF_DIR`,
-  `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` overrides exist only for
-  it). The image build runs it against the baked script and templates.
+- **Tests.** `bash tests/entrypoint_test.sh` runs the entrypoint without Docker, against:
+  - a scratch config dir and a stub Janus (the `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`,
+    `JANUS_OVERRIDE_DIR` and `JANUS_BIN` overrides exist only for it);
+  - a stub address probe, so discovery, the verdict, the state file and the re-check watcher are
+    tested with no network.
+
+  `python3 tests/test_addr_probe.py` covers the STUN and DNS codecs, and runs both probes end to
+  end against loopback UDP servers. The image build runs both suites against the baked scripts and
+  templates; a failure fails the build.
 
 ## Configuration compatibility rule
 
@@ -183,13 +208,42 @@ its knobs have no "before".
 | `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
 | `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
 | `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
+| `JS_PUBLIC_IP_DISCOVERY` | `auto` | `JS_PUBLIC_HOST` was resolved once by the container resolver and overrode `JS_PUBLIC_IP`; that is `static`. **Deliberate behaviour change (A.1)**: `auto` puts the STUN-discovered public address first, and keeps a literal `JS_PUBLIC_IP`. A hairpinned DDNS name then no longer yields a private-only mapping. `static` restores the old resolution, but keeps the literal | slice A.1 |
+| `JS_STUN_SERVER` | `stun.l.google.com:19302` | no STUN query (the container made no outbound STUN request) | slice A.1 |
+| `JS_PUBLIC_IP_DNS_RESOLVER` | `1.1.1.1` | no external DNS query (the container resolver only) | slice A.1 |
+| `JS_PUBLIC_IP_REFRESH_S` | `300` | no re-check: a mid-run IP change went unnoticed. The default adds a background re-check that only logs; `0` restores the old behaviour | slice A.1 |
+| `JS_PUBLIC_IP_CHANGE_ACTION` | `warn` | nothing acted on an IP change. `warn` only logs; `restart` is opt-in | slice A.1 |
+| `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | `900` | n/a (used only with `JS_PUBLIC_IP_CHANGE_ACTION=restart`) | slice A.1 |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
-`JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR` and `JANUS_BIN` are test
-seams for `tests/entrypoint_test.sh`, not operator knobs.
+`JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR`, `JANUS_BIN`, `SLV_LIB_DIR`,
+`SLV_ADDR_PROBE`, `SLV_ADDR_STATE_FILE` and the watcher's `SLV_ADDR_WATCH_MAX_CHECKS`,
+`SLV_ADDR_SLEEP`, `SLV_ADDR_RESTART_CMD`, `SLV_ADDR_POLL_S` and `SLV_ADDR_PROBE_TIMEOUT_S` are test
+seams for `tests/entrypoint_test.sh` and `tests/test_addr_probe.py`, not operator knobs.
 
 ## Behaviour changes on upgrade
+
+- **Slice A.1: public address discovery**
+  - **A DDNS hostname now yields the router's public address (deliberate).** A hostname in
+    `JS_PUBLIC_HOST` (or `JS_PUBLIC_IP`) is discovered by STUN first, then an external resolver,
+    then the container resolver. Before, the container resolver alone decided, and a hairpinning
+    router answered it with the LAN address, so off-LAN viewers failed ICE. A literal `JS_PUBLIC_IP`
+    is now kept next to the discovered address instead of being overridden.
+    `JS_PUBLIC_IP_DISCOVERY=static` restores the old resolution.
+  - **Outbound queries at start and every 300 s:** UDP to `JS_STUN_SERVER` (default
+    `stun.l.google.com:19302`) and to `JS_PUBLIC_IP_DNS_RESOLVER` (default `1.1.1.1:53`). A firewall
+    that blocks them leaves discovery on the next source, which is logged.
+  - **The verdict judges the final `nat_1_1_mapping`.** The per-address "is private/loopback"
+    WARNING is gone:
+    - no public address: an ERROR with remediation;
+    - a public address: an INFO line;
+    - a `100.64.0.0/10` address: a CGNAT WARNING.
+  - **New log lines:** the discovery chain, one `ADDRESS_RESOLUTION` JSON line, and `[address-watch]`
+    lines when a re-check sees a different address. A new state file sits at
+    `/run/legion-voice/public-address.json`.
+  - **A hostname that no source can resolve still refuses to start.** The message is now
+    `FATAL: could not discover an IPv4 address for JS_PUBLIC_HOST=…`.
 
 - **Untagged V-2 to V-4 (2026-09-14): `34935a2` (O-80), `fc48ea6` (O-83), `4fbfaf4` (SC-87), `ae159b0` (SC-96)**
   - **A recorder, or an injector with `RECORD=1`, refuses to start until `RECORDING_OPT_IN=yes`**
@@ -227,6 +281,9 @@ seams for `tests/entrypoint_test.sh`, not operator knobs.
 
 ## One-time migrations
 
+- **Slice A.1:** none required. An install that added its router's public IPv4 to
+  `JS_NAT_EXTRA_IPS` only to work around a hairpinned DDNS name can remove it once the start log
+  shows discovery finding that address (the static value goes stale when the IP changes).
 - **Regionserver build 1.1.392+ (connectors):** connector NPC ids are now derived
   and stable. On the first restart after upgrading, each NPC's id changes once, so
   re-edit `DISPLAY` in `recorder.env` / `injector.env` one last time. See
@@ -239,22 +296,54 @@ seams for `tests/entrypoint_test.sh`, not operator knobs.
 For outside testers, the server must advertise a reachable public address in its
 ICE candidates (`nat_1_1_mapping`). Two knobs support this:
 
-- **`JS_PUBLIC_HOST`** — a DNS/DDNS hostname (e.g. `legiongrid.ddns.net`).
-  `nat_1_1_mapping` requires an **IP literal**, not a hostname, so the entrypoint
-  **resolves the name to an IPv4 once at container start** (`getent ahostsv4`,
-  first A record) and uses that, **overriding `JS_PUBLIC_IP`**. If the name
-  fails to resolve the container **refuses to start** with a loud
-  `[entrypoint] FATAL: could not resolve JS_PUBLIC_HOST=…` message, rather than
-  coming up silently broken.
+- **`JS_PUBLIC_HOST`**: a DNS/DDNS hostname (e.g. `legiongrid.ddns.net`). `JS_PUBLIC_IP` may
+  also hold one when `JS_PUBLIC_HOST` is unset. `nat_1_1_mapping` needs an **IP literal**, so the
+  entrypoint **discovers the name's public address at start** (slice A.1).
 
-  Because resolution happens **only at start**, a dynamic IP that changes while
-  the container runs leaves the old address baked into `nat_1_1_mapping` and
-  external voice breaks until you re-resolve: `docker compose restart` (or
-  `docker compose up -d` after the change). The `restart: unless-stopped` policy
-  in `docker-compose.yml` covers the host-reboot / Docker-restart case — the
-  container comes back and re-resolves automatically — but it does **not** react
-  to a mid-run IP change on its own. For frequently-changing IPs, pair this with
-  an external "restart on IP change" hook (e.g. your DDNS updater) if needed.
+  **Sources.** With `JS_PUBLIC_IP_DISCOVERY=auto` (the default) it asks three sources, in order,
+  and logs what each returned:
+  1. **STUN** (`JS_STUN_SERVER`): the server-reflexive address, which is what the internet sees
+     this host's traffic come from. Behind a home router that is the router's public IPv4, the
+     address off-LAN viewers must reach.
+  2. **DNS against `JS_PUBLIC_IP_DNS_RESOLVER`** (default `1.1.1.1`), sent straight to that
+     resolver.
+  3. **The container resolver,** last. A router that hairpins its own DDNS name, or a
+     split-horizon/hosts pin, answers it with the LAN address. Legion Grid: `legiongrid.ddns.net`
+     → `192.168.1.225`, which is why the pre-A.1 resolution produced a private-only mapping.
+
+  **Winner.** The first public answer wins. If no source gives a public answer, the first answer of
+  any kind is used and the verdict says so. The start log reads:
+
+  ```
+  [entrypoint] INFO: discovery source stun (stun.l.google.com:19302) -> 174.82.163.190 (public)
+  [entrypoint] INFO: discovery source dns (resolver 1.1.1.1) -> 174.82.163.190 (public)
+  [entrypoint] INFO: discovery source container (container resolver) -> 192.168.1.225 (private)
+  [entrypoint] INFO: discovery winner: stun -> 174.82.163.190
+  ```
+
+  **Other modes.** `stun` and `dns` use that source only. `static` uses the container resolver
+  alone, once, as before A.1. If no source answers, the container **refuses to start** (`FATAL:
+  could not discover an IPv4 address for JS_PUBLIC_HOST=…`) rather than coming up silently broken.
+  A literal `JS_PUBLIC_IP` is kept after the discovered address (for LAN viewers), then
+  `JS_NAT_EXTRA_IPS`.
+
+  **Re-check.** Every `JS_PUBLIC_IP_REFRESH_S` (default 300; `0` disables; never with `static`) a
+  background watcher runs the same chain.
+  - **When a change counts:** only after **two consecutive checks agree** on the same new address.
+  - **What never counts:** a failed lookup; a non-public answer while the running address is public
+    (e.g. STUN down and DNS hairpinned). Both also break the streak.
+  - **`JS_PUBLIC_IP_CHANGE_ACTION=warn`** (default): logs `[address-watch] WARNING: public address
+    changed: <old> -> <new>` once per new address. Janus keeps advertising the old mapping until
+    you restart it.
+  - **`JS_PUBLIC_IP_CHANGE_ACTION=restart`:** the watcher polls the client API until no
+    participant is connected in any room, then stops Janus (SIGTERM to PID 1) so the container
+    restarts and re-discovers. It waits at most `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` (default 900),
+    then restarts anyway and logs that it took the outage.
+
+  **Restart policy this requires:** `restart: unless-stopped` (as shipped in
+  `docker-compose.yml`) or `restart: always`. Janus exits 0 on SIGTERM. So under `on-failure`, or
+  with no restart policy, the container stays stopped and voice is down until someone starts it.
+  The same policy also re-runs discovery after a host reboot or Docker restart.
 
 - **`JS_KEEP_PRIVATE_HOST`** → Janus `keep_private_host`. When a public mapping
   is in effect, `nat_1_1_mapping` normally **rewrites** every host candidate to

@@ -71,10 +71,13 @@ services:
       - JS_ADMIN_BIND=${JS_ADMIN_BIND:-0.0.0.0}
       - JS_WS_ENABLED=${JS_WS_ENABLED:-true}
 
-    # Keeps voice up across crashes and host reboots. Note for JS_PUBLIC_HOST
-    # users: on each (re)start the entrypoint re-resolves the hostname to an
-    # IPv4, so a reboot picks up a changed dynamic IP automatically. A mid-run
-    # IP change still needs an explicit `docker compose restart`. See env.sample.
+    # Keeps voice up across crashes and host reboots, and each (re)start
+    # re-discovers a JS_PUBLIC_HOST address. REQUIRED for
+    # JS_PUBLIC_IP_CHANGE_ACTION=restart: on a confirmed IP change the entrypoint's
+    # watcher stops Janus, which exits 0, and this policy brings the container back
+    # with the new address. Keep it `unless-stopped` or `always`. Under `on-failure`,
+    # or with no policy, voice stays down after that restart. See
+    # docs/docker-notes.md, "External access".
     restart: unless-stopped
 
     # ── Advanced config override (optional) ──────────────────────────────────

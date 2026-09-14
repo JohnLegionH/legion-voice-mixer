@@ -38,7 +38,9 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 # in; the entrypoint only reports it (Janus itself listens on all container addresses).
 : "${JS_ADMIN_BIND:=0.0.0.0}"
 : "${JS_RTP_PORT_RANGE:=10000-10200}"
+# An IPv4 literal (used as-is) or, since A.1, a hostname (discovered, below).
 : "${JS_PUBLIC_IP:=}"
+# A DNS/DDNS hostname whose public address is discovered at start (slice A.1).
 : "${JS_PUBLIC_HOST:=}"
 # Extra nat_1_1_mapping addresses (comma list), appended after the public address.
 : "${JS_NAT_EXTRA_IPS:=}"
@@ -54,6 +56,17 @@ export JS_EMPTY_ROOM_GRACE_S
 # it (0 disables). Read by the plugin from the process environment, so exported like the grace.
 : "${JS_JOIN_MEDIA_TIMEOUT_S:=30}"
 export JS_JOIN_MEDIA_TIMEOUT_S
+# Slice A.1: public address discovery and its periodic re-check (docs/docker-notes.md, "External access").
+: "${JS_PUBLIC_IP_DISCOVERY:=auto}"
+: "${JS_STUN_SERVER:=stun.l.google.com:19302}"
+: "${JS_PUBLIC_IP_DNS_RESOLVER:=1.1.1.1}"
+: "${JS_PUBLIC_IP_REFRESH_S:=300}"
+: "${JS_PUBLIC_IP_CHANGE_ACTION:=warn}"
+: "${JS_PUBLIC_IP_RESTART_MAX_WAIT_S:=900}"
+
+# The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
+SLV_LIB_DIR=${SLV_LIB_DIR:-/usr/local/lib/legion-voice}
+. "$SLV_LIB_DIR/public-address.sh"
 
 is_true() {
 	case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -62,21 +75,22 @@ is_true() {
 	esac
 }
 
-is_ipv4() {
-	printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
-}
-
-# RFC 1918 private ranges and loopback: addresses no off-LAN viewer can reach.
-is_private_or_loopback() {
-	case "$1" in
-		10.*|127.*|192.168.*)                   return 0 ;;
-		172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+# A non-negative integer knob, or its default with a WARNING.
+uint_or_default() {
+	case "$2" in
+		''|*[!0-9]*)
+			echo "[entrypoint] WARNING: $1='$2' is not a non-negative integer; using $3" >&2
+			echo "$3" ;;
+		*)  echo "$2" ;;
 	esac
-	return 1
 }
 
 if is_true "$JS_WS_ENABLED"; then JS_WS_ENABLED=true; else JS_WS_ENABLED=false; fi
 if is_true "$ALLOW_INSECURE_DEV"; then ALLOW_INSECURE_DEV=true; else ALLOW_INSECURE_DEV=false; fi
+JS_PUBLIC_IP_DISCOVERY=$(printf '%s' "$JS_PUBLIC_IP_DISCOVERY" | tr '[:upper:]' '[:lower:]')
+JS_PUBLIC_IP_CHANGE_ACTION=$(printf '%s' "$JS_PUBLIC_IP_CHANGE_ACTION" | tr '[:upper:]' '[:lower:]')
+JS_PUBLIC_IP_REFRESH_S=$(uint_or_default JS_PUBLIC_IP_REFRESH_S "$JS_PUBLIC_IP_REFRESH_S" 300)
+JS_PUBLIC_IP_RESTART_MAX_WAIT_S=$(uint_or_default JS_PUBLIC_IP_RESTART_MAX_WAIT_S "$JS_PUBLIC_IP_RESTART_MAX_WAIT_S" 900)
 
 secret_state() {
 	if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo EMPTY; else echo set; fi
@@ -95,6 +109,7 @@ echo "[entrypoint] INFO: websockets transport enabled=${JS_WS_ENABLED} port=${JS
 echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH} rtp=${JS_RTP_PORT_RANGE}"
 echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
+echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
@@ -119,51 +134,87 @@ if [ -n "$missing" ]; then
 	fi
 fi
 
-# ---- Public address resolution --------------------------------------------
-# Janus's nat_1_1_mapping needs an IPv4 *literal*, not a hostname. When
-# JS_PUBLIC_HOST is set (e.g. a DDNS name like legiongrid.ddns.net), resolve it
-# to an IPv4 now, at container start, and use that for nat_1_1_mapping —
-# overriding JS_PUBLIC_IP. This is a resolve-once-at-start operation: if the
-# dynamic IP changes while the container runs, external voice breaks until the
-# container is restarted (`docker compose restart` re-resolves). See env.sample.
+# ---- Public address: a literal, or discovered from a hostname (slice A.1) ----
+# nat_1_1_mapping needs IPv4 literals.
+# - A literal in JS_PUBLIC_IP (or JS_PUBLIC_HOST) is used as-is, with no lookup.
+# - A hostname in JS_PUBLIC_HOST (or, when that is unset, in JS_PUBLIC_IP) is discovered according
+#   to JS_PUBLIC_IP_DISCOVERY:
+#     auto        STUN (JS_STUN_SERVER: the address the internet sees this host's traffic come from),
+#                 then DNS against JS_PUBLIC_IP_DNS_RESOLVER, then the container resolver. The
+#                 container resolver comes last because a hairpin or split-horizon setup answers
+#                 it with the LAN address.
+#     stun | dns  that source only
+#     static      the container resolver only, at start, as before A.1 (no periodic re-check)
+# Every source queried is logged with its answer, then the winner: the first public answer.
+# See entrypoint/public-address.sh.
+case "$JS_PUBLIC_IP_DISCOVERY" in
+	auto|stun|dns|static) ;;
+	*)
+		echo "[entrypoint] FATAL: JS_PUBLIC_IP_DISCOVERY='${JS_PUBLIC_IP_DISCOVERY}' is not one of auto, stun, dns, static; refusing to start" >&2
+		exit 1 ;;
+esac
+case "$JS_PUBLIC_IP_CHANGE_ACTION" in
+	warn|restart) ;;
+	*)
+		echo "[entrypoint] FATAL: JS_PUBLIC_IP_CHANGE_ACTION='${JS_PUBLIC_IP_CHANGE_ACTION}' is not one of warn, restart; refusing to start" >&2
+		exit 1 ;;
+esac
+
+ADDR_HOST=""; ADDR_HOST_VAR=""; LITERAL_IPS=""
+addr_reset
+if [ -n "$JS_PUBLIC_IP" ]; then
+	if addr_is_ipv4 "$JS_PUBLIC_IP"; then
+		LITERAL_IPS=$JS_PUBLIC_IP
+	elif [ -z "$JS_PUBLIC_HOST" ]; then
+		ADDR_HOST=$JS_PUBLIC_IP; ADDR_HOST_VAR=JS_PUBLIC_IP
+	else
+		echo "[entrypoint] WARNING: JS_PUBLIC_IP='${JS_PUBLIC_IP}' is not an IPv4 literal and JS_PUBLIC_HOST is set; ignoring JS_PUBLIC_IP" >&2
+	fi
+fi
 if [ -n "$JS_PUBLIC_HOST" ]; then
-	resolved=$(getent ahostsv4 "$JS_PUBLIC_HOST" 2>/dev/null | awk '{print $1; exit}')
-	if ! is_ipv4 "$resolved"; then
-		echo "[entrypoint] FATAL: could not resolve JS_PUBLIC_HOST='${JS_PUBLIC_HOST}' to an IPv4 address; refusing to start" >&2
+	if addr_is_ipv4 "$JS_PUBLIC_HOST"; then
+		LITERAL_IPS=$(addr_list_add "$LITERAL_IPS" "$JS_PUBLIC_HOST")
+	else
+		ADDR_HOST=$JS_PUBLIC_HOST; ADDR_HOST_VAR=JS_PUBLIC_HOST
+	fi
+fi
+if [ -n "$ADDR_HOST" ]; then
+	if ! printf '%s' "$ADDR_HOST" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'; then
+		echo "[entrypoint] FATAL: ${ADDR_HOST_VAR}='${ADDR_HOST}' is neither an IPv4 literal nor a hostname; refusing to start" >&2
 		exit 1
 	fi
-	echo "[entrypoint] resolved JS_PUBLIC_HOST='${JS_PUBLIC_HOST}' -> ${resolved} (used for nat_1_1_mapping)"
-	JS_PUBLIC_IP="$resolved"
+	echo "[entrypoint] INFO: discovering the public address of '${ADDR_HOST}' (${ADDR_HOST_VAR}) with JS_PUBLIC_IP_DISCOVERY=${JS_PUBLIC_IP_DISCOVERY}"
+	addr_discover "$ADDR_HOST" "$JS_PUBLIC_IP_DISCOVERY"
+	addr_log_sources "[entrypoint]"
+	if [ -z "$ADDR_WINNER" ]; then
+		echo "[entrypoint] FATAL: could not discover an IPv4 address for ${ADDR_HOST_VAR}='${ADDR_HOST}' from any source (${ADDR_SOURCES}); refusing to start" >&2
+		exit 1
+	fi
 fi
 
-# ---- nat_1_1_mapping: public address + JS_NAT_EXTRA_IPS -------------------
+# ---- nat_1_1_mapping: discovered address, literals, then JS_NAT_EXTRA_IPS ----
 # Janus 1.x accepts a comma list and advertises a host candidate per address.
-NAT_MAPPING="$JS_PUBLIC_IP"
+NAT_MAPPING=$ADDR_WINNER
+for ip in $(printf '%s' "$LITERAL_IPS" | tr ',' ' '); do
+	NAT_MAPPING=$(addr_list_add "$NAT_MAPPING" "$ip")
+done
+EXTRA_IPS=""
 for ip in $(printf '%s' "$JS_NAT_EXTRA_IPS" | tr ',' ' '); do
-	if ! is_ipv4 "$ip"; then
+	if ! addr_is_ipv4 "$ip"; then
 		echo "[entrypoint] FATAL: JS_NAT_EXTRA_IPS entry '${ip}' is not an IPv4 literal; refusing to start" >&2
 		exit 1
 	fi
-	case ",${NAT_MAPPING}," in
-		*",${ip},"*) ;;
-		*) NAT_MAPPING="${NAT_MAPPING:+$NAT_MAPPING,}${ip}" ;;
-	esac
+	EXTRA_IPS=$(addr_list_add "$EXTRA_IPS" "$ip")
+	NAT_MAPPING=$(addr_list_add "$NAT_MAPPING" "$ip")
 done
 
-# Guard: a private/loopback mapping only works for viewers on that LAN.
+# Verdict on the FINAL mapping, not on any single lookup:
+# - no public address: ERROR with remediation;
+# - a public address: INFO listing them;
+# - any 100.64.0.0/10 address: a CGNAT warning (TURN is required).
+addr_verdict "$NAT_MAPPING"
 if [ -n "$NAT_MAPPING" ]; then
-	have_public=false
-	for ip in $(printf '%s' "$NAT_MAPPING" | tr ',' ' '); do
-		if is_private_or_loopback "$ip"; then
-			echo "[entrypoint] WARNING: nat_1_1_mapping address ${ip} is private/loopback (RFC 1918 or 127/8)" >&2
-		else
-			have_public=true
-		fi
-	done
-	if [ "$have_public" = false ]; then
-		echo "[entrypoint] WARNING: no public address in nat_1_1_mapping=${NAT_MAPPING}: off-LAN viewers will fail ICE (only LAN viewers get a reachable candidate)." >&2
-		echo "[entrypoint] WARNING: add the router's public IPv4 via JS_NAT_EXTRA_IPS, or make JS_PUBLIC_HOST resolve to it inside the container. See docs/docker-notes.md." >&2
-	fi
+	addr_log_verdict "[entrypoint]" "$NAT_MAPPING" "$JS_RTP_PORT_RANGE"
 fi
 
 # ---- keep_private_host default --------------------------------------------
@@ -238,6 +289,14 @@ else
 	echo "[entrypoint] WARNING: set JS_PUBLIC_IP (LAN or public IPv4) or JS_PUBLIC_HOST in .env. See docs/docker-notes.md." >&2
 fi
 
+# ---- Resolution record (slice A.1) ----
+# The same one-line JSON goes to the log (grep ADDRESS_RESOLUTION) and to the state file
+# /run/legion-voice/public-address.json inside the container, for tooling to read. The fields are
+# the sources, values, winner, mapping and verdict.
+ADDR_JSON=$(addr_json start "$ADDR_HOST" "$ADDR_HOST_VAR" "$JS_PUBLIC_IP_DISCOVERY" "$LITERAL_IPS" "$EXTRA_IPS" "$NAT_MAPPING" "$JS_KEEP_PRIVATE_HOST")
+echo "[entrypoint] ADDRESS_RESOLUTION ${ADDR_JSON}"
+addr_write_state "$ADDR_JSON" "[entrypoint]"
+
 set_kv "$HTTP_JCFG" http            true
 set_kv "$HTTP_JCFG" port            "${JS_HTTP_PORT}"
 set_kv "$HTTP_JCFG" base_path       "\"${JS_HTTP_BASEPATH}\""
@@ -267,6 +326,19 @@ if [ -d "$OVERRIDE_DIR" ]; then
 		echo "[entrypoint] applying override $(basename "$f")"
 		cp -f "$f" "$CONF_DIR/$(basename "$f")"
 	done
+fi
+
+# ---- 4. Periodic public address re-check (slice A.1) ----
+# Runs in the background beside Janus; see entrypoint/public-address-watch.sh. The JS_* values it
+# needs are exported, because a default assigned above is not in the environment otherwise.
+if [ -n "$ADDR_HOST" ] && [ "$JS_PUBLIC_IP_DISCOVERY" != static ] && [ "$JS_PUBLIC_IP_REFRESH_S" -gt 0 ]; then
+	export JS_PUBLIC_IP_DISCOVERY JS_STUN_SERVER JS_PUBLIC_IP_DNS_RESOLVER JS_PUBLIC_IP_REFRESH_S \
+		JS_PUBLIC_IP_CHANGE_ACTION JS_PUBLIC_IP_RESTART_MAX_WAIT_S JS_HTTP_PORT JS_HTTP_BASEPATH SLV_LIB_DIR
+	SLV_ADDR_HOST=$ADDR_HOST SLV_ADDR_HOST_VAR=$ADDR_HOST_VAR SLV_ADDR_RUNNING=$ADDR_WINNER \
+		SLV_ADDR_LITERALS=$LITERAL_IPS SLV_ADDR_EXTRAS=$EXTRA_IPS SLV_ADDR_KEEP_PRIVATE=$JS_KEEP_PRIVATE_HOST \
+		sh "$SLV_LIB_DIR/public-address-watch.sh" &
+elif [ -n "$ADDR_HOST" ]; then
+	echo "[entrypoint] INFO: periodic public address re-check off (JS_PUBLIC_IP_REFRESH_S=${JS_PUBLIC_IP_REFRESH_S}, JS_PUBLIC_IP_DISCOVERY=${JS_PUBLIC_IP_DISCOVERY})"
 fi
 
 if [ "$JS_WS_ENABLED" = true ]; then ws_desc="${JS_WS_PORT}"; else ws_desc="off"; fi

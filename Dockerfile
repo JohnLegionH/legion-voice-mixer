@@ -77,11 +77,18 @@ RUN mkdir -p /opt/janus/share/janus-templates \
 
 # --- Config-generating entrypoint (operators configure via env, not files) ---
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
-# Entrypoint tests (O-55/O-65/nat_1_1 guard): the baked script against the image's own
-# templates, in a scratch dir with a stub Janus. A failure fails the image build.
-RUN ENTRYPOINT_UNDER_TEST=/usr/local/bin/docker-entrypoint.sh bash /root/slvoice/tests/entrypoint_test.sh
+# Slice A.1: the public address library, its re-check watcher and the probe they call.
+COPY entrypoint/ /usr/local/lib/legion-voice/
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/* \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/addr_probe.py \
+        /usr/local/lib/legion-voice/public-address-watch.sh
+# Address probe unit tests (STUN/DNS codecs, loopback end to end; no external network), then the
+# entrypoint tests (O-55/O-65, the nat_1_1_mapping verdict, A.1 discovery and re-check): the baked
+# scripts against the image's own templates, in a scratch dir with a stub Janus and a stub probe.
+# A failure in either fails the image build.
+RUN ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_addr_probe.py \
+    && ENTRYPOINT_UNDER_TEST=/usr/local/bin/docker-entrypoint.sh ENTRYPOINT_LIB_UNDER_TEST=/usr/local/lib/legion-voice \
+        bash /root/slvoice/tests/entrypoint_test.sh
 
 # API connections (Janus HTTP/HTTPS/admin/websockets live in 14220-14229)
 EXPOSE 14220-14229

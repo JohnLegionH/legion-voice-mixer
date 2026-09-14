@@ -10,6 +10,8 @@
 # Secrets / operator config never belong in an image layer
 secrets
 .env
+# .env backups carry the same secrets (e.g. .env.bak-a1)
+.env.*
 
 # Not needed to build the image
 .github/
