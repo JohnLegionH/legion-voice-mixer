@@ -41,7 +41,7 @@ general: {
 #	description = "Test Region"
 #	sampling_rate = 48000          # advertised in `list`; internal mix is always 48k
 #	is_private = false             # if true, hidden from `list`
-#	spatial_audio = true           # advertised in `list` only; every room is spatialised
+#	spatial_audio = true           # true = distance cull, falloff and pan; false or absent = a flat mix (O-80)
 #}
 
 # ---- Notes -----------------------------------------------------------------

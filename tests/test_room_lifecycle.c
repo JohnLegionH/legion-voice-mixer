@@ -93,8 +93,8 @@ static void join_room(janus_slvoice_room *room, janus_slvoice_session *s, guint6
 	janus_mutex_unlock(&room->mutex);
 }
 
-static janus_slvoice_room *add_room(guint64 id, gboolean permanent) {
-	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, FALSE, permanent);
+static janus_slvoice_room *add_room_ex(guint64 id, gboolean permanent, gboolean spatial) {
+	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, spatial, permanent);
 	if(room == NULL) {
 		fprintf(stderr, "test_room_lifecycle: room_create(%" PRIu64 ") failed\n", id);
 		exit(2);
@@ -105,6 +105,10 @@ static janus_slvoice_room *add_room(guint64 id, gboolean permanent) {
 	g_hash_table_insert(rooms, key, room);
 	janus_mutex_unlock(&rooms_mutex);
 	return room;
+}
+
+static janus_slvoice_room *add_room(guint64 id, gboolean permanent) {
+	return add_room_ex(id, permanent, FALSE);
 }
 
 static gboolean room_present(guint64 id) {
@@ -291,6 +295,42 @@ static void test_hangup_leaves_room(void) {
 	g_free(handle);
 }
 
+/* O-80: a non-spatial room is a flat mix (no cull, falloff or pan); a spatial room keeps all three. */
+static void test_spatial_pair(void) {
+	janus_slvoice_room *flat = add_room_ex(1101, FALSE, FALSE);
+	janus_slvoice_room *spat = add_room_ex(1102, FALSE, TRUE);
+	janus_slvoice_session *l = make_session();
+	janus_slvoice_session *src = make_session();
+	src->display = g_strdup("src-o80");
+	l->snap_valid = TRUE;
+	src->snap_valid = TRUE;
+	l->snap_lh = (slv_quat){ 0.0, 0.0, 0.0, 1.0 };
+
+	/* Beyond the cutoff. */
+	src->snap_sp = (slv_vec3){ slv_spatial.cutoff_dist + 100.0, 0.0, 0.0 };
+	float gl = -1.0f, gr = -1.0f;
+	gboolean culled = janus_slvoice_spatial_pair_locked(flat, l, src, src->display, 0.5f, &gl, &gr);
+	CHECK(!culled && gl == 0.5f && gr == 0.5f,
+		"non-spatial room: a source beyond the cutoff is not culled and keeps its flat gain");
+	CHECK(l->n_cull_hyst == 0, "non-spatial room: no cull hysteresis is written");
+	culled = janus_slvoice_spatial_pair_locked(spat, l, src, src->display, 0.5f, &gl, &gr);
+	CHECK(culled && l->n_cull_hyst == 1, "spatial room: the same source is culled");
+
+	/* 35 m: inside the re-add distance, so the latch clears. Falloff t = (60 - 35) / 50 = 0.5,
+	 * gain 0.5 * 0.5^2 = 0.125, split at constant power (L^2 + R^2 = gain^2). */
+	src->snap_sp = (slv_vec3){ 35.0 * SLV_GEOM_SCALE, 0.0, 0.0 };
+	culled = janus_slvoice_spatial_pair_locked(spat, l, src, src->display, 0.5f, &gl, &gr);
+	CHECK(!culled && fabs((double)gl * gl + (double)gr * gr - 0.125 * 0.125) < 1e-6,
+		"spatial room: an in-range source is attenuated by the falloff and panned at constant power");
+	culled = janus_slvoice_spatial_pair_locked(flat, l, src, src->display, 0.5f, &gl, &gr);
+	CHECK(!culled && gl == 0.5f && gr == 0.5f,
+		"non-spatial room: the same in-range source is neither attenuated nor panned");
+
+	free_session(l);
+	free_session(src);
+	/* flat and spat stay in rooms; the global teardown in main frees them. */
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -299,6 +339,7 @@ int main(void) {
 	test_reset_room_state();
 	test_grace_destroy();
 	test_hangup_leaves_room();
+	test_spatial_pair();
 
 	/* O-67: the shared global teardown (destroy() and a failed init) with no worker threads
 	 * started and rooms still live (1002 permanent, 1006 empty) leaves nothing behind. */

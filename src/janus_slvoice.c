@@ -1028,8 +1028,9 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 				guint64 *key = g_malloc(sizeof(guint64));
 				*key = room_id;
 				g_hash_table_insert(rooms, key, room);
-				JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config\n",
-					JANUS_SLVOICE_PACKAGE, room_id, room->description);
+				JANUS_LOG(LOG_INFO, "[%s] Static room %"PRIu64" (%s) loaded from config, spatial_audio=%s\n",
+					JANUS_SLVOICE_PACKAGE, room_id, room->description,
+					room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)");
 			}
 		}
 		janus_mutex_unlock(&rooms_mutex);
@@ -2178,8 +2179,9 @@ static void *janus_slvoice_handler(void *data) {
 			guint64 *key = g_malloc(sizeof(guint64));
 			*key = room_id;
 			g_hash_table_insert(rooms, key, room);
-			JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s)\n",
-				JANUS_SLVOICE_PACKAGE, room_id, room->description);
+			JANUS_LOG(LOG_INFO, "[%s] Created room %"PRIu64" (%s) spatial_audio=%s\n",
+				JANUS_SLVOICE_PACKAGE, room_id, room->description,
+				room->spatial_audio ? "true" : "false (flat mix: no distance cull, falloff or pan)");
 			janus_mutex_unlock(&rooms_mutex);
 
 			event = json_object();
@@ -3045,6 +3047,39 @@ static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
 	return slot->culled;
 }
 
+/* Phase 3b spatial stage for one (listener s, source src) pair that exclusion and mute left in the
+ * mix: distance cull with hysteresis, falloff past the reference distance, constant-power azimuth
+ * pan. Writes the per-channel gains and returns TRUE when the pair is culled. A pair without
+ * geometry on both sides keeps the flat gain. O-80: so does every pair in a non-spatial room
+ * (spatial_audio false at create, e.g. an avatar-to-avatar call), which never reaches the cull, so
+ * no hysteresis slot is written. s->mutex held; src's snapshot is tick-owned. */
+static gboolean janus_slvoice_spatial_pair_locked(janus_slvoice_room *room, janus_slvoice_session *s,
+		janus_slvoice_session *src, const char *disp, float gain, float *gainL, float *gainR) {
+	*gainL = gain;
+	*gainR = gain;
+	if(!room->spatial_audio)
+		return FALSE;
+	if(!s->snap_valid || !src->snap_valid)
+		return FALSE;
+	double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, src->snap_sp));
+	if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq))
+		return TRUE;
+	if(dcull > slv_spatial.ref_dist) {
+		/* Normalized falloff: exactly 1 at the reference, exactly 0 at the cutoff (the cull
+		 * owns d >= cutoff). Multiplies the peer gain, never replaces it. */
+		double t = (slv_spatial.cutoff_dist - dcull) / (slv_spatial.cutoff_dist - slv_spatial.ref_dist);
+		gain *= (float)pow(t, slv_spatial.falloff_exp);
+	}
+	/* Split by the source's horizontal azimuth in the listener's head frame; behind renders
+	 * centred (Amendment 5). */
+	double az = slv_azimuth(s->snap_lp, s->snap_lh, src->snap_sp);
+	float pl = 1.0f, pr = 1.0f;
+	slv_pan(az, &pl, &pr);
+	*gainL = gain * pl;
+	*gainR = gain * pr;
+	return FALSE;
+}
+
 static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	gint64 t0 = janus_get_monotonic_time();
 	janus_mutex_lock(&room->mutex);
@@ -3153,40 +3188,9 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			 * active/audible/decode state. Attenuation is item 3; this only drops. */
 			if(mutes[j])
 				continue;
-			/* Item 4 no-geometry fallback: both channel gains equal the scalar gain
-			 * gains[j] (peer gain resolved above; attenuation cannot apply without
-			 * geometry). If the snapshot is invalid the pan below is skipped and these
-			 * values stand — a flat, centred, pre-3b mix. The pan overwrites them only
-			 * when geometry is valid on both sides. */
-			gainsL[j] = gains[j];
-			gainsR[j] = gains[j];
-			if(!s->snap_valid || !sess[j]->snap_valid)
-				continue;
-			double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, sess[j]->snap_sp));
-			if(janus_slvoice_distance_cull_locked(s, disp, dcull, room->tick_seq)) {
+			/* Cull, falloff and pan in one place; a non-spatial room keeps the flat gain (O-80). */
+			if(janus_slvoice_spatial_pair_locked(room, s, sess[j], disp, gains[j], &gainsL[j], &gainsR[j]))
 				mutes[j] = 1;
-			} else if(dcull > slv_spatial.ref_dist) {
-				/* Phase 3b item 3: distance attenuation — the else of the cull, on the
-				 * SAME dcull (no second distance). Non-culled and past the reference:
-				 * normalized falloff, exactly 1 at the reference and exactly 0 at the
-				 * cutoff (the cull owns d >= cutoff). Multiplies into gains[j] — which
-				 * holds 1.0 or the viewer gain — never replaces. Inside the reference:
-				 * full volume, no pow. Mono still; panning is item 4. */
-				double t = (slv_spatial.cutoff_dist - dcull) / (slv_spatial.cutoff_dist - slv_spatial.ref_dist);
-				gains[j] *= (float)pow(t, slv_spatial.falloff_exp);
-			}
-			/* Phase 3b item 4: constant-power azimuth pan. Runs after attenuation, on
-			 * the SAME guard the cull/attenuation use (geometry valid on both sides),
-			 * for sources the cull did NOT drop (mutes[j] still 0). Splits the final
-			 * scalar gains[j] into L/R by the horizontal azimuth of the source in this
-			 * listener's head frame; behind renders centred (Amendment 5). */
-			if(!mutes[j]) {
-				double az = slv_azimuth(s->snap_lp, s->snap_lh, sess[j]->snap_sp);
-				float pl = 1.0f, pr = 1.0f;
-				slv_pan(az, &pl, &pr);
-				gainsL[j] = gains[j] * pl;
-				gainsR[j] = gains[j] * pr;
-			}
 		}
 
 		float frame[SLV_FRAME_TOTAL];
