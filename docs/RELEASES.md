@@ -15,6 +15,84 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer 0.3: visibility authority, fail-closed off (untagged) — 2026-09-15
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 10:06 | `115663b3` | `legion-voice-mixer:rollback-pre-03` (`c7b57f56`, the A.6 image, tagged before the rebuild) |
+
+Phase 0 slice 0.3: the mixer half of `docs/voice/nonspatial-phase0-design.md`, built at `4492dbc`. The design's
+"Amendment 2026-09-15 (slice 0.3, mixer half)" records the mixer as built.
+
+- **Keyed per room by avatar.** Before 0.3, listener policy lived only on each session (fanned out by display,
+  emptied on any room exit). Each room now also holds one arming record per display, shared by that avatar's
+  sessions and kept across a rejoin.
+- **The authority protocol:** `room_epoch` adoption with the takeover rule, `policy_generation` ordering, `base`
+  checks on deltas, and `peer_ctl_heartbeat` (confirm, stale, unarmed, omission, graceful stop, `interval_ms`
+  checked against the window).
+- **`vis_authority` on create.** A room created without it is never enforced.
+- **Two knobs, both defaulting off:** `JS_VIS_FAIL_CLOSED=0` and `JS_VIS_STALE_MS=8000` (raised to 7250 if set
+  lower). See `docs/docker-notes.md` → "Visibility authority (Phase 0, 0.3)".
+- **Shadow counters** `would_silence_listeners`, `would_silence_pairs` and `would_silence_listener_ticks` in
+  `handle_info`, for the 0.6 soak.
+- **Every `peer_ctl_batch` reply advertises `vis_protocol` 2 and `mixer_instance`.**
+
+**Live, fail-closed off (Legion Grid):**
+- **Config:** every generated config file is byte-identical to the pre-0.3 image's
+  (`tests/golden/phase0-knobs-off`), with the knobs unset, at their defaults, and with fail-closed on; the image
+  build ran `entrypoint_test` 140/140.
+- **Start-up lines:** `vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)`;
+  `Visibility authority: vis_protocol 2, mixer_instance 001db974716cce22, JS_VIS_STALE_MS=8000 (minimum 7250)`.
+- **Board:** unchanged from the A.6 container just before the deploy: C1 PASS, C2a WARN, C2b INCONCLUSIVE, C3–C6 PASS;
+  exit 2.
+- **The live sim** (0.2, arming off) re-created Ebony (226001844) and Transylvania (1578726032) with
+  `vis_authority=false`.
+  - The viewer's two re-provisioned sessions came up ("PeerConnection up", data channel open).
+  - Their `handle_info` reads `fail_closed` false, `vis_authority` false, `would_silence_listeners` 0 and
+    `vis_protocol` 2.
+  - The regionserver logged no voice WARN or ERROR after the re-provision, and no authority line.
+  - Not measured: a before/after RTP comparison for that viewer. It was alone and idle, and the old container's
+    counters were not captured.
+- **Secrets:** 0 occurrences of either secret in the container log or state files.
+- **Harness against the deployed mixer:**
+  - S1–S14 13/13 PASS (362 s).
+  - S15 PASS. Its first run failed on a harness bug (`asyncio` not imported), fixed.
+
+**Fail-closed on, scratch container only** (`JS_VIS_FAIL_CLOSED=1`, ports 34223/34225, removed afterwards):
+- **Undeclared rooms with fail-closed on:** S1–S3, S6–S8, S11 and S12 PASS.
+- **Protocol scenarios:**
+  - S17–S20 PASS. S18 was silent 0.05 s after the stopping heartbeat; S20 saw mixer_instance
+    `00088da0b592f48e -> 00195d74db9ff34a`.
+  - S16 PASS: audible 0.09 s after the arming reply, silent 8.05 s after the last heartbeat on the 8.0 s window. Its
+    first run failed on a harness bug (a synchronous probe), fixed.
+- **The real 0.2 sim code against it** (`Tests/WebRtcJanusService.Tests/VisibilityArmingLiveMixerTests.cs`, explicit):
+  - `the mixer advertises vis_protocol 2 (via peer_ctl_batch); heartbeats start, every 1000 ms`;
+  - `arming replace sent for 2 listener(s), 2 with empty columns`;
+  - `first peer_ctl_heartbeat acknowledged: 1 room(s), 2 listener(s)`;
+  - `mixer_instance changed 00195d74db9ff34a -> 00015b4a1e50fe8d (via peer_ctl_heartbeat): the mixer restarted and holds
+    no arming; re-arming every listener in every room`;
+  - `arming replace sent for 2 listener(s) ... (mixer restarted)`.
+  - The mixer logged `2 listener(s) newly armed` before the restart and again after it.
+
+**Pre-0.3 image, scratch container:** S21 PASS. A stamped batch applies as an unstamped one, no `vis_protocol` is
+advertised, and `peer_ctl_heartbeat` is `unknown_request`.
+
+**Unit tests:** `test_visauth` 129/129, and `test_visbatch` 56/56 including the stamp.
+
+### Behaviour changes on upgrade
+
+- `peer_ctl_batch` replies gain `vis_protocol` and `mixer_instance`, after the existing keys. Stamped batches also
+  get the authority keys.
+- `peer_ctl_heartbeat` is answered instead of `unknown_request`.
+- The room-create log line ends `vis_authority=true|false`, and `handle_info` gains keys.
+- With `JS_VIS_FAIL_CLOSED=0` nothing audible or visible changes, and no generated config changes.
+
+### One-time migrations
+
+None.
+
+---
+
 ## Mixer A.6: source addresses, deployment recipes (untagged) — 2026-09-15
 
 | Deployed (CDT) | Image | Rollback tag |

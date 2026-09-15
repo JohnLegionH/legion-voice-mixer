@@ -416,6 +416,46 @@ argument when given, else `debug_level` in the final `janus.jcfg`, mounted overr
 counts as configured from `JS_TURN_REST_API` or from an uncommented `turn_rest_api` in that file. The start line also
 shows `debug_level=N`.
 
+### Visibility authority (Phase 0, 0.3)
+
+The plugin can fail closed (`docs/voice/nonspatial-phase0-design.md`). In a room the sim created with
+`vis_authority`, it can silence a listener or source that the sim never armed, armed under another epoch, or has not
+confirmed within the staleness window.
+
+| Knob | Default | Effect |
+|---|---|---|
+| `JS_VIS_FAIL_CLOSED` | `0` | `0` is shadow mode (below). `1` enforces the rule in rooms created with `vis_authority`, and never in any other room |
+| `JS_VIS_STALE_MS` | `8000` | how long a listener stays fresh without a confirmation. Below 7250 it is raised to 7250 with a WARN |
+
+**Shadow mode (`0`, the default): everything is tracked and nothing is refused.** Every batch applies exactly as
+before, and joins, the mix, presence, the roster and dots are unchanged. What does change:
+- every `peer_ctl_batch` reply carries `vis_protocol: 2` and `mixer_instance`, a random id per process, after its
+  existing keys;
+- the plugin answers `peer_ctl_heartbeat` instead of `unknown_request`;
+- the room-create log line ends `vis_authority=true|false`;
+- `handle_info` → `plugin_specific.visibility` gains the authority keys, and `plugin_specific` gains `vis_row`.
+
+**The soak counters**, in `plugin_specific.visibility`:
+- `would_silence_listeners` and `would_silence_pairs` are what fail-closed would silence at the last mix tick;
+- `would_silence_listener_ticks` sums the listener count over every tick, so a poller still sees a brief window it
+  missed;
+- they count only rooms created with `vis_authority`. In steady state they read 0; a joiner is counted until its
+  arming lands.
+
+**Start-up lines.**
+- The entrypoint: `vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)`.
+- The plugin: `Visibility authority: vis_protocol 2, mixer_instance <16 hex digits>, JS_VIS_STALE_MS=8000 (minimum
+  7250)`, then `fail-closed DISABLED (shadow mode)` or `fail-closed ENABLED`.
+- With fail-closed on, each room created without `vis_authority` logs `fail-closed enabled but room <id> has no
+  vis_authority: NOT enforced` once.
+
+**Before setting `1`.**
+- Ledger O-88 must be closed. Nothing arms connector peers or recorder taps yet, so they would be silent.
+- The sim must be arming (`[WebRtcVoice] VisibilityArmingEnabled`).
+- The 0.6 shadow soak must have passed.
+
+Rollback is `JS_VIS_FAIL_CLOSED=0` and a container recreate. The sim needs no change.
+
 ## Configuration compatibility rule
 
 Rebuilding or pulling a new image onto an existing `.env` must not silently change
@@ -479,6 +519,8 @@ its knobs have no "before".
 | `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD` | *(unset)*: no TURN; the generated `janus.jcfg` is byte-identical | no TURN configurable from `.env` (only a mounted `janus.jcfg`) | slice A.3 |
 | `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` | *(unset)*: no TURN REST | as above | slice A.3 |
 | `JS_ICE_DIAG_HISTORY` | `200` | no session diagnostics, and Janus's event broadcast off. The default adds diagnostics only: Janus events to a loopback collector, and a `handle_info` poll every 2 s per live session. Nothing about media is configured or blocked. `0` restores the old behaviour, with `janus.jcfg` byte-identical | slice A.5 |
+| `JS_VIS_FAIL_CLOSED` | `0` (shadow mode) | no visibility authority: an empty exclusion set meant "hear everyone" whether or not the sim had spoken. `0` keeps that exactly: the plugin tracks arming, epochs and staleness in rooms created with `vis_authority`, counts `would_silence_*`, and changes nothing audible. `1` silences unarmed or stale listeners and sources in those rooms only. **Do not set `1` while ledger O-88 is open.** Environment only: every generated config file is byte-identical either way | slice 0.3 (`4492dbc`) |
+| `JS_VIS_STALE_MS` | `8000` | n/a (no staleness window). Values below 7250 (2 × the sim's 1000 ms heartbeat + 5000 ms admin timeout + 250 ms) are raised to 7250 with a WARN | slice 0.3 (`4492dbc`) |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 

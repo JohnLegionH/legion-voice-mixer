@@ -7,6 +7,7 @@ plugin's list / listparticipants) with a bounded timeout; nothing sleeps blindly
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -568,7 +569,7 @@ async def s16_fail_closed_decision_table(ctx: Ctx) -> None:
     await ctx.until_info(a, _audible, "new-epoch arming makes A audible")
 
 
-def _count(xs) -> int:
+async def _count(xs) -> int:
     return len(xs or [])
 
 

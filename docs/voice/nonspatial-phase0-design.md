@@ -40,6 +40,76 @@ than the brief assumed.
 3. **Citation drift.** The mixer reports `last_batch_age_ms` at `src/janus_slvoice.c:1512` at mixer `ce792a7`
    (§0.2 and §8 item 11 give `:1497-1498` at `69444f0`; ledger O-78 gave `:1475`).
 
+### Amendment 2026-09-15 (slice 0.3, mixer half)
+
+Built at mixer `4492dbc`. Where this section and the body below differ, this section describes the mixer as built.
+
+1. **Keying, as found: per session.** Before 0.3 a listener's policy lived on each session, fanned out by display.
+   - `excluded` and `mod_muted` are sets on each session.
+   - Every batch entry is merged into each session whose display matches.
+   - Any room exit empties the sets (`janus_slvoice_reset_room_state_locked`).
+   - The room held only the deferred store (by display, until the listener joins) and `vis_epoch`, a count of
+     applied batches.
+2. **Keying, as built: per room by avatar.** Each room holds one record per display (`vis_records`).
+   - **Contents:** the epoch that armed it, its `listener_generation`, its last confirmation, a stale mark, and the
+     columns the current authority set.
+   - **Shared:** every session with that display follows the one record, and it survives a leave and a rejoin.
+   - **Removed by:** a new epoch, a heartbeat that omits the display, or the room's destruction.
+   - The per-session sets are unchanged.
+3. **Pre-join arming (§2, §8 item 3) needs no deferred-store change.**
+   - The record exists whether or not the listener has joined, so an empty arming `replace` for an absent listener is
+     kept by the record, and the joiner is armed from its join.
+   - The deferred store still drops a record whose two columns are empty, because arming no longer rides it.
+   - The epoch check at join is the record's own: adopting a new epoch removes every record.
+4. **Open question 2, decided for fail-closed only.**
+   - **Under fail-closed:** a session that joins with an armed display takes the record's columns, and anything
+     deferred for that display is dropped as superseded. A reconnect is then audible at once (§7.4) without hearing
+     what its policy excludes.
+   - **With fail-closed off:** a join is exactly as before (harness S3 asserts a rejoin starts with empty sets).
+   - The sets are not moved onto the record, because that would change knob-off behaviour.
+5. **Shadow mode means every check runs and nothing is refused.**
+   - With `JS_VIS_FAIL_CLOSED=0`, and in any room without `vis_authority`, every batch is applied exactly as before.
+     That includes a lower epoch, an out-of-order `policy_generation` (§1.2) and an add/remove whose `base` does not
+     match (§1.3).
+   - The checks still run, update the records only when they pass, and are reported (`status`, `stale_generation`,
+     `stale_listeners`). This follows §6.1: "audio behaves exactly as today".
+   - The refusals in §1.2 and §1.3 apply only under fail-closed in a declared room.
+6. **Row 2 does not occur in the mixer.**
+   - Adopting a new epoch, or a takeover, removes every record, so no record from another epoch is left to evaluate.
+   - Such a listener stands in row 1, with the same outcome: silence.
+   - Row 2 is unit-tested on the rule itself (`src/visauth.h`, `slv_vis_row`).
+7. **Rejected heartbeats.**
+   - A malformed heartbeat is answered `{slvoice:"error", reason:"malformed"}`, with `vis_protocol` and
+     `mixer_instance`.
+   - So is one whose `interval_ms` needs a window above `JS_VIS_STALE_MS` (`2 × interval + 5000 + 250`), with
+     `reason:"interval_too_long"`.
+   - The 0.2 sim reads a non-heartbeat reply as "not heartbeat-capable" and stops heartbeating. Under fail-closed its
+     rooms then go silent: loud, not quietly unenforced.
+8. **Replies as built.**
+   - Every `peer_ctl_batch` reply (applied, empty or error) gains `vis_protocol` 2 and `mixer_instance`, appended
+     after the existing keys.
+   - A stamped batch also gets `status`, `authority_epoch`, `policy_generation`, `stale_listeners` and
+     `unarmed_listeners`.
+   - A refused one is `{slvoice:"error", reason:"stale_epoch"|"stale_generation"}`.
+   - An unknown request is answered as before.
+9. **Observability as built** (additive `query_session` keys).
+   - **Per room:** `vis_protocol`, `mixer_instance`, `fail_closed`, `stale_ms`, `vis_authority`, `enforced`,
+     `authority_epoch`, `policy_generation`, `authority_age_ms`, `armed_listeners`, `would_silence_listeners`,
+     `would_silence_pairs`, `heartbeats`, `stale_epoch_rejects`, `stale_generation_rejects`, `records_full`.
+   - **Also per room:** `would_silence_listener_ticks`, the listener gauge summed over every tick, so a soak that
+     polls cannot miss a sub-second window.
+   - **Per session:** `vis_row`; when armed, `vis_listener_generation`, `vis_confirmed_age_ms` and `vis_stale`.
+   - The would_silence counts cover only rooms created with `vis_authority`, with fail-closed on or off.
+10. **Skew as built.**
+    - **Old sim, new mixer:** no stamp, no `vis_authority`, no heartbeat. Rooms are undeclared, nothing is counted or
+      enforced, and batches apply as before. The only wire change is the two reply keys, which the old sink ignores.
+    - **New sim (0.2), old mixer:** the old parser ignores `room_epoch`, `policy_generation`, `base` and
+      `vis_authority`, so batches and creates apply as unstamped ones. Old replies carry no `vis_protocol`, so the
+      0.2 sim never heartbeats; a heartbeat would get `unknown_request`.
+    - Neither degrades to silence. Harness S21 checks the second against `legion-voice-mixer:rollback-pre-03`.
+11. **O-88 is unchanged.** 0.3 builds the knob. Nothing arms connector peers or recorder taps, so
+    `JS_VIS_FAIL_CLOSED` stays 0 until O-88's design is built (§6.4 steps 3 and 4).
+
 ---
 
 ## 0. The mechanism today
