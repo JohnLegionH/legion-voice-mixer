@@ -12,9 +12,33 @@ Every `path:line` below was read at those commits.
 **Goal:** the mixer must be able to fail closed. It has to tell "this listener may hear everyone" from
 "the sim never said anything about this listener", and act on the difference.
 
-**Open question 3 (§10) must be settled before 0.2 starts.** Whether an avatar's sessions share one
-arming record is settled here (§1, §7.4). Open question 3 is how connector peers and recorder taps get
-armed. §8 flags the other things that make the design harder than the brief assumed.
+**Open question 3 (§10) is DEFERRED, not decided (amended 2026-09-15, slice 0.2).** Whether an avatar's
+sessions share one arming record is settled here (§1, §7.4). Open question 3 is how connector peers and
+recorder taps get armed; see the amendment below. §8 flags the other things that make the design harder
+than the brief assumed.
+
+### Amendment 2026-09-15 (slice 0.2, sim half)
+
+1. **Connector peers and recorder taps: DEFERRED, not decided.** *(Ledger O-88.)*
+   - **What 0.2 does:** Phase 0 arms avatars only (the scene presences holding a voice session, §0.1
+     "Population").
+   - **The settled position:** connector peers and recorder taps ARE armed, not exempted. The recorder is the
+     most privacy-sensitive participant in the system, and the one peer writing audio to disk must not be the one
+     with no authority behind it.
+   - **Why 0.2 stops short:** arming them is UNDESIGNED. It needs detail this document does not give: which display
+     a connector uses, which room, and how a recorder tap differs. Inventing that inside 0.2 would build on
+     guesses, so this is a scope boundary, not a reversal.
+   - **Gate:** `JS_VIS_FAIL_CLOSED` must not be enabled until that design exists and is built. Under fail-closed
+     an unarmed peer is silent. That is the safe outcome for a recorder tap and the WRONG outcome for a connector
+     NPC someone expects to hear.
+   - **Enforcement:** the 0.6 shadow soak checks the gate explicitly (§6.4 step 3), not through this note.
+2. **The sim has its own knob, contrary to §6.1.** 0.2 is gated by `[WebRtcVoice] VisibilityArmingEnabled`,
+   default **false**, rather than riding `VisibilityEmitEnabled`. That key already defaults to true (V-1) and is
+   true on Legion Grid (`config/OpenSim.ini:141`), so riding it would have changed the wire on deploy. With the
+   knob off, the payloads and the room-create body are byte-identical to before 0.2
+   (`Tests/WebRtcJanusService.Tests/VisibilityKnobOffGoldenTests.cs`, golden captured from `2fa978c254`).
+3. **Citation drift.** The mixer reports `last_batch_age_ms` at `src/janus_slvoice.c:1512` at mixer `ce792a7`
+   (§0.2 and §8 item 11 give `:1497-1498` at `69444f0`; ledger O-78 gave `:1475`).
 
 ---
 
@@ -408,7 +432,9 @@ The value to record in the config register is `[JanusWebRtcVoice] AdminTimeoutMs
 | `JS_VIS_FAIL_CLOSED` | mixer env (exported by the entrypoint like `JS_EMPTY_ROOM_GRACE_S`) | **`0`, DISABLED** | `1` enforces §4 in declared rooms. `0` is shadow mode: all state is kept and counted, and audio behaves exactly as today. |
 | `JS_VIS_STALE_MS` | mixer env | `8000` | Staleness window (§5). Clamped to the constraint. |
 
-The sim needs no new enable knob: 0.2's behaviour rides `VisibilityEmitEnabled`. The heartbeat interval is
+~~The sim needs no new enable knob: 0.2's behaviour rides `VisibilityEmitEnabled`.~~ **Superseded
+2026-09-15:** the sim has `[WebRtcVoice] VisibilityArmingEnabled`, default **false** (see the amendment at the
+top). The spatial-room `vis_authority` declaration (§6.2) follows the same key. The heartbeat interval is
 a sim constant (1000 ms). Promote it to `[WebRtcVoice] VisibilityHeartbeatMs` only if the config register
 rules require it. The mixer must reject an `interval_ms` that breaks the §5 constraint.
 
@@ -451,10 +477,14 @@ The mixer logs once per room when the knob is on and a room is undeclared:
 
 1. Mixer slice live, **knob off**. It can go before or after the sim: shadow mode is inert.
 2. **Sim 0.2 live:** arming, epochs, generations, heartbeats, `vis_authority`, acting on replies.
-3. **Soak:** with real traffic, `would_silence_listeners` stays 0 in steady state. It may be non-zero only
-   in the sub-second window between a join and its arming, and around restarts.
+3. **Soak (slice 0.6):** with real traffic, `would_silence_listeners` stays 0 in steady state. It may be
+   non-zero only in the sub-second window between a join and its arming, and around restarts. **The soak also
+   checks the connector/recorder gate explicitly (ledger O-88), as a pass/fail step, not a note:** list every
+   connector peer and recorder tap in a declared room and its arming state. The soak fails, and step 4 is
+   blocked, while any of them is unarmed, or while the connector/recorder arming design (amendment item 1) is
+   not built.
 4. Enable `JS_VIS_FAIL_CLOSED=1` (a mixer recreate, which is John's). **Never enable it before step 2 is
-   live.**
+   live, and never while O-88 is open.**
 
 **Rollback:** set the knob to 0. No sim change is needed.
 
@@ -655,8 +685,10 @@ oracle (`last_mix_rms`), with a test tone as the source.
    region moved between two sim processes, or does a move need an explicit release?
 2. **Move the sets?** Should the per-session `excluded`/`mod_muted` sets move onto the room-level record
    (one copy per display)? Recommended, since fan-out already treats them as one.
-3. **Connector peers and recorder taps.** Should they be armed by the sim (the connector module already
-   reaches the service, `WebRtcVoiceRegionModule.cs:262-266`), or be exempt per session? An exemption is a
-   fail-open hole and needs its own authority.
+3. **Connector peers and recorder taps. DEFERRED 2026-09-15 (ledger O-88).** Settled in principle: they are
+   ARMED, not exempted (an exemption is a fail-open hole, and the recorder is the most privacy-sensitive
+   participant). UNDESIGNED: which display a connector uses, which room, how recorder taps differ. The connector
+   module already reaches the service (`WebRtcVoiceRegionModule.cs:262-266`). Phase 0 arms avatars only.
+   `JS_VIS_FAIL_CLOSED` stays off until this is designed and built, and the 0.6 soak checks it (§6.4 step 3).
 4. **A2A rooms.** They stay undeclared. Fail-closed for A2A needs the invitation registry to become an
    authority, which is a later phase.
