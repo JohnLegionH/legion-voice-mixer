@@ -1,0 +1,54 @@
+# Configuration for the janus.plugin.slvoice spatial voice mixer.
+#
+# Rooms are DYNAMIC: the OpenSim C# side creates them at runtime with the
+# audiobridge-compatible `create`/`join` requests, and the plugin destroys an
+# empty one after JS_EMPTY_ROOM_GRACE_S. This file is optional; the plugin runs
+# with no config at all.
+#
+# The file uses the same libconfig/jcfg format as the stock Janus plugins.
+
+general: {
+	# Diagnostic: auto-enable echo (participant hears itself ~500ms delayed) as soon
+	# as its PeerConnection is up, so a stock viewer that can't send the
+	# {"echo":true} SLData toggle still gets echo. Default false. Under the Docker
+	# model the SLV_ECHO_AUTOSTART env var (add it to .env) is the easier knob and
+	# overrides this. See docs/phase1-bringup.md (CHECK 2).
+	#echo_autostart = false
+
+	# ---- Spatial DSP tuning (Amendment 8) --------------------------------------
+	# Process-wide overrides for the Phase 3b spatial constants. All are OPTIONAL:
+	# an absent key uses the compiled default shown, so leaving this whole section
+	# out is byte-identical to a stock build. Distances are in METRES (the plugin
+	# converts to its internal unit once at load). The five are validated together
+	# and applied all-or-nothing — if any value is invalid the plugin logs the
+	# offending constraint and keeps ALL defaults. Constraints: every distance > 0;
+	# reference < cutoff and re-add < cutoff; exponent > 0.
+	#
+	#spatial_reference_distance_m = 10.0   # full volume within this radius (metres)
+	#spatial_cutoff_distance_m    = 60.0   # a source beyond this is culled (metres)
+	#spatial_readd_distance_m     = 58.0   # hysteresis re-add; must be < cutoff (metres)
+	#spatial_leash_distance_m     = 50.0   # §7.1 camera-leash radius (metres)
+	#spatial_falloff_exp          = 2.0    # attenuation shaping exponent (dimensionless, > 0)
+}
+
+# ---- Optional static rooms -------------------------------------------------
+# Rooms are normally created dynamically, but you may pre-declare a room here.
+# Any category (other than `general`) that has a `room` key is loaded as a
+# permanent room at startup. Example:
+#
+#room-100: {
+#	room = 100                     # numeric room id (matches the C# CalcRoomNumber)
+#	description = "Test Region"
+#	sampling_rate = 48000          # advertised in `list`; internal mix is always 48k
+#	is_private = false             # if true, hidden from `list`
+#	spatial_audio = true           # absent or true = distance cull, falloff and pan; false/no = a flat mix (O-80, O-83)
+#}
+
+# ---- Notes -----------------------------------------------------------------
+# Echo (a per-participant diagnostic) is toggled over the WebRTC data channel
+# via an {"echo": true} / {"echo": false} SLData message, NOT from this file.
+# See docs/sldata-extensions.md.
+#
+# The spatial tuning above is process-wide; there are no per-room spatial
+# settings. Extensions to the message protocol are added as NEW fields only —
+# see docs/protocol-compat.md.

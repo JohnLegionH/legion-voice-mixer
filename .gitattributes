@@ -11,3 +11,7 @@ Makefile text eol=lf
 Dockerfile text eol=lf
 *.jcfg  text eol=lf
 *.yml   text eol=lf
+
+# Byte-exact captures of generated config (slice 0.3's knobs-off golden). The stock Janus transport templates carry
+# CRLF lines and the entrypoint copies them as they are, so these files must never be normalised.
+tests/golden/phase0-knobs-off/** -text

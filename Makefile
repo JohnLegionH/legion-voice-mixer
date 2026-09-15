@@ -94,6 +94,8 @@ BENCH_LIBS         := $(PKG_LIBS) -pthread -Wl,--unresolved-symbols=ignore-all
 # unlike bench_tick it IS a unit test and runs in `make test`.
 TEST_LIFECYCLE_BIN  := tests/test_room_lifecycle
 TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
+TEST_VISAUTH_BIN  := tests/test_visauth
+TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
 TEST_CFLAGS  := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
 TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 # roster.h is glib-only (no jansson/Janus); its test links glib.
@@ -122,7 +124,7 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
@@ -132,6 +134,12 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BI
 	./$(TEST_PAN_BIN)
 	./$(TEST_LIFECYCLE_BIN)
 	./$(TEST_REDACT_BIN)
+	./$(TEST_VISAUTH_BIN)
+
+# test_visauth: Phase 0 slice 0.3 (keying, the decision table, staleness, replies, shadow counters). Like
+# test_room_lifecycle it #includes janus_slvoice.c and builds with the bench flags.
+$(TEST_VISAUTH_BIN): $(TEST_VISAUTH_SRCS) src/janus_slvoice.c src/visauth.h
+	$(CC) $(BENCH_CFLAGS) -o $@ $(TEST_VISAUTH_SRCS) $(BENCH_LIBS)
 
 $(TEST_REDACT_BIN): $(TEST_REDACT_SRCS) src/sdp_redact.h
 	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_REDACT_SRCS)
@@ -176,4 +184,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(BENCH_TICK_BIN)

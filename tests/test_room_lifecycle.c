@@ -94,7 +94,7 @@ static void join_room(janus_slvoice_room *room, janus_slvoice_session *s, guint6
 }
 
 static janus_slvoice_room *add_room_ex(guint64 id, gboolean permanent, gboolean spatial) {
-	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, spatial, permanent);
+	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, spatial, permanent, FALSE);
 	if(room == NULL) {
 		fprintf(stderr, "test_room_lifecycle: room_create(%" PRIu64 ") failed\n", id);
 		exit(2);
@@ -370,12 +370,12 @@ static void test_dot_batch_filter(void) {
 		"src-heard", "p", 40, "v", 1, "src-modmuted", "p", 40, "v", 1, "src-muted", "p", 40, "v", 1,
 		"src-culled", "p", 40, "v", 1, "src-excluded", "p", 40, "v", 1);
 
-	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark) == NULL,
+	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark, TRUE, NULL) == NULL,
 		"dots: nothing excluded, muted or culled, so the listener gets the shared batch");
 
 	/* Moderation mute on its own. */
 	g_hash_table_add(l->mod_muted, g_strdup("src-modmuted"));
-	json_t *f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	json_t *f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark, TRUE, NULL);
 	CHECK(f != NULL && dot_p(f, "src-modmuted") == 0 && !dot_v(f, "src-modmuted"),
 		"dots: a moderation-muted source reports no power to that listener");
 	CHECK(f != NULL && dot_p(f, "src-heard") == 40 && dot_v(f, "src-heard") && dot_p(f, "src-culled") == 40,
@@ -392,14 +392,14 @@ static void test_dot_batch_filter(void) {
 	room->tick_seq = 7;
 	float gl = 0.0f, gr = 0.0f;
 	CHECK(janus_slvoice_spatial_pair_locked(room, l, far, far->display, 1.0f, &gl, &gr), "dots: the far source is culled at tick 7");
-	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark, TRUE, NULL);
 	CHECK(f != NULL && dot_p(f, "src-culled") == 0 && !dot_v(f, "src-culled"),
 		"dots: a source distance-culled for that listener reports no power to it");
 	CHECK(f != NULL && dot_p(f, "src-heard") == 40 && dot_p(f, "src-modmuted") == 40,
 		"dots: the other sources are unchanged beside a cull");
 	json_decref(f);
 	room->tick_seq = 8;
-	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark) == NULL,
+	CHECK(janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark, TRUE, NULL) == NULL,
 		"dots: a cull latch the last tick did not re-evaluate does not darken the dot");
 
 	/* A personal mute darkens; an exclusion still omits. */
@@ -407,7 +407,7 @@ static void test_dot_batch_filter(void) {
 	l->peer_ctl[0].muted = TRUE;
 	l->n_peer_ctl = 1;
 	g_hash_table_add(l->excluded, g_strdup("src-excluded"));
-	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark);
+	f = janus_slvoice_dot_batch_for_listener_locked(room, l, batch, dark, TRUE, NULL);
 	CHECK(f != NULL && dot_p(f, "src-muted") == 0 && !dot_v(f, "src-muted"),
 		"dots: a source the listener muted reports no power to it");
 	CHECK(f != NULL && json_object_get(f, "src-excluded") == NULL && dot_p(f, "src-heard") == 40,

@@ -50,6 +50,9 @@ def parse_args(argv):
                    help="S13: coturn shared secret; credentials are derived as a TURN REST API would")
     p.add_argument("--turn-user", default="", help="S13: static TURN username (instead of --turn-secret)")
     p.add_argument("--turn-pwd", default="", help="S13: static TURN password")
+    p.add_argument("--container", default="",
+                   help="S17/S20: a mixer started with `docker run` (the 0.3 fail-closed scratch mixer): read its logs "
+                        "and restart it by this container name instead of the compose service")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
 
@@ -80,6 +83,7 @@ async def main_async(args) -> int:
         turn_uri=args.turn_uri,
         turn_user=turn_user,
         turn_pwd=turn_pwd,
+        container=args.container,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}

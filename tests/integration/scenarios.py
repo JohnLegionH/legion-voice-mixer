@@ -13,8 +13,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Skip, compose, displays,
-                                       fields, new_display, pick, until, wait_mixer_up)
+from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, compose, displays,
+                                       fields, mixer_logs, mixer_restart, new_display, pick, until, wait_mixer_up)
 from tests.integration.source_probe import own_candidates, parse_pair, verdict
 
 
@@ -408,6 +408,360 @@ async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
                     "path": path})
 
 
+# ---- Phase 0 slice 0.3: the visibility authority (docs/voice/nonspatial-phase0-design.md §9) -------------------------
+# The harness is the sim here: it declares rooms, arms, heartbeats and reads the replies. S15 needs a mixer with
+# fail-closed OFF (the shipped default), S16-S20 one with it ON (a scratch mixer, never the live grid's), and S21 a
+# pre-0.3 image; each skips on the wrong mixer, so one full run proves which mode it ran against.
+
+_epoch_base = (int(time.time() * 1000) << 16) | 0x5a00
+
+
+def _epoch(n: int) -> str:
+    """The n-th authority epoch of this run, as the sim formats it (16 lowercase hex digits); larger n is newer."""
+    return "%016x" % (_epoch_base + n)
+
+
+def _vis(info) -> dict:
+    return (info or {}).get("visibility") or {}
+
+
+def _audible(info) -> bool:
+    return (info.get("last_mix_rms") or 0.0) > 0.01
+
+
+def _silent(info) -> bool:
+    return info.get("last_mix_rms") == 0.0
+
+
+async def _mode(ctx: Ctx, peer, want_fail_closed: bool) -> dict:
+    """The mixer's Phase 0 mode from the peer's handle_info; Skip when it is not the mode this scenario needs."""
+    info = await ctx.until_info(peer, lambda i: isinstance(i.get("visibility"), dict), f"{peer.name} reports a visibility block")
+    vis = _vis(info)
+    if "fail_closed" not in vis:
+        raise Skip("the mixer reports no visibility authority (a pre-0.3 image)")
+    if vis["fail_closed"] is not want_fail_closed:
+        raise Skip(f"this scenario needs JS_VIS_FAIL_CLOSED={1 if want_fail_closed else 0}; the mixer reports "
+                   f"fail_closed={vis['fail_closed']}")
+    return vis
+
+
+async def _hold(ctx: Ctx, peer, pred, what: str, seconds: float) -> None:
+    """pred holds at every poll for `seconds` (a continuous check, not a blind sleep)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        info = await ctx.info(peer)
+        if info is None or not pred(info):
+            raise Fail(what, pick(info))
+        await asyncio.sleep(0.1)
+
+
+def _check_reply(reply: dict, what: str, **expect) -> None:
+    for key, want in expect.items():
+        if reply.get(key) != want:
+            raise Fail(what, reply)
+
+
+async def _declared_pair(ctx: Ctx, declared: bool = True):
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=declared)
+    a = await ctx.join("A", r)   # the listener
+    b = await ctx.join("B", r)   # the talking source
+    await ctx.ready(a, b)
+    return r, a, b
+
+
+async def s15_shadow_mode(ctx: Ctx) -> None:
+    """Fail-closed OFF: the full protocol against a declared room changes nothing audible, and would_silence counts."""
+    r, a, b = await _declared_pair(ctx)
+    vis = await _mode(ctx, a, want_fail_closed=False)
+    if vis.get("vis_authority") is not True or vis.get("enforced") is not False:
+        raise Fail("a room created with vis_authority reports vis_authority true and enforced false", vis)
+    await ctx.until_info(a, _audible, "never armed: A hears B's tone, exactly as before (shadow mode)")
+    await ctx.until_info(a, lambda i: _vis(i).get("would_silence_listeners") == 2 and _vis(i).get("would_silence_pairs") == 2
+                         and i.get("vis_row") == 1, "never armed: would_silence_listeners 2, would_silence_pairs 2, A in row 1")
+
+    old = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []})
+    if old.get("slvoice") != "applied" or old.get("vis_protocol") != 2 or not re.fullmatch(r"[0-9a-f]{16}", old.get("mixer_instance") or "") \
+            or "status" in old:
+        raise Fail("an unstamped (old-sim) batch is applied; the reply advertises vis_protocol 2 and a mixer_instance, no status", old)
+
+    e1 = _epoch(1)
+    armed = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                           mute={a.display: [], b.display: []}, epoch=e1, generation=1)
+    _check_reply(armed, "the arming replace: applied, status ok, authority_epoch E1, policy_generation 1",
+                 slvoice="applied", status="ok", authority_epoch=e1, policy_generation=1)
+    hb = await ctx.admin.heartbeat(e1, {r: {"policy_generation": 1, "listeners": {a.display: 1, b.display: 1}}})
+    room = (hb.get("rooms") or {}).get(str(r)) or {}
+    if hb.get("slvoice") != "heartbeat" or hb.get("vis_protocol") != 2 or hb.get("mixer_instance") != old.get("mixer_instance") \
+            or room.get("status") != "ok" or room.get("unarmed_listeners") or room.get("stale_listeners"):
+        raise Fail("a matching heartbeat: status ok, nothing stale or unarmed, the same mixer_instance", hb)
+    await ctx.until_info(a, lambda i: _vis(i).get("would_silence_listeners") == 0 and _vis(i).get("would_silence_pairs") == 0
+                         and i.get("vis_row") == 4, "armed: would_silence 0 and A in row 4")
+    await ctx.until_info(a, _audible, "armed: A still hears B")
+
+    e2 = _epoch(2)
+    hb = await ctx.admin.heartbeat(e2, {r: {"policy_generation": 1, "listeners": {a.display: 1, b.display: 1}}})
+    room = (hb.get("rooms") or {}).get(str(r)) or {}
+    if sorted(room.get("unarmed_listeners") or []) != sorted([a.display, b.display]) or room.get("authority_epoch") != e2:
+        raise Fail("a new-epoch heartbeat lists both unarmed and reports E2", hb)
+    await ctx.until_info(a, lambda i: _vis(i).get("would_silence_listeners") == 2, "disarmed by E2: counted again")
+    await _hold(ctx, a, _audible, "disarmed in shadow mode: A keeps hearing B", 1.5)
+    excl = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e2, generation=1)
+    _check_reply(excl, "an exclusion replace in E2 is applied", slvoice="applied", status="ok")
+    await ctx.until_info(a, _silent, "the exclusion silences B for A, as before")
+
+
+async def s16_fail_closed_decision_table(ctx: Ctx) -> None:
+    """Fail-closed ON: rows 1, 3 and 4 and the pair rule, heard; heartbeats keep policy fresh; the window; recovery; a new
+    epoch neither revalidates nor blocks re-arming."""
+    r, a, b = await _declared_pair(ctx)
+    vis = await _mode(ctx, a, want_fail_closed=True)
+    stale_s = (vis.get("stale_ms") or 8000) / 1000.0
+
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 1, "row 1: A, unarmed, has an exactly silent mix")
+    a.dots.clear()
+    await until(lambda: _count(a.dots.get(a.display)), lambda n: n >= 10, "A receives 10 power batches while unarmed")
+    if b.display in a.dots or any(d == b.display for d, _ in a.presence):
+        raise Fail("row 1: A gets no power or presence entry for B", {"dots_for_B": a.dots.get(b.display), "presence": a.presence})
+
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {a.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []}, epoch=e1, generation=1),
+                 "arming A", slvoice="applied", status="ok")
+    await ctx.until_info(a, lambda i: i.get("vis_row") == 4, "A armed: row 4")
+    await _hold(ctx, a, _silent, "pair rule: armed A does not hear unarmed B", 1.5)
+
+    armed_at = time.monotonic()
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={b.display: []}, mute={b.display: []}, epoch=e1, generation=2),
+                 "arming B", slvoice="applied", status="ok")
+    hb.listeners = {a.display: 1, b.display: 2}
+    await ctx.until_info(a, _audible, "row 4: A hears B once both are armed")
+    print(f"      S16 info: audible {time.monotonic() - armed_at:.2f} s after B's arming reply (poll-limited)", flush=True)
+    await until(lambda: _joined(a, b.display), lambda ok: ok, "row 4: A gets B's join presence")
+
+    await _hold(ctx, a, _audible, "heartbeats alone keep A audible (10 s, no batches)", 10.0)
+
+    last = await hb.pause()
+    until_s = last + stale_s - 1.0
+    await _hold(ctx, a, _audible, f"window: still audible {stale_s - 1.0:.1f} s after the last heartbeat", max(0.0, until_s - time.monotonic()))
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 3, "row 3: silent once the window has passed",
+                         timeout=max(1.0, last + stale_s + 1.0 - time.monotonic()))
+    print(f"      S16 info: silent {time.monotonic() - last:.2f} s after the last heartbeat (window {stale_s:.1f} s)", flush=True)
+    await until(lambda: _left(a, b.display), lambda ok: ok, "row 3: A gets B's leave presence")
+
+    hb.resume()
+    await ctx.until_info(a, _audible, "recovery: resumed heartbeats make A audible again without a new arming")
+
+    await hb.stop()
+    e2 = _epoch(2)
+    reply = await ctx.admin.heartbeat(e2, {r: {"policy_generation": 2, "listeners": {a.display: 1, b.display: 2}}})
+    room = (reply.get("rooms") or {}).get(str(r)) or {}
+    if a.display not in (room.get("unarmed_listeners") or []) or room.get("authority_epoch") != e2:
+        raise Fail("a new-epoch heartbeat at matching generations lists A unarmed and reports E2", reply)
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 1, "a new-epoch heartbeat does not revalidate: A silent")
+    hb2 = Heartbeater(ctx.admin, e2, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb2)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                                mute={a.display: [], b.display: []}, epoch=e2, generation=1),
+                 "arming in E2", slvoice="applied", status="ok", authority_epoch=e2)
+    await ctx.until_info(a, _audible, "new-epoch arming makes A audible")
+
+
+def _count(xs) -> int:
+    return len(xs or [])
+
+
+async def _joined(peer, display: str) -> bool:
+    return (display, "j") in peer.presence
+
+
+async def _left(peer, display: str) -> bool:
+    return (display, "l") in peer.presence
+
+
+async def s17_fail_closed_undeclared_room(ctx: Ctx) -> None:
+    """Fail-closed ON: a room created without vis_authority is not enforced, and the mixer says so once."""
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r, a, b = await _declared_pair(ctx, declared=False)
+    vis = await _mode(ctx, a, want_fail_closed=True)
+    if vis.get("vis_authority") is not False or vis.get("enforced") is not False:
+        raise Fail("an undeclared room reports vis_authority false and enforced false", vis)
+    await ctx.until_info(a, _audible, "undeclared: A hears B with no arming and no heartbeat")
+    await _hold(ctx, a, lambda i: _audible(i) and _vis(i).get("would_silence_listeners") == 0, "undeclared: audible, nothing counted", 2.0)
+    logs = await mixer_logs(ctx.cfg, since)
+    line = f"fail-closed enabled but room {r} has no vis_authority: NOT enforced"
+    if logs.count(line) != 1:
+        raise Fail(f"the mixer logs '{line}' exactly once", {"count": logs.count(line)})
+
+
+async def s18_fail_closed_epochs_base_omission_stop(ctx: Ctx) -> None:
+    """Fail-closed ON: a lower epoch is refused while fresh; delta base checks; omission disarms; a graceful stop silences
+    at once; a lower epoch then takes over."""
+    r, a, b = await _declared_pair(ctx)
+    await _mode(ctx, a, want_fail_closed=True)
+    e1, e2 = _epoch(1), _epoch(2)
+    hb = Heartbeater(ctx.admin, e2, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                                mute={a.display: [], b.display: []}, epoch=e2, generation=1),
+                 "arming in E2", status="ok")
+    await ctx.until_info(a, _audible, "armed in E2: A hears B")
+
+    lower = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e1, generation=9)
+    _check_reply(lower, "a lower epoch while E2 is fresh: refused as stale_epoch", slvoice="error", reason="stale_epoch",
+                 status="stale_epoch", authority_epoch=e2)
+    await _hold(ctx, a, lambda i: _audible(i) and _vis(i).get("authority_epoch") == e2, "stale_epoch changed nothing", 1.0)
+
+    bad = await ctx.admin.peer_ctl_batch(r, "add", excl={a.display: [b.display]}, epoch=e2, generation=2, base={a.display: 99})
+    if bad.get("slvoice") != "applied" or a.display not in (bad.get("stale_listeners") or []):
+        raise Fail("an add with a wrong base lists A in stale_listeners", bad)
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 3 and i.get("excluded_entries") == 0,
+                         "base mismatch: A's entry not applied, A silenced")
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []}, epoch=e2, generation=3),
+                 "re-arming A", status="ok")
+    hb.listeners = {a.display: 3, b.display: 1}
+    await ctx.until_info(a, _audible, "re-armed: A audible")
+    good = await ctx.admin.peer_ctl_batch(r, "add", excl={a.display: [b.display]}, epoch=e2, generation=4, base={a.display: 3})
+    if good.get("stale_listeners"):
+        raise Fail("an add with the right base is not stale", good)
+    hb.listeners = {a.display: 4, b.display: 1}
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("excluded_entries") == 1 and i.get("vis_listener_generation") == 4,
+                         "base match: the exclusion applies and A's generation is 4")
+    await ctx.admin.peer_ctl_batch(r, "remove", excl={a.display: [b.display]}, epoch=e2, generation=5, base={a.display: 4})
+    hb.listeners = {a.display: 5, b.display: 1}
+    await ctx.until_info(a, _audible, "the remove restores B for A")
+
+    hb.listeners = {b.display: 1}
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 1, "omission: a heartbeat without A disarms and silences it")
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []}, epoch=e2, generation=6),
+                 "re-arming A", status="ok")
+    hb.listeners = {a.display: 6, b.display: 1}
+    await ctx.until_info(a, _audible, "re-armed after omission: A audible")
+
+    await hb.stop()
+    stop = await ctx.admin.heartbeat(e2, {r: {"policy_generation": 6, "listeners": {a.display: 6, b.display: 1}}}, stopping=True)
+    stopped_at = time.monotonic()
+    if ((stop.get("rooms") or {}).get(str(r)) or {}).get("status") != "ok":
+        raise Fail("the stopping heartbeat is accepted", stop)
+    await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 3, "graceful stop: A silent without waiting for the window",
+                         timeout=2.0)
+    print(f"      S18 info: silent {time.monotonic() - stopped_at:.2f} s after the stopping heartbeat (poll-limited)", flush=True)
+    take = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                          mute={a.display: [], b.display: []}, epoch=e1, generation=1)
+    _check_reply(take, "after the stop a lower epoch takes over at once", slvoice="applied", status="ok", authority_epoch=e1)
+    hb1 = Heartbeater(ctx.admin, e1, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb1)
+    await ctx.until_info(a, _audible, "the takeover's arming makes A audible")
+
+
+async def s19_fail_closed_reconnect_fanout(ctx: Ctx) -> None:
+    """Fail-closed ON: the arming record belongs to the avatar in the room. A second session is audible at once and follows
+    the same record; it stays audible after the first leaves; a rejoin keeps the armed columns; another room is separate."""
+    r, a, b = await _declared_pair(ctx)
+    await _mode(ctx, a, want_fail_closed=True)
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb)
+    await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []}, mute={a.display: [], b.display: []},
+                                   epoch=e1, generation=1)
+    await ctx.until_info(a, _audible, "armed: A hears B")
+
+    a2 = await ctx.join("A2", r, a.display)
+    await ctx.ready(a2)
+    await ctx.until_info(a2, lambda i: _audible(i) and i.get("vis_row") == 4, "reconnect: A's second session is audible at once")
+    hb.listeners = {a.display: 7, b.display: 1}
+    await ctx.until_info(a, _silent, "fan-out: a wrong generation for A's display silences the first session")
+    await ctx.until_info(a2, _silent, "fan-out: and the second")
+    await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []}, epoch=e1, generation=2)
+    hb.listeners = {a.display: 2, b.display: 1}
+    await ctx.until_info(a, _audible, "fan-out: one replace restores the first session")
+    await ctx.until_info(a2, _audible, "fan-out: and the second")
+
+    await a.close()
+    await _hold(ctx, a2, _audible, "the second session stays audible after the first leaves", 2.0)
+
+    await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e1, generation=3)
+    hb.listeners = {a.display: 3, b.display: 1}
+    await ctx.until_info(a2, lambda i: _silent(i) and i.get("excluded_entries") == 1, "the exclusion reaches A's session")
+    await a2.close()
+    a3 = await ctx.join("A3", r, a.display)
+    await ctx.ready(a3)
+    await ctx.until_info(a3, lambda i: i.get("vis_row") == 4 and i.get("excluded_entries") == 1,
+                         "rejoin: a new session takes the armed columns at join (open question 2)")
+    await _hold(ctx, a3, _silent, "rejoin: so it never hears the excluded source", 1.5)
+
+    r2 = ctx.new_room()
+    await ctx.control.create_room(r2, f"integration {ctx.name}", vis_authority=True)
+    a4 = await ctx.join("A4", r2, a.display)
+    c = await ctx.join("C", r2)
+    await ctx.ready(a4, c)
+    await _hold(ctx, a4, lambda i: _silent(i) and i.get("vis_row") == 1, "another room: A's avatar is unarmed there", 1.5)
+    hb2 = Heartbeater(ctx.admin, e1, r2, {a.display: 1, c.display: 1}).start()
+    ctx.background.append(hb2)
+    await ctx.admin.peer_ctl_batch(r2, "replace", excl={a.display: [], c.display: []}, mute={a.display: [], c.display: []},
+                                   epoch=e1, generation=1)
+    await ctx.until_info(a4, _audible, "another room: audible once armed there")
+
+
+async def s20_fail_closed_mixer_restart(ctx: Ctx) -> None:
+    """Fail-closed ON: a restart gives a new mixer_instance; re-created rooms start with no epoch and silent joiners; a sim
+    that re-arms on the instance change restores audio."""
+    if not ctx.cfg.restart:
+        raise Skip("--no-restart")
+    r, a, b = await _declared_pair(ctx)
+    await _mode(ctx, a, want_fail_closed=True)
+    e1 = _epoch(1)
+    before = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                            mute={a.display: [], b.display: []}, epoch=e1, generation=1)
+    await ctx.until_info(a, _audible, "armed before the restart")
+
+    res = await mixer_restart(ctx.cfg)
+    if res.returncode != 0:
+        raise Fail("restart the mixer", (res.stderr or res.stdout)[-400:])
+    await wait_mixer_up(ctx.cfg, ctx.http)
+    await a.close()
+    await b.close()
+    await ctx.reopen_control()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    a2 = await ctx.join("A2", r, a.display)
+    b2 = await ctx.join("B2", r, b.display)
+    await ctx.ready(a2, b2)
+    await ctx.until_info(a2, lambda i: _silent(i) and _vis(i).get("authority_epoch") == "0" * 16 and i.get("vis_row") == 1,
+                         "after the restart: the re-created room holds no epoch and A is silent")
+
+    after = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                           mute={a.display: [], b.display: []}, epoch=e1, generation=1)
+    old_i, new_i = before.get("mixer_instance"), after.get("mixer_instance")
+    if not old_i or not new_i or old_i == new_i:
+        raise Fail("the restart changed mixer_instance", {"before": old_i, "after": new_i})
+    print(f"      S20 info: mixer_instance {old_i} -> {new_i}", flush=True)
+    hb = Heartbeater(ctx.admin, e1, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb)
+    await ctx.until_info(a2, _audible, "re-arming on the instance change restores audio")
+
+
+async def s21_old_image_ignores_stamp(ctx: Ctx) -> None:
+    """Against a pre-0.3 image: vis_authority on create, and room_epoch, policy_generation and base on batches, are ignored,
+    so a new sim's batches apply exactly as unstamped ones; no vis_protocol is advertised, so a 0.2 sim never heartbeats."""
+    r, a, b = await _declared_pair(ctx)
+    probe = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []})
+    if "vis_protocol" in probe:
+        raise Skip("this mixer advertises vis_protocol: S21 runs against a pre-0.3 image")
+    await ctx.until_info(a, _audible, "A hears B in a room created with vis_authority (the old create parser ignored the key)")
+    stamped = await ctx.admin.peer_ctl_batch(r, "add", mute={a.display: [b.display]}, epoch=_epoch(1), generation=2,
+                                             base={a.display: 1})
+    if stamped.get("slvoice") != "applied" or "vis_protocol" in stamped or "status" in stamped:
+        raise Fail("a stamped add is applied and answered without Phase 0 keys", stamped)
+    await ctx.until_info(a, lambda i: i.get("mod_muted_entries") == 1 and _silent(i), "the stamped mute applied as an unstamped one would")
+    await ctx.admin.peer_ctl_batch(r, "replace", mute={a.display: []}, epoch=_epoch(0), generation=1)
+    await ctx.until_info(a, lambda i: i.get("mod_muted_entries") == 0 and _audible(i),
+                         "a stamped replace with a LOWER epoch still applies: the old image checks nothing")
+    hb = await ctx.admin.heartbeat(_epoch(1), {r: {"policy_generation": 1, "listeners": {a.display: 1}}})
+    if hb.get("reason") != "unknown_request" or "vis_protocol" in hb:
+        raise Fail("peer_ctl_heartbeat is an unknown request to the old image", hb)
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -425,4 +779,18 @@ SCENARIOS = [
              "A.3 TURN, relay path end to end", s13_relay_only_peer),
     Scenario("S14", "the diagnostics path verdict agrees with where the peer's packets came from",
              "A.6 source address, SC-126", s14_path_verdict_matches_source),
+    Scenario("S15", "shadow mode: the full protocol in a declared room changes nothing audible; would_silence counts",
+             "0.3 fail-closed off, §9 1, 2, 25", s15_shadow_mode),
+    Scenario("S16", "fail-closed: rows 1, 3, 4 and the pair rule heard; heartbeats, the window, recovery, a new epoch",
+             "0.3 fail-closed on, §9 4, 5, 7-12", s16_fail_closed_decision_table),
+    Scenario("S17", "fail-closed: a room without vis_authority is not enforced, and says so once",
+             "0.3 fail-closed on, §9 3", s17_fail_closed_undeclared_room),
+    Scenario("S18", "fail-closed: stale_epoch, delta base, omission, graceful stop, takeover",
+             "0.3 fail-closed on, §9 13, 15, 16, 22", s18_fail_closed_epochs_base_omission_stop),
+    Scenario("S19", "fail-closed: reconnect, fan-out, rejoin columns, another room",
+             "0.3 fail-closed on, §9 19, 20", s19_fail_closed_reconnect_fanout),
+    Scenario("S20", "fail-closed: a mixer restart changes mixer_instance; re-arming restores audio",
+             "0.3 fail-closed on, §9 21", s20_fail_closed_mixer_restart),
+    Scenario("S21", "a pre-0.3 image applies stamped batches as unstamped and never advertises vis_protocol",
+             "0.3 new sim / old mixer, §9 26", s21_old_image_ignores_stamp),
 ]

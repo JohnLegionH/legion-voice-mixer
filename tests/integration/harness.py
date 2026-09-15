@@ -50,7 +50,7 @@ ERR_ROOM_EXISTS = 486
 ORACLE_KEYS = ("room", "display", "id", "ice_state", "webrtc_up", "datachannel_open", "rtp_in_count",
                "last_rms", "peer_ctl_entries", "peer_ctl_full_drops", "mod_muted_entries",
                "excluded_entries", "last_data_fields_seen", "last_msg_fields_seen", "room_participants",
-               "last_mix_rms", "last_mix_rms_l", "last_mix_rms_r")
+               "last_mix_rms", "last_mix_rms_l", "last_mix_rms_r", "vis_row", "vis_listener_generation")
 
 log = logging.getLogger("integration")
 
@@ -82,6 +82,9 @@ class Config:
     turn_uri: str = ""
     turn_user: str = ""
     turn_pwd: str = ""
+    #: a mixer started with `docker run` rather than compose (the 0.3 scratch mixer): S17 and S20 read its logs and
+    #: restart it by this container name; empty = the compose service `janus`
+    container: str = ""
 
 
 def read_env(path: Path) -> dict:
@@ -196,6 +199,8 @@ class TestPeer(ConnectorPeer):
         self.crashed = False
         #: SC-87: every {p, v} this peer received for each source display, in arrival order.
         self.dots: dict[str, list] = {}
+        #: Phase 0: every presence notice this peer received, (display, "j" | "l"), in arrival order.
+        self.presence: list = []
         self._join_result: asyncio.Future = asyncio.get_running_loop().create_future()
         self._task: asyncio.Task | None = None
 
@@ -218,6 +223,8 @@ class TestPeer(ConnectorPeer):
         for display, entry in obj.items():
             if isinstance(entry, dict) and isinstance(entry.get("p"), int) and not isinstance(entry.get("p"), bool):
                 self.dots.setdefault(display, []).append((entry["p"], entry.get("v") is True))
+            elif isinstance(entry, dict) and ("j" in entry or "l" in entry):
+                self.presence.append((display, "j" if "j" in entry else "l"))
 
     def on_plugin_event(self, data: dict) -> None:
         if self._join_result.done():
@@ -428,17 +435,38 @@ class Admin:
         return ((data.get("info") or {}).get("webrtc") or {}).get("ice") or {}
 
     async def peer_ctl_batch(self, room: int, op: str = "replace", mute: dict | None = None,
-                             excl: dict | None = None) -> dict:
+                             excl: dict | None = None, epoch: str | None = None, generation: int | None = None,
+                             base: dict | None = None) -> dict:
         """The sim's peer_ctl_batch (PeerCtlBatchSerializer.BuildRequest + the sink's room stamp):
         "excl" always present, "mute" always present on a replace (empty = no change), and a
-        listener key with an empty array clears that listener."""
+        listener key with an empty array clears that listener. With `epoch`, the 0.2 sim's authority
+        stamp (JanusPeerCtlBatchSink.StampAuthority): room_epoch and policy_generation after "room",
+        and "base" on an add/remove."""
         request = {"request": "peer_ctl_batch", "op": op, "excl": excl or {}, "room": room}
         if op == "replace" or mute:
             request["mute"] = mute or {}
+        if epoch is not None:
+            request["room_epoch"] = epoch
+            request["policy_generation"] = generation
+            if base is not None:
+                request["base"] = base
+        return await self.plugin_request(request)
+
+    async def plugin_request(self, request: dict) -> dict:
+        """One Admin message_plugin to the slvoice plugin; its inner response."""
         data = await self._post("", {"janus": "message_plugin", "plugin": PLUGIN, "request": request})
         if data.get("janus") != "success":
-            raise Fail("peer_ctl_batch refused by the Admin API", data.get("error"))
+            raise Fail(f"{request.get('request')} refused by the Admin API", data.get("error"))
         return data.get("response") or {}
+
+    async def heartbeat(self, epoch: str, rooms: dict, interval_ms: int = 1000, stopping: bool = False) -> dict:
+        """The 0.2 sim's peer_ctl_heartbeat (VisAuthority.BuildHeartbeat): rooms is {room: {"policy_generation": g,
+        "listeners": {display: generation}}}."""
+        request = {"request": "peer_ctl_heartbeat", "room_epoch": epoch, "interval_ms": interval_ms,
+                   "rooms": {str(room): body for room, body in rooms.items()}}
+        if stopping:
+            request["state"] = "stopping"
+        return await self.plugin_request(request)
 
 
 class BatchResender:
@@ -476,6 +504,63 @@ class BatchResender:
         self._running.clear()
         async with self._lock:
             pass
+
+    def resume(self) -> None:
+        self._running.set()
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:
+                pass
+            self._task = None
+
+
+class Heartbeater:
+    """The sim's heartbeat (nonspatial-phase0-design.md §3) for one room: one peer_ctl_heartbeat every `period` seconds
+    naming `listeners` ({display: generation}, mutable while running). `last_sent` is the monotonic time the latest
+    heartbeat's reply arrived, the mixer's latest confirmation."""
+
+    def __init__(self, admin: Admin, epoch: str, room: int, listeners: dict, generation: int = 1, period: float = 1.0):
+        self._admin = admin
+        self.epoch = epoch
+        self._room = room
+        self.listeners = dict(listeners)
+        self.generation = generation
+        self._period = period
+        self._running = asyncio.Event()
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+        self.sent = 0
+        self.last_sent = 0.0
+        self.last_reply: dict | None = None
+        self.last_error: str | None = None
+
+    def start(self) -> "Heartbeater":
+        self._running.set()
+        self._task = asyncio.create_task(self._loop(), name="heartbeater")
+        return self
+
+    async def _loop(self) -> None:
+        while True:
+            await self._running.wait()
+            async with self._lock:
+                try:
+                    body = {"policy_generation": self.generation, "listeners": dict(self.listeners)}
+                    self.last_reply = await self._admin.heartbeat(self.epoch, {self._room: body})
+                    self.last_sent = time.monotonic()
+                    self.sent += 1
+                except Exception as e:
+                    self.last_error = repr(e)
+            await asyncio.sleep(self._period)
+
+    async def pause(self) -> float:
+        """Stop sending; returns, once any heartbeat in flight has been answered, the time of the last confirmation."""
+        self._running.clear()
+        async with self._lock:
+            return self.last_sent
 
     def resume(self) -> None:
         self._running.set()
@@ -529,8 +614,12 @@ class Control:
         self._events.pop(tx, None)
         return data
 
-    async def create_room(self, room: int, description: str) -> None:
-        data = await self.request({"request": "create", "room": room, "description": description})
+    async def create_room(self, room: int, description: str, vis_authority: bool = False) -> None:
+        """create; 486 (already there) is fine. vis_authority: the 0.2 sim's declaration (AudioBridgeCreateRoomReq)."""
+        body = {"request": "create", "room": room, "description": description}
+        if vis_authority:
+            body["vis_authority"] = True
+        data = await self.request(body)
         if data.get("audiobridge") != "created" and data.get("error_code") != ERR_ROOM_EXISTS:
             raise Fail(f"create room {room}", data)
 
@@ -720,3 +809,21 @@ async def wait_mixer_up(cfg: Config, http: aiohttp.ClientSession, timeout: float
 
     await until(probe, lambda s: s == 200, "mixer /info answering after the restart", timeout, step=0.5)
     return time.monotonic() - start
+
+
+async def mixer_restart(cfg: Config) -> subprocess.CompletedProcess:
+    """Restart the mixer under test: the named container (cfg.container) or the compose service."""
+    if cfg.container:
+        return await asyncio.to_thread(subprocess.run, ["docker", "restart", cfg.container], capture_output=True,
+                                       text=True, encoding="utf-8", errors="replace", timeout=180)
+    return await compose(cfg, "restart", "janus")
+
+
+async def mixer_logs(cfg: Config, since: str) -> str:
+    """The mixer's log since an RFC 3339 time, stdout and stderr together."""
+    if cfg.container:
+        res = await asyncio.to_thread(subprocess.run, ["docker", "logs", "--since", since, cfg.container],
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    else:
+        res = await compose(cfg, "logs", "--no-log-prefix", "--since", since, "janus")
+    return (res.stdout or "") + (res.stderr or "")

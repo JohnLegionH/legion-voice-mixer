@@ -5,6 +5,7 @@
  */
 
 #include "visbatch.h"
+#include "visauth.h"   /* Phase 0: slv_vis_parse_epoch */
 
 #include <jansson.h>
 #include <string.h>
@@ -36,6 +37,9 @@ void slv_visbatch_free(slv_visbatch *b) {
 	}
 	b->mute_entries = NULL;
 	b->n_mute_entries = 0;
+	free(b->base);
+	b->base = NULL;
+	b->n_base = 0;
 }
 
 /* Bounded copy of a UUID string into a fixed SLV_UUID_LEN buffer (always NUL-
@@ -171,6 +175,22 @@ slv_visbatch_status slv_visbatch_parse(const char *buf, size_t len, slv_visbatch
 	}
 	out->room = (int64_t)json_integer_value(jroom);
 
+	/* Phase 0 authority stamp (optional; nonspatial-phase0-design.md §1). Checked before any allocation,
+	 * so a malformed stamp returns with nothing to free. */
+	json_t *jepoch = json_object_get(b, "room_epoch");
+	if(jepoch != NULL) {
+		json_t *jgen = json_object_get(b, "policy_generation");
+		if(!json_is_string(jepoch) || !slv_vis_parse_epoch(json_string_value(jepoch), &out->room_epoch)
+				|| !json_is_integer(jgen) || json_integer_value(jgen) < 1
+				|| json_integer_value(jgen) > (json_int_t)UINT32_MAX) {
+			json_decref(root);
+			memset(out, 0, sizeof(*out));
+			return SLV_VISBATCH_MALFORMED;
+		}
+		out->has_epoch = 1;
+		out->policy_generation = (int64_t)json_integer_value(jgen);
+	}
+
 	/* excl (optional object listener -> [source,...]) — the EXCLUSION (ban/visibility) channel. */
 	json_t *excl = json_object_get(b, "excl");
 	slv_vis_parse_channel(excl, &out->entries, &out->n_entries, &out->n_skipped);
@@ -181,6 +201,28 @@ slv_visbatch_status slv_visbatch_parse(const char *buf, size_t len, slv_visbatch
 	 * mixer-parses / sim-does-not-yet-emit skew case identical to today: no "mute" key here. */
 	json_t *mute = json_object_get(b, "mute");
 	slv_vis_parse_channel(mute, &out->mute_entries, &out->n_mute_entries, &out->n_skipped);
+
+	/* base (optional object listener -> generation) — only meaningful with room_epoch. A malformed item
+	 * is skipped and counted; the mixer then treats that listener as a base mismatch (stale). */
+	json_t *jbase = json_object_get(b, "base");
+	if(out->has_epoch && json_is_object(jbase) && json_object_size(jbase) > 0) {
+		size_t nb = json_object_size(jbase);
+		out->base = calloc(nb, sizeof(slv_vis_base));
+		if(out->base != NULL) {
+			const char *bkey;
+			json_t *bval;
+			json_object_foreach(jbase, bkey, bval) {
+				if(out->n_base >= SLV_VIS_MAX_ENTRIES * 2 || !slv_vis_uuid_ok(bkey) || !json_is_integer(bval)
+						|| json_integer_value(bval) < 0 || json_integer_value(bval) > (json_int_t)UINT32_MAX) {
+					out->n_skipped++;
+					continue;
+				}
+				slv_ucpy(out->base[out->n_base].listener, bkey);
+				out->base[out->n_base].gen = (int64_t)json_integer_value(bval);
+				out->n_base++;
+			}
+		}
+	}
 
 	json_decref(root);
 	/* OK if EITHER channel carried an applicable entry; a batch with neither is EMPTY. This lets a

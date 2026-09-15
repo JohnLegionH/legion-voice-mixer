@@ -289,6 +289,44 @@ fi
 run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER= JS_TURN_PORT= JS_TURN_TYPE= JS_TURN_USER= JS_TURN_PWD= JS_TURN_REST_API= JS_TURN_REST_API_KEY= JS_TURN_REST_API_METHOD=
 check "A.3 no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha256sum "$CONF/janus.jcfg" | cut -d" " -f1)" = "$NO_TURN_SUM" ]'
 
+# ---- 0.3: visibility authority knobs. Environment only: they must not change any generated config. ----
+# tests/golden/phase0-knobs-off holds what the pre-0.3 image's own entrypoint generated (image c7b57f567f48, run with
+# JS_PUBLIC_IP=203.0.113.7 and this file's run_ep environment), plus that image's janus.plugin.slvoice.jcfg.
+GOLDEN0="$HERE/golden/phase0-knobs-off"
+VISSTUB="$WORK/janus-stub-vis"
+printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\n' > "$VISSTUB"
+chmod +x "$VISSTUB"
+golden0() {
+	cmp -s "$CONF/janus.jcfg" "$GOLDEN0/janus.jcfg" \
+		&& cmp -s "$CONF/janus.transport.http.jcfg" "$GOLDEN0/janus.transport.http.jcfg" \
+		&& cmp -s "$CONF/janus.transport.websockets.jcfg" "$GOLDEN0/janus.transport.websockets.jcfg" \
+		&& cmp -s "$CONF/state/effective-config.json" "$GOLDEN0/effective-config.json"
+}
+IMAGE_TPL=no
+if [ -f /opt/janus/share/janus-templates/janus.jcfg ] && [ -z "${ENTRYPOINT_TEST_TPL:-}" ]; then IMAGE_TPL=yes; fi
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB"
+check "0.3 knobs unset -> Janus runs with JS_VIS_FAIL_CLOSED=0 and JS_VIS_STALE_MS=8000 exported" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000"'
+check "0.3 knobs unset -> the banner says fail-closed DISABLED (shadow mode)" 'has "INFO: vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "0.3 knobs unset -> janus.jcfg, both transport configs and effective-config.json byte-identical to the pre-0.3 entrypoint's (tests/golden/phase0-knobs-off)" 'golden0'
+	check "0.3 the image's janus.plugin.slvoice.jcfg is byte-identical to the pre-0.3 image's" 'cmp -s /opt/janus/share/janus-templates/janus.plugin.slvoice.jcfg "$GOLDEN0/janus.plugin.slvoice.jcfg"'
+else
+	echo "skip 0.3 golden config comparison (needs the image's own templates)"
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000
+check "0.3 knobs set to their defaults -> the same export and banner" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000" && has "fail-closed DISABLED (shadow mode)"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "0.3 knobs set to their defaults -> the generated config is still the golden" 'golden0'
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=1 JS_VIS_STALE_MS=9000
+check "0.3 fail-closed on -> exported as given, and the banner says ENABLED" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=1 JS_VIS_STALE_MS=9000" && has "INFO: vis_fail_closed=1 vis_stale_ms=9000: fail-closed ENABLED" && ! has "shadow mode"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "0.3 fail-closed on -> the generated config is still the golden (the knobs are environment only)" 'golden0'
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=True
+check "0.3 JS_VIS_FAIL_CLOSED=True -> the banner agrees with the plugin (case-insensitive): ENABLED" 'has "fail-closed ENABLED"'
+
 run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER=turn.example.test JS_TURN_PORT=5349 JS_TURN_TYPE=TLS JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"
 check "A.3 static TURN -> starts" '[ "$RC" -eq 0 ] && has STUB-JANUS-RAN'
 check "A.3 static TURN -> each key written in the nat section" 'natkey turn_server "\"turn.example.test\"" && natkey turn_port 5349 && natkey turn_type "\"tls\"" && natkey turn_user "\"$TURN_USER_V\"" && natkey turn_pwd "\"$TURN_PWD_V\"" && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_rest_api"'

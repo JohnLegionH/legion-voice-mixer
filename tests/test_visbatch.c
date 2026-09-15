@@ -204,7 +204,66 @@ static void test_mute_absent(void) {
 	slv_visbatch_free(&b);
 }
 
+/* Phase 0 (nonspatial-phase0-design.md §1): the authority stamp parses, and the channels parse exactly as they do
+ * without it. This is also what an old mixer's parser sees: it ignores unknown keys, so a stamped batch applies there
+ * as the unstamped one would. */
+static void test_authority_stamp(void) {
+	const char *plain = "{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"mute\":{\"M\":[\"T\"]}}";
+	const char *stamped = "{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"mute\":{\"M\":[\"T\"]},"
+		"\"room_epoch\":\"0000018f3a2b4c5d\",\"policy_generation\":42,\"base\":{\"L\":41,\"M\":0}}";
+	slv_visbatch a, b;
+	CHECK(parse(plain, &a) == SLV_VISBATCH_OK && parse(stamped, &b) == SLV_VISBATCH_OK, "stamped and unstamped batches parse OK");
+	CHECK(!a.has_epoch && a.n_base == 0 && a.base == NULL, "no stamp: has_epoch 0 and no base");
+	CHECK(b.has_epoch && b.room_epoch == 0x0000018f3a2b4c5dULL && b.policy_generation == 42, "stamp: epoch and generation parsed");
+	int l41 = 0, m0 = 0;
+	for(int i = 0; i < b.n_base; i++) {
+		if(!strcmp(b.base[i].listener, "L") && b.base[i].gen == 41) l41 = 1;
+		if(!strcmp(b.base[i].listener, "M") && b.base[i].gen == 0) m0 = 1;
+	}
+	CHECK(b.n_base == 2 && l41 && m0, "stamp: base parsed for both named listeners, 0 included");
+	CHECK(a.op == b.op && a.room == b.room && a.n_entries == b.n_entries && a.n_mute_entries == b.n_mute_entries
+		&& a.n_skipped == b.n_skipped && find(&b, "L") && has_src(find(&b, "L"), "S")
+		&& find_mute(&b, "M") && has_src(find_mute(&b, "M"), "T"), "stamp: the channels parse exactly as without it");
+	slv_visbatch_free(&a);
+	slv_visbatch_free(&b);
+
+	CHECK(parse("{\"op\":\"replace\",\"room\":7,\"excl\":{\"L\":[]},\"room_epoch\":\"0000018F3A2B4C5D\",\"policy_generation\":1}", &b)
+		== SLV_VISBATCH_OK && b.has_epoch && b.room_epoch == 0x0000018f3a2b4c5dULL, "stamp: uppercase hex accepted");
+	slv_visbatch_free(&b);
+
+	CHECK(parse("{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"base\":{\"L\":3}}", &b) == SLV_VISBATCH_OK
+		&& !b.has_epoch && b.n_base == 0, "base without room_epoch is ignored");
+	slv_visbatch_free(&b);
+
+	CHECK(parse("{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5d\",\"policy_generation\":2,"
+		"\"base\":{\"L\":\"x\",\"M\":-1,\"N\":3}}", &b) == SLV_VISBATCH_OK && b.n_base == 1 && b.n_skipped == 2,
+		"malformed base items are skipped and counted");
+	slv_visbatch_free(&b);
+}
+
+static void test_authority_stamp_malformed(void) {
+	const char *bad[] = {
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"18f3a2b4c5d\",\"policy_generation\":1}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5g\",\"policy_generation\":1}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000000000000000\",\"policy_generation\":1}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":1234,\"policy_generation\":1}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5d\"}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5d\",\"policy_generation\":0}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5d\",\"policy_generation\":\"3\"}",
+		"{\"op\":\"add\",\"room\":7,\"excl\":{\"L\":[\"S\"]},\"room_epoch\":\"0000018f3a2b4c5d\",\"policy_generation\":4294967296}",
+	};
+	for(size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		slv_visbatch b;
+		slv_visbatch_status st = parse(bad[i], &b);
+		CHECK(st == SLV_VISBATCH_MALFORMED && b.entries == NULL && b.base == NULL,
+			"a present but invalid room_epoch or policy_generation rejects the batch whole");
+		slv_visbatch_free(&b);
+	}
+}
+
 int main(void) {
+	test_authority_stamp();
+	test_authority_stamp_malformed();
 	test_valid_add();
 	test_ops();
 	test_replace_clear();

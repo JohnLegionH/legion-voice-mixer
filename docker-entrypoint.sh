@@ -56,6 +56,15 @@ export JS_EMPTY_ROOM_GRACE_S
 # it (0 disables). Read by the plugin from the process environment, so exported like the grace.
 : "${JS_JOIN_MEDIA_TIMEOUT_S:=30}"
 export JS_JOIN_MEDIA_TIMEOUT_S
+# Phase 0 slice 0.3 (docs/voice/nonspatial-phase0-design.md §6.1): the visibility authority knobs, read by the plugin
+# from the process environment. 0 is shadow mode: the plugin tracks and counts arming, epochs and staleness, and audio
+# is unchanged. 1 silences unarmed or stale listeners in rooms the sim declared (vis_authority). Do not set 1 while
+# ledger O-88 (connector and recorder arming) is open. JS_VIS_STALE_MS is the staleness window; the plugin raises a
+# value below 7250 to 7250 (§5). Neither changes any generated config file.
+: "${JS_VIS_FAIL_CLOSED:=0}"
+export JS_VIS_FAIL_CLOSED
+: "${JS_VIS_STALE_MS:=8000}"
+export JS_VIS_STALE_MS
 # Slice A.1: public address discovery and its periodic re-check (docs/docker-notes.md, "External access").
 : "${JS_PUBLIC_IP_DISCOVERY:=auto}"
 : "${JS_STUN_SERVER:=stun.l.google.com:19302}"
@@ -180,6 +189,11 @@ case "$TURN_MODE" in
 	*)    echo "[entrypoint] INFO: turn=${TURN_MODE} server=${JS_TURN_SERVER:-<none>} port=${TURN_PORT} type=${TURN_TYPE} user=$(secret_state "$JS_TURN_USER") pwd=$(secret_state "$JS_TURN_PWD")" ;;
 esac
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
+case "$(printf '%s' "$JS_VIS_FAIL_CLOSED" | tr '[:upper:]' '[:lower:]')" in
+	1|true|yes|on) vis_mode="fail-closed ENABLED" ;;
+	*)             vis_mode="fail-closed DISABLED (shadow mode)" ;;
+esac
+echo "[entrypoint] INFO: vis_fail_closed=${JS_VIS_FAIL_CLOSED} vis_stale_ms=${JS_VIS_STALE_MS}: ${vis_mode} (JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS; the plugin logs the effective values)"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
 # A blank secret was always an open API: an empty JS_API_SECRET leaves the Janus

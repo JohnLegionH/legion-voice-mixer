@@ -67,6 +67,13 @@ typedef struct slv_vis_entry {
 	int n_excl;                        /*!< number of source UUIDs */
 } slv_vis_entry;
 
+/*! \brief Phase 0 (nonspatial-phase0-design.md §1.3): the listener generation the sim believes the mixer
+ * holds for one listener named by an add/remove. */
+typedef struct slv_vis_base {
+	char listener[SLV_UUID_LEN];
+	int64_t gen;
+} slv_vis_base;
+
 /*! \brief A parsed visibility batch. Heap-owned; free with slv_visbatch_free. */
 typedef struct slv_visbatch {
 	slv_vis_op op;
@@ -80,6 +87,15 @@ typedef struct slv_visbatch {
 	slv_vis_entry *mute_entries;       /*!< heap array of \c n_mute_entries moderation-mute updates */
 	int n_mute_entries;
 	int n_skipped;                     /*!< malformed listener/source items skipped (both channels) */
+	/* Phase 0 authority stamp (nonspatial-phase0-design.md §1). A batch from a sim without arming has
+	 * none of these keys: has_epoch stays 0 and the batch is handled exactly as before. When room_epoch is
+	 * present it must be 16 hex digits and policy_generation an integer 1..2^32-1, else the batch is
+	 * MALFORMED. base is optional (a replace needs none). */
+	int has_epoch;                     /*!< "room_epoch" was present */
+	uint64_t room_epoch;               /*!< the sim authority's epoch (valid when has_epoch) */
+	int64_t policy_generation;         /*!< the batch's generation (valid when has_epoch) */
+	slv_vis_base *base;                /*!< heap array of \c n_base "base" entries (add/remove) */
+	int n_base;
 } slv_visbatch;
 
 /*! \brief Result of a parse attempt. */
