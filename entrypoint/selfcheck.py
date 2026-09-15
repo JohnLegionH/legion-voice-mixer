@@ -24,6 +24,8 @@ the Admin API's handle_info, and writes them to /run/legion-voice/candidates.jso
 usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]
        legion-voice-selfcheck --listen [--port N] [--seconds N]
        legion-voice-selfcheck --candidates [--json]
+       legion-voice-selfcheck --sessions [--json] [--agent UUID-PREFIX] [--room N] [--failed] [--limit N]
+       legion-voice-selfcheck --session HANDLE|AGENT [--json]
   (no flag)     print the bracketed [selfcheck] block
   --json        print the report as JSON instead
   --startup     the container-start run: wait for Janus's HTTP transport within the bound
@@ -32,12 +34,23 @@ usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]
                 from a device outside the network, and wait --seconds (default 120) for one. A receipt goes to
                 /run/legion-voice/selfcheck-inbound.json.
   --candidates  only the candidate-type report (JS_ADMIN_SECRET from the environment)
+  --sessions    recent slvoice sessions, live and ended, from the ICE diagnostics collector (slice A.5), newest first:
+                each one's outcome, agent, room, handle and path. --limit N (default 20, 0 = all); --agent filters by
+                agent UUID prefix, --room by room, --failed keeps FAIL and WARN.
+  --session     one session in detail: agent, room, ICE and DTLS states, the selected pair with both candidate types,
+                local and remote candidate type counts, relay or direct as far as this side can tell (with the prflx
+                caveat), the reason and last state reached on failure, and a timeline. HANDLE is the Janus handle id;
+                an agent UUID, or a prefix of 4 or more characters, picks that agent's newest session.
 Every check run writes the JSON report to /run/legion-voice/selfcheck.json.
 Exit status (check run):   0 = no FAIL and no INCONCLUSIVE (PASS, or WARN advice only); 1 = any FAIL;
                            2 = any INCONCLUSIVE and no FAIL; 64 = usage error.
 Exit status (--listen):    0 = the probe arrived and was recorded; 2 = nothing arrived in time;
                            1 = no port could be bound, or the receipt could not be written; 64 = usage error.
 Exit status (--candidates): 0 = the Admin API answered; 2 = it did not.
+Exit status (--sessions, --session): the check run's rule over the sessions shown. 0 = no FAIL and no INCONCLUSIVE;
+                           1 = any FAIL; 2 = any INCONCLUSIVE and no FAIL, or the collector is not running (unless a
+                           FAIL already gives 1), or there is no diagnostics file, or no such session; 64 = usage error.
+                           The sessions come from /run/legion-voice/ice-diag.json (SLV_ICE_DIAG_FILE).
 
 Inputs come from the effective values the entrypoint wrote to /run/legion-voice/effective-config.json,
 else from the environment, else from the entrypoint's defaults. TURN settings come from janus.jcfg, so C6
@@ -61,6 +74,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import addr_probe  # noqa: E402
+import ice_diag  # noqa: E402
 
 PASS, FAIL, WARN, INCONCLUSIVE = "PASS", "FAIL", "WARN", "INCONCLUSIVE"
 SEVERITY = {PASS: 0, WARN: 1, INCONCLUSIVE: 2, FAIL: 3}
@@ -1054,7 +1068,9 @@ def render_block(report, report_file):
 
 USAGE = ("usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]\n"
          "       legion-voice-selfcheck --listen [--port N] [--seconds N]\n"
-         "       legion-voice-selfcheck --candidates [--json]\n")
+         "       legion-voice-selfcheck --candidates [--json]\n"
+         "       legion-voice-selfcheck --sessions [--json] [--agent UUID-PREFIX] [--room N] [--failed] [--limit N]\n"
+         "       legion-voice-selfcheck --session HANDLE|AGENT [--json]\n")
 
 
 def main(argv=None, environ=None, runner=None, out=None, collector=None):
@@ -1062,16 +1078,20 @@ def main(argv=None, environ=None, runner=None, out=None, collector=None):
     environ = os.environ if environ is None else environ
     out = sys.stdout if out is None else out
     collector = collector or default_collector
-    flags = {"json": False, "startup": False, "listen": False, "candidates": False}
-    numbers = {"--timeout": None, "--port": None, "--seconds": None}
+    flags = {"json": False, "startup": False, "listen": False, "candidates": False, "sessions": False, "failed": False}
+    numbers = {"--timeout": None, "--port": None, "--seconds": None, "--room": None, "--limit": None}
+    texts = {"--session": None, "--agent": None}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ("--json", "--startup", "--listen", "--candidates"):
+        if arg in ("--json", "--startup", "--listen", "--candidates", "--sessions", "--failed"):
             flags[arg[2:]] = True
+        elif arg in texts and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+            texts[arg] = argv[i + 1]
+            i += 1
         elif arg in numbers and i + 1 < len(argv):
             try:
-                numbers[arg] = int(argv[i + 1]) if arg == "--port" else float(argv[i + 1])
+                numbers[arg] = int(argv[i + 1]) if arg in ("--port", "--room", "--limit") else float(argv[i + 1])
             except ValueError:
                 sys.stderr.write(USAGE)
                 return 64
@@ -1086,6 +1106,20 @@ def main(argv=None, environ=None, runner=None, out=None, collector=None):
     if (numbers["--port"] is not None or numbers["--seconds"] is not None) and not flags["listen"]:
         sys.stderr.write(USAGE)
         return 64
+    diag = flags["sessions"] or texts["--session"] is not None
+    list_filters = flags["failed"] or texts["--agent"] is not None or numbers["--room"] is not None \
+        or numbers["--limit"] is not None
+    if (list_filters and not flags["sessions"]) or (flags["sessions"] and texts["--session"] is not None) \
+            or (diag and (flags["startup"] or flags["listen"] or flags["candidates"] or numbers["--timeout"] is not None)) \
+            or (numbers["--limit"] is not None and numbers["--limit"] < 0):
+        sys.stderr.write(USAGE)
+        return 64
+    if diag:
+        path = environ.get("SLV_ICE_DIAG_FILE") or ice_diag.DEFAULT_FILE
+        if flags["sessions"]:
+            return ice_diag.cli_list(path, out, flags["json"], texts["--agent"], numbers["--room"], flags["failed"],
+                                     20 if numbers["--limit"] is None else numbers["--limit"])
+        return ice_diag.cli_detail(path, out, texts["--session"], flags["json"])
     cfg = load_config(environ)
     if flags["listen"]:
         seconds = numbers["--seconds"] if numbers["--seconds"] and numbers["--seconds"] > 0 else 120.0

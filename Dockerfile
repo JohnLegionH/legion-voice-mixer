@@ -82,14 +82,18 @@ COPY entrypoint/ /usr/local/lib/legion-voice/
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/* \
     && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/addr_probe.py \
         /usr/local/lib/legion-voice/public-address-watch.sh /usr/local/lib/legion-voice/selfcheck.py \
+        /usr/local/lib/legion-voice/ice_diag.py \
     && ln -sf /usr/local/lib/legion-voice/selfcheck.py /usr/local/bin/legion-voice-selfcheck
 # Tests, all loopback or stubbed with no external network; a failure in any fails the image build:
 #  - address probe: STUN/DNS codecs, the participant poll;
 #  - self-check (A.2): every check's branches, the VPS shape, exit codes, the time bound;
-#  - entrypoint (O-55/O-65, the nat_1_1_mapping verdict, A.1 discovery and re-check, A.2 launch): the
-#    baked scripts against the image's own templates, in a scratch dir with a stub Janus and a stub probe.
+#  - ICE diagnostics (A.5): retention, the ring bound, the relay/direct caveat, no secrets or SDP, the CLI views;
+#  - entrypoint (O-55/O-65, the nat_1_1_mapping verdict, A.1 discovery and re-check, A.2 launch, A.5 events and the
+#    debug-level guard): the baked scripts against the image's own templates, in a scratch dir with a stub Janus
+#    and a stub probe.
 RUN ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_addr_probe.py \
     && ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_selfcheck.py \
+    && ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_ice_diag.py \
     && ENTRYPOINT_UNDER_TEST=/usr/local/bin/docker-entrypoint.sh ENTRYPOINT_LIB_UNDER_TEST=/usr/local/lib/legion-voice \
         bash /root/slvoice/tests/entrypoint_test.sh
 

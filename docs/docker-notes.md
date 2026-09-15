@@ -292,9 +292,12 @@ writes nothing, and the generated `janus.jcfg` is byte-identical to the one befo
 user info, query or fragment, e.g. `[entrypoint] INFO: turn=static server=turn.example.test port=3478
 type=udp user=set pwd=set`.
 
-One caveat outside this entrypoint: Janus core itself logs the REST request URI, key included, at debug
-level 5 (VERB), and REST-issued credentials at 6 (HUGE). The image runs at Janus's default level 4. Do not
-raise `debug_level` on a mixer using TURN REST.
+One caveat outside this entrypoint: Janus core itself prints TURN REST secrets at raised debug levels. At level 5
+(VERB) it logs the REST request URI with the key (`turnrest.c:166`) **and the REST response body, which carries the
+TURN username and password** (`turnrest.c:194`). At 6 (HUGE) it logs the credentials again (`ice.c:3657`–`:3658`).
+A.3's notes said the credentials appeared only at 6; the response body at 5 was missed. The image runs at Janus's
+default level 4. Do not raise `debug_level` on a mixer using TURN REST. Since A.5 the entrypoint prints a WARNING
+block at every start when the effective level is 5 or more and TURN REST is configured ("ICE diagnostics (A.5)").
 
 **Seeing whether relay is live.** Every self-check run reports, for each slvoice handle, the ICE candidate
 types Janus offered (host / srflx / relay), with the peer's types and the selected pair. They come from the
@@ -321,6 +324,91 @@ The harness's relay scenario S13 uses the same coturn from the host: `--turn-uri
 'turn:127.0.0.1:3478?transport=tcp' --turn-secret turn-test-secret`.
 
 To tear down: `docker compose --profile turn-test rm -sf turn-test turn-test-rest`.
+
+### ICE diagnostics (A.5)
+
+**The question.** "Why did voice fail for that one user?" is asked after the fact, about a session that has ended,
+by someone who should not have to read Janus's raw log. The mixer keeps one record per slvoice session, live or
+ended, and `legion-voice-selfcheck` shows them.
+
+**Reading them.** On the Docker host, in the directory with `docker-compose.yml`:
+```
+docker compose exec janus legion-voice-selfcheck --sessions [--agent <uuid prefix>] [--room N] [--failed] [--limit N] [--json]
+docker compose exec janus legion-voice-selfcheck --session <handle id | agent uuid or a prefix of 4+> [--json]
+```
+`--sessions` lists the newest 20 (`--limit 0`: all), newest first, one line each: when it ended (or its last activity),
+the outcome, the agent, the room, the Janus handle id, the path verdict and the outcome summary. `--session` shows one
+in full; an agent picks that agent's newest session and lists its older ones. Every line starts `[ice-diag]`.
+
+**A record holds:**
+- the agent (the plugin's `display`, the agent UUID), the room, and the Janus session and handle ids;
+- the times it attached, joined, had media up, and ended, and how it ended (handle detached, Janus session destroyed or
+  timed out, or gone per the Admin API);
+- the ICE state and every state it passed through, the DTLS state, and Janus's hangup reason;
+- the selected candidate pair, with both addresses and both candidate types;
+- local (Janus) and remote (peer) candidate type counts: host, srflx, relay, prflx;
+- the path, relay or direct, as far as this side can tell (below);
+- the plugin's RTP counters and data channel state, as last polled;
+- a timeline of up to 40 entries, and the outcomes of earlier attempts on the same handle.
+
+It never holds SDP, candidate lines, ICE credentials, TURN credentials or API secrets. Records copy named facts only;
+every file write and every output also passes through a scrubber that drops sensitive keys and SDP-looking strings.
+
+**Outcome.** The self-check's statuses, with the reason and the **last state reached** on the ladder attached → joined
+→ ice checking → ice connected → dtls connected → media up:
+
+| Status | When |
+|---|---|
+| FAIL | reaped by the mixer with no media (O-75, `JS_JOIN_MEDIA_TIMEOUT_S`); ICE failed, DTLS failed, or a hangup, before media came up; or ended before media came up |
+| WARN | media came up, then was lost (a hangup reason naming a failure, error or timeout, or ICE or DTLS failed); or media was up and the end was not observed |
+| PASS | media came up and the session ended normally, or is live with media |
+| INCONCLUSIVE | live and media not up yet; or media never came up and the end was not observed |
+
+**Path, as far as this side can tell.** Janus sees its own candidates, the candidates the peer signalled and the address
+the peer's packets arrive from, nothing more. On a published-port mixer a peer's packets, relayed or not, arrive
+through the port publish and show as prflx (A.3's S13), so the selected pair alone never proves how the viewer reached
+the mixer. Every verdict carries that caveat:
+
+| Verdict | Basis |
+|---|---|
+| `relay` | a relay candidate on either side of the selected pair: Janus's own TURN relay, or one the peer signalled |
+| `direct` | both sides host or srflx |
+| `undetermined` | a prflx candidate on either side (and no relay). If the peer signalled relay candidates, a note says it may be relaying; that is never promoted to a verdict |
+| `none` | no pair was selected |
+
+**Exit status**, as in the check run: `0` = no FAIL and no INCONCLUSIVE among the sessions shown; `1` = any FAIL; `2` =
+any INCONCLUSIVE, no diagnostics file, no such session, or the collector not running (a FAIL still gives `1`); `64` =
+usage error.
+
+**How it collects.** When `JS_ICE_DIAG_HISTORY` is above 0 (default 200):
+- the entrypoint sets `broadcast = true` in the `events` section of `janus.jcfg` and writes
+  `janus.eventhandler.sampleevh.jcfg`, so Janus POSTs session, handle, WebRTC and plugin events to the collector on
+  `127.0.0.1:14229`. jsep (SDP) and media events are not subscribed. The events section's `disable` lists Janus's
+  other event handlers (WebSockets, Nanomsg, RabbitMQ, GELF, MQTT): with broadcast on Janus would otherwise load each
+  one, and GELF logs a FATAL "giving up". Janus still logs one WARN per disabled handler at start, `Event handler
+  plugin '…' has been disabled, skipping...`; that is expected;
+- the slvoice plugin sends a plugin event when a participant joins, leaves, or is reaped for no media;
+- Janus sends no event for a remote candidate, so the collector reads the peer's candidate types and the RTP counters
+  from Admin API `handle_info` every 2 s while a session is live, with `JS_ADMIN_SECRET` from the environment.
+The collector (`/usr/local/lib/legion-voice/ice_diag.py`) is restarted if it exits.
+
+**Retention.** Live sessions are always kept. The newest `JS_ICE_DIAG_HISTORY` ended sessions are kept (at most 10000),
+older ones are dropped. A handle that never joined a room and had no WebRTC activity (the sim's control handle) is not
+recorded. The store is `/run/legion-voice/ice-diag.json`: it survives `docker compose restart` (sessions live at the
+restart are kept as ended, with the end marked as not observed) and is lost when the container is recreated.
+
+**Limits:**
+- event delivery is Janus's: 3 retries with backoff, then an event is dropped;
+- remote candidate counts need the poll, so a session shorter than 2 s, or a mixer without `JS_ADMIN_SECRET` in the
+  container's environment, shows them as not observed;
+- `JS_ICE_DIAG_HISTORY=0` turns all of it off, and `janus.jcfg` is then byte-identical to before A.5.
+
+**TURN REST credentials at raised debug levels.** Janus prints them at debug level 5 and above (see "TURN for the
+mixer"). When the effective level is 5 or more and TURN REST is configured, every start prints a WARNING block that
+begins `Janus debug level is N and TURN REST is configured`. The effective level is Janus's `-d`/`--debug-level`
+argument when given, else `debug_level` in the final `janus.jcfg`, mounted overrides included, else 4. TURN REST
+counts as configured from `JS_TURN_REST_API` or from an uncommented `turn_rest_api` in that file. The start line also
+shows `debug_level=N`.
 
 ## Configuration compatibility rule
 
@@ -384,6 +472,7 @@ its knobs have no "before".
 | `JS_SELFCHECK_INBOUND_MAX_AGE_H` | `168` | n/a (C2b did not exist) | slice A.2b |
 | `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD` | *(unset)*: no TURN; the generated `janus.jcfg` is byte-identical | no TURN configurable from `.env` (only a mounted `janus.jcfg`) | slice A.3 |
 | `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` | *(unset)*: no TURN REST | as above | slice A.3 |
+| `JS_ICE_DIAG_HISTORY` | `200` | no session diagnostics, and Janus's event broadcast off. The default adds diagnostics only: Janus events to a loopback collector, and a `handle_info` poll every 2 s per live session. Nothing about media is configured or blocked. `0` restores the old behaviour, with `janus.jcfg` byte-identical | slice A.5 |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
@@ -391,11 +480,22 @@ its knobs have no "before".
 `SLV_ADDR_PROBE`, `SLV_ADDR_STATE_FILE` and the watcher's `SLV_ADDR_WATCH_MAX_CHECKS`,
 `SLV_ADDR_SLEEP`, `SLV_ADDR_RESTART_CMD`, `SLV_ADDR_POLL_S`, `SLV_ADDR_PROBE_TIMEOUT_S`, and the
 self-check's `SLV_EFFECTIVE_CONFIG`, `SLV_SELFCHECK_CMD`, `SLV_SELFCHECK_FILE`, `SLV_SELFCHECK_INBOUND_FILE`, `SLV_SELFCHECK_CANDIDATES_FILE`, `SLV_SELFCHECK_BIND` and
-`SLV_SELFCHECK_CONNECT_MAP` are test seams for `tests/entrypoint_test.sh`, `tests/test_addr_probe.py`
-and `tests/test_selfcheck.py`, not operator knobs.
+`SLV_SELFCHECK_CONNECT_MAP`, and the ICE diagnostics' `SLV_ICE_DIAG_CMD`, `SLV_ICE_DIAG_ONCE`, `SLV_ICE_DIAG_FILE`,
+`SLV_ICE_DIAG_POLL_S` and `SLV_ICE_DIAG_PORT` (the collector's loopback port, 14229) are test seams for
+`tests/entrypoint_test.sh`, `tests/test_addr_probe.py`, `tests/test_selfcheck.py` and `tests/test_ice_diag.py`, not
+operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Slice A.5: ICE diagnostics**
+  - **New knob `JS_ICE_DIAG_HISTORY` (default 200).** Janus's event broadcast is now on, with the sample event handler
+    posting to a loopback collector, and `janus.jcfg` gains `broadcast = true` and an events `disable` of Janus's
+    other event handlers. A background collector runs beside the
+    watcher and polls `handle_info` every 2 s per live session. `0` restores the old behaviour exactly.
+  - **The plugin emits plugin events** (joined, left, reaped) when events are enabled; with them off it does nothing new.
+  - **New subcommands** `legion-voice-selfcheck --sessions` and `--session`.
+  - **New start-up WARNING** when the effective debug level is 5 or more and TURN REST is configured; the start line
+    gains `debug_level=N`.
 - **Slice A.3: TURN for the mixer**
   - **New TURN knobs.** Unset (the default), the generated `janus.jcfg` is byte-identical to before.
     Set, they write the nat `turn_*` keys, and a partial or mixed-style configuration now refuses to

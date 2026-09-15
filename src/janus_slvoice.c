@@ -304,6 +304,18 @@ janus_plugin *create(void) {
 /* Useful stuff */
 static volatile gint initialized = 0, stopping = 0;
 static janus_callbacks *gateway = NULL;
+/* A.5 (SC-126): a session lifecycle fact (joined, left, reaped) for the ICE diagnostics collector, sent through Janus's
+ * event handlers as a plugin event. It carries only the event name, the room, the display (the agent UUID) and the
+ * reap cause: never SDP, secrets or media. Janus takes the reference when events are enabled; otherwise it is freed
+ * here. gateway is NULL in the unit tests that compile this file. */
+static void janus_slvoice_diag_event(janus_plugin_session *handle, json_t *event) {
+	if(event == NULL)
+		return;
+	if(handle != NULL && gateway != NULL && gateway->events_is_enabled())
+		gateway->notify_event(&janus_slvoice_plugin, handle, event);
+	else
+		json_decref(event);
+}
 static GThread *handler_thread = NULL;   /* async request handler */
 static GThread *sender_thread = NULL;    /* ~100ms mixer->client SLData ticker */
 static void *janus_slvoice_handler(void *data);
@@ -680,6 +692,8 @@ static void janus_slvoice_leave_room(janus_slvoice_session *session) {
 		g_free(who);
 		return;
 	}
+	janus_slvoice_diag_event(session->handle, json_pack("{sssIss}", "event", "left", "room", (json_int_t)room->room_id,
+		"display", who ? who : ""));
 	if(who != NULL)
 		janus_slvoice_push_presence(room, who, FALSE);
 	if(recorder)   /* SC-96 */
@@ -2407,6 +2421,8 @@ static void *janus_slvoice_handler(void *data) {
 			if(session->recorder)   /* SC-96: a recording tap is never silent in the log */
 				JANUS_LOG(LOG_INFO, "[slvoice] RECORDER %s joined room %"PRIu64": this participant writes the room's audio to disk\n",
 					display ? display : "??", room_id);
+			janus_slvoice_diag_event(msg->handle, json_pack("{sssIsssb}", "event", "joined", "room", (json_int_t)room_id,
+				"display", display ? display : "", "recorder", session->recorder ? 1 : 0));
 			goto respond;
 		} else if(!strcasecmp(request_text, "configure")) {
 			if(msg->jsep != NULL) {
@@ -3685,6 +3701,8 @@ static void janus_slvoice_reap_no_media(janus_slvoice_session *s, janus_slvoice_
 	janus_mutex_unlock(&s->mutex);
 	if(!still)
 		return;
+	janus_slvoice_diag_event(s->handle, json_pack("{sssIsssi}", "event", "reaped", "room", (json_int_t)room->room_id,
+		"display", who ? who : "", "no_media_s", (int)((now - join_ts) / G_USEC_PER_SEC)));
 	janus_slvoice_media_gone(s);
 	JANUS_LOG(LOG_INFO, "[slvoice] %s reaped from room %"PRIu64": no media %us after join\n",
 		who ? who : "??", room->room_id, (unsigned)((now - join_ts) / G_USEC_PER_SEC));

@@ -15,6 +15,50 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.5: ICE diagnostics (untagged) — 2026-09-15
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 06:10 | `1e40da39` | `legion-voice-mixer:rollback-pre-a5` (`7539c51c`, the A.3 image, tagged before the first rebuild) |
+
+Two intermediate images were deployed and superseded the same morning while verifying: `abd64dd3`, whose Janus loaded every event handler (GELF logged a FATAL), and `b4f7b36c`, whose remote-candidate hint named the wrong cause.
+
+Answers "why did voice fail for that one user", after the fact, without Janus's raw log (SC-126).
+- **Per-session records**, live and ended, keyed by agent UUID and Janus handle id. Each has the room, the ICE and DTLS states reached, the selected pair with both candidate types, and local and remote candidate type counts. It says relay, direct, undetermined or none as far as this side can tell, always with the prflx caveat. On failure it gives the reason and the last state reached, plus RTP counters and a timeline.
+- **Collection:** Janus's sample event handler posts to a loopback collector (`entrypoint/ice_diag.py`). The plugin emits joined, left and reaped events. A `handle_info` poll every 2 s supplies remote candidates, which Janus never events.
+- **Retention:** the newest `JS_ICE_DIAG_HISTORY` (200) ended sessions are kept, and every live one, in `/run/legion-voice/ice-diag.json`.
+- **Operator access:** `legion-voice-selfcheck --sessions [--agent] [--room] [--failed] [--limit] [--json]` and `--session <handle|agent> [--json]`, with the self-check's exit-code rule.
+- **Safety:** no SDP, candidate lines, credentials or secrets, by construction and by a scrubber on every output. A start-up WARNING block fires when the effective Janus debug level is 5 or more and TURN REST is configured.
+
+**Verified:**
+- **Image build:** C suites OK; `test_addr_probe.py` 39 tests, OK; `test_selfcheck.py` 66 tests, OK; `test_ice_diag.py` 31 tests, OK; `entrypoint_test.sh` 131 passed, 0 failed.
+  - The entrypoint suite checks `janus.jcfg` byte for byte against the pre-A.3 golden: identical with `JS_ICE_DIAG_HISTORY=0`, and with diagnostics on only the events `broadcast` and `disable` lines differ.
+  - The debug-level warning fires for `-d 5`, `-d6`, `--debug-level=7`, and a mounted `janus.jcfg` with `debug_level = 5` and `turn_rest_api`. It does not fire at level 4, with static TURN at 7, with no TURN at 7, or with a mounted level 6 and no REST.
+- **Start:** `ice_diag=on history=200`, `[ice-diag] INFO: collecting slvoice session diagnostics on 127.0.0.1:14229`, and `debug_level=4` on the start line. Self-check unchanged: C1 PASS, C2a WARN, C2b INCONCLUSIVE, C3–C6 PASS; exit 2.
+- **Harness:** 12/12 in 278.7 s (rooms 907066500..907066512). The collector recorded 33 sessions from 552 events; `--sessions --limit 0` exits 1 (one FAIL).
+- **S10, the session that never connected** (handle `2467773459240564`): `FAIL: reaped by the mixer: no media 30 s after join (JS_JOIN_MEDIA_TIMEOUT_S); the PeerConnection never came up`, last state `ice checking`, observed "Janus held no remote candidates for this handle when last polled (none in the offer and none trickled)". Its timeline: attached, ICE gathering, joined room 907066509, reaped, left, ended: handle detached.
+- **S13's relay-only peer, a completed session** (handle `3264886728073268`): `PASS: media came up; ended: handle detached`. Its pair is `local 174.82.163.190:10072 [prflx,udp] <-> remote 172.23.0.1:34184 [prflx,udp]`, with remote candidates `relay 2, prflx 1`. The path reads `undetermined`, with the note that the peer signalled 2 relay candidates.
+- **S4's restart:** the collector reloaded its file. The two sessions live at the restart read WARN (media was up) and INCONCLUSIVE (no media), each with the end marked as not observed.
+- **No leaks:** in the store file and in the list's text and JSON, 0 occurrences each of the live `JS_ADMIN_SECRET` and `JS_API_SECRET` values, 0 SDP markers, 0 candidate lines, 0 sensitive keys.
+- **`turn-test`** was up only for S13, then removed.
+
+**Findings:**
+- **Correction to A.3:** Janus prints the TURN REST response body, with the username and password, at debug level **5** (`turnrest.c:194`), not only at 6. At 6 it prints the credentials again (`ice.c:3657`–`:3658`).
+- **Janus never emits a remote-candidate event:** `JANUS_EVENT_SUBTYPE_WEBRTC_RCAND` has no emitter in `ice.c` or `janus.c`. Remote candidates come only from `handle_info`, which omits `remote-candidates` when Janus holds none (`janus.c:3209` `if(pc->remote_candidates)`).
+- **Every event handler loads once `events.broadcast` is on**, and GELF logs `[FATAL] ... giving up`. The entrypoint therefore disables the five unused handlers; Janus still logs one WARN per disabled handler.
+- **On this published-port mixer every selected pair is prflx on both sides**, so all 31 sessions with a pair read `undetermined`. The diagnostics cannot tell relay from direct here; SC-126 is `PARTIAL`.
+
+### Behaviour changes on upgrade
+- **New knob `JS_ICE_DIAG_HISTORY`** (default 200). Janus's event broadcast is on, with the sample event handler posting to `127.0.0.1:14229` and the other event handlers disabled. A collector runs beside Janus and polls `handle_info` every 2 s per live session. `0` restores the old behaviour, with `janus.jcfg` byte-identical.
+- **The plugin emits plugin events** (joined, left, reaped) while events are enabled.
+- **New subcommands** `legion-voice-selfcheck --sessions` and `--session`.
+- **New start-up WARNING** when the debug level is 5 or more and TURN REST is configured; the start line gains `debug_level=N`.
+
+### One-time migrations
+None.
+
+---
+
 ## Mixer A.3: TURN for the mixer (untagged) — 2026-09-14
 
 | Deployed (CDT) | Image | Rollback tag |

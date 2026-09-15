@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # docker-entrypoint.sh tests:
 #   - O-55 WS default, O-65 fail-closed secrets, the nat_1_1_mapping verdict, JS_NAT_EXTRA_IPS;
-#   - A.1 address discovery, state file and periodic re-check.
+#   - A.1 address discovery, state file and periodic re-check;
+#   - A.5 Janus events for the ICE diagnostics collector, and the debug-level warning for TURN REST credentials.
 # No Docker: the entrypoint runs against a scratch config dir and a stub Janus binary via its JANUS_*
 # path overrides, and address discovery runs against a stub probe (no network).
 #
@@ -85,10 +86,12 @@ run_ep() {
 		JANUS_CONF_DIR="$CONF" JANUS_TEMPLATE_DIR="$TPL" JANUS_OVERRIDE_DIR="$WORK/no-overrides" JANUS_BIN="$STUB" \
 		SLV_LIB_DIR="$LIB" SLV_ADDR_PROBE="$PROBE" SLV_ADDR_STATE_FILE="$CONF/state/public-address.json" \
 		JS_PUBLIC_IP_REFRESH_S=0 JS_SELFCHECK=off SLV_EFFECTIVE_CONFIG="$CONF/state/effective-config.json" \
-		JS_API_SECRET=test-api-secret JS_ADMIN_SECRET=test-admin-secret \
-		"$@" sh "$EP" --stub-arg 2>&1)
+		JS_API_SECRET=test-api-secret JS_ADMIN_SECRET=test-admin-secret JS_ICE_DIAG_HISTORY=0 \
+		"$@" sh "$EP" --stub-arg ${EP_ARGS:-} 2>&1)
 	RC=$?
 }
+# EP_ARGS: extra Janus arguments for the next run_ep (A.5's debug-level guard reads -d / --debug-level).
+EP_ARGS=""
 
 # run_watch VAR=value ... : run the re-check watcher in the foreground with the stub probe, no sleeping,
 # and a recorded restart. Running state: 'voice.example.test' discovered as 203.0.113.7.
@@ -385,6 +388,57 @@ check "JS_WS_ENABLED=false -> start line says ws=off" 'has " ws=off "'
 run_ep JS_WS_ENABLED=true JS_WS_PORT=24288
 check "JS_WS_ENABLED=true -> ws = true on JS_WS_PORT" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = true" ] && [ "$(cfg janus.transport.websockets.jcfg ws_port)" = "ws_port = 24288" ]'
 check "JS_WS_ENABLED=true -> transport not disabled" '! section janus.jcfg transports | grep -Eq "^[[:space:]]*disable"'
+
+# ---- A.5: ICE diagnostics (Janus events to the collector) and the debug-level guard ----
+DIAGSTUB="$WORK/icediag-stub"
+printf '#!/bin/sh\necho "ICEDIAG-STUB history=$JS_ICE_DIAG_HISTORY port=$SLV_ICE_DIAG_PORT admin=$JS_ADMIN_PORT$JS_ADMIN_BASEPATH"\n' > "$DIAGSTUB"
+chmod +x "$DIAGSTUB"
+EVH=janus.eventhandler.sampleevh.jcfg
+
+run_ep JS_PUBLIC_IP=203.0.113.7 SLV_ICE_DIAG_CMD="$DIAGSTUB" SLV_ICE_DIAG_ONCE=1
+check "A.5 JS_ICE_DIAG_HISTORY=0 -> off: no broadcast, no event handler file, no collector, janus.jcfg unchanged" '[ "$RC" -eq 0 ] && has "INFO: ice_diag=off" && ! section janus.jcfg events | grep -Eq "^[[:space:]]*broadcast" && [ ! -f "$CONF/$EVH" ] && ! has ICEDIAG-STUB && [ "$(sha256sum "$CONF/janus.jcfg" | cut -d" " -f1)" = "$NO_TURN_SUM" ]'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_ICE_DIAG_HISTORY= SLV_ICE_DIAG_CMD="$DIAGSTUB" SLV_ICE_DIAG_ONCE=1
+check "A.5 JS_ICE_DIAG_HISTORY unset -> on with 200; the collector gets the history, its port and the admin API" '[ "$RC" -eq 0 ] && has "INFO: ice_diag=on history=200" && has "ICEDIAG-STUB history=200 port=14229 admin=14225/voiceAdmin" && has STUB-JANUS-RAN'
+check "A.5 on -> broadcast = true in the events section" 'section janus.jcfg events | grep -Eq "^[[:space:]]*broadcast = true$"'
+check "A.5 on -> the unused event handlers are disabled in events, and plugins/transports/loggers disable untouched" 'section janus.jcfg events | grep -Eq "^[[:space:]]*disable = \"libjanus_wsevh.so,libjanus_nanomsgevh.so,libjanus_rabbitmqevh.so,libjanus_gelfevh.so,libjanus_mqttevh.so\"$" && ! section janus.jcfg events | grep -q sampleevh && ! section janus.jcfg plugins | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg transports | grep -Eq "^[[:space:]]*disable" && ! section janus.jcfg loggers | grep -Eq "^[[:space:]]*disable"'
+check "A.5 on -> sample event handler enabled, loopback backend, sessions/handles/webrtc/plugins only (no jsep, no media)" '[ "$(cfg $EVH enabled)" = "enabled = true" ] && [ "$(cfg $EVH backend)" = "backend = \"http://127.0.0.1:14229/events\"" ] && [ "$(cfg $EVH events)" = "events = \"sessions,handles,webrtc,plugins\"" ]'
+if [ -f /opt/janus/share/janus-templates/janus.jcfg ] && [ -z "${ENTRYPOINT_TEST_TPL:-}" ] && [ -f "$GOLDEN" ]; then
+	check "A.5 on -> janus.jcfg is the pre-A.3 golden with only the events broadcast and disable lines changed" 'sed -e "s/^\([[:space:]]*\)#broadcast = true/\1broadcast = true/" -e "/^events:[[:space:]]*{/,/^}/ s|^\([[:space:]]*\)#disable = .*|\1disable = \"libjanus_wsevh.so,libjanus_nanomsgevh.so,libjanus_rabbitmqevh.so,libjanus_gelfevh.so,libjanus_mqttevh.so\"|" "$GOLDEN" | cmp -s - "$CONF/janus.jcfg"'
+else
+	echo "skip golden janus.jcfg comparison with diagnostics on (needs the image's own templates)"
+fi
+
+run_ep JS_ICE_DIAG_HISTORY=lots SLV_ICE_DIAG_CMD="$DIAGSTUB" SLV_ICE_DIAG_ONCE=1
+check "A.5 bad JS_ICE_DIAG_HISTORY -> WARNING, and 200" 'has "WARNING: JS_ICE_DIAG_HISTORY='\''lots'\'' is not a non-negative integer; using 200" && has "ice_diag=on history=200"'
+run_ep JS_ICE_DIAG_HISTORY=99999999999999999999 SLV_ICE_DIAG_CMD="$DIAGSTUB" SLV_ICE_DIAG_ONCE=1
+check "A.5 JS_ICE_DIAG_HISTORY above 10000 -> WARNING, and 10000" 'has "is above 10000; using 10000" && has "ice_diag=on history=10000"'
+
+GUARD="Janus WILL PRINT TURN REST CREDENTIALS INTO THIS LOG"
+REST_URL=https://rest.example.test/turn
+EP_ARGS="-d 5"; run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API="$REST_URL" JS_TURN_REST_API_KEY="$TURN_KEY_V"; EP_ARGS=""
+check "A.5 TURN REST + janus -d 5 -> the credentials warning, which names no key" '[ "$RC" -eq 0 ] && has "$GUARD" && has "WARNING: Janus debug level is 5 and TURN REST is configured" && has " debug_level=5" && has STUB-JANUS-RAN && no_secrets'
+EP_ARGS="--debug-level=7"; run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API="$REST_URL"; EP_ARGS=""
+check "A.5 TURN REST + --debug-level=7 -> warning" 'has "Janus debug level is 7 and TURN REST is configured"'
+EP_ARGS="-d6"; run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API="$REST_URL"; EP_ARGS=""
+check "A.5 TURN REST + -d6 -> warning" 'has "Janus debug level is 6 and TURN REST is configured"'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API="$REST_URL" JS_TURN_REST_API_KEY="$TURN_KEY_V"
+check "A.5 TURN REST at the default level 4 -> no warning" '[ "$RC" -eq 0 ] && ! has "$GUARD" && has " debug_level=4"'
+EP_ARGS="-d 4"; run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API="$REST_URL"; EP_ARGS=""
+check "A.5 TURN REST + -d 4 -> no warning" '[ "$RC" -eq 0 ] && ! has "$GUARD"'
+EP_ARGS="-d 7"; run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"; EP_ARGS=""
+check "A.5 static TURN + -d 7 -> no TURN REST warning" '[ "$RC" -eq 0 ] && ! has "$GUARD"'
+EP_ARGS="-d 7"; run_ep JS_PUBLIC_IP=203.0.113.7; EP_ARGS=""
+check "A.5 no TURN + -d 7 -> no warning" '[ "$RC" -eq 0 ] && ! has "$GUARD"'
+OVR_DBG="$WORK/ovr-debug-rest"; mkdir -p "$OVR_DBG"
+sed -e 's/^\([[:space:]]*\)debug_level = 4/\1debug_level = 5/' \
+	-e 's|^\([[:space:]]*\)#turn_rest_api = .*|\1turn_rest_api = "http://rest.example.test/turn"|' "$TPL/janus.jcfg" > "$OVR_DBG/janus.jcfg"
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_OVERRIDE_DIR="$OVR_DBG"
+check "A.5 mounted janus.jcfg with debug_level 5 and turn_rest_api (no JS_TURN_*) -> warning" '[ "$RC" -eq 0 ] && has "applying override janus.jcfg" && has "Janus debug level is 5 and TURN REST is configured" && has " debug_level=5"'
+OVR_DBG2="$WORK/ovr-debug-only"; mkdir -p "$OVR_DBG2"
+sed -e 's/^\([[:space:]]*\)debug_level = 4/\1debug_level = 6/' "$TPL/janus.jcfg" > "$OVR_DBG2/janus.jcfg"
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_OVERRIDE_DIR="$OVR_DBG2"
+check "A.5 mounted janus.jcfg with debug_level 6 and no TURN REST -> no warning" '[ "$RC" -eq 0 ] && has " debug_level=6" && ! has "$GUARD"'
 
 echo "entrypoint_test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

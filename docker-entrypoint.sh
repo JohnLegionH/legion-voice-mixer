@@ -79,6 +79,10 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 : "${JS_TURN_REST_API:=}"
 : "${JS_TURN_REST_API_KEY:=}"
 : "${JS_TURN_REST_API_METHOD:=}"
+# Slice A.5: ICE diagnostics (docs/docker-notes.md, "ICE diagnostics"). How many ENDED slvoice sessions the collector
+# keeps for `legion-voice-selfcheck --sessions`; live ones are always kept. 0 turns the collector off, and with it
+# Janus's event broadcast, so janus.jcfg is then what it was before A.5.
+: "${JS_ICE_DIAG_HISTORY:=200}"
 
 # The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
 SLV_LIB_DIR=${SLV_LIB_DIR:-/usr/local/lib/legion-voice}
@@ -125,6 +129,11 @@ if [ "$JS_SELFCHECK_INBOUND_MAX_AGE_H" -eq 0 ]; then
 	echo "[entrypoint] WARNING: JS_SELFCHECK_INBOUND_MAX_AGE_H=0 is not a usable age; using 168" >&2
 	JS_SELFCHECK_INBOUND_MAX_AGE_H=168
 fi
+JS_ICE_DIAG_HISTORY=$(uint_or_default JS_ICE_DIAG_HISTORY "$JS_ICE_DIAG_HISTORY" 200)
+if [ "${#JS_ICE_DIAG_HISTORY}" -gt 5 ] || [ "$JS_ICE_DIAG_HISTORY" -gt 10000 ]; then
+	echo "[entrypoint] WARNING: JS_ICE_DIAG_HISTORY=${JS_ICE_DIAG_HISTORY} is above 10000; using 10000" >&2
+	JS_ICE_DIAG_HISTORY=10000
+fi
 # TURN mode (validated after the effective values are printed): none | static | rest | partial.
 if [ -n "$JS_TURN_REST_API" ]; then TURN_MODE=rest
 elif [ -n "$JS_TURN_SERVER" ]; then TURN_MODE=static
@@ -159,6 +168,11 @@ echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") adm
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
 echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
 echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} inbound_max_age_h=${JS_SELFCHECK_INBOUND_MAX_AGE_H} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json], inbound proof: legion-voice-selfcheck --listen)"
+if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
+	echo "[entrypoint] INFO: ice_diag=on history=${JS_ICE_DIAG_HISTORY} (JS_ICE_DIAG_HISTORY, 0 = off; on demand: legion-voice-selfcheck --sessions, --session <handle|agent>)"
+else
+	echo "[entrypoint] INFO: ice_diag=off (JS_ICE_DIAG_HISTORY=0): no session diagnostics, and Janus event broadcast stays off"
+fi
 # TURN credentials are reported as set/EMPTY, like the API secrets; a REST URL without its query.
 case "$TURN_MODE" in
 	none) echo "[entrypoint] INFO: turn=none (JS_TURN_SERVER and JS_TURN_REST_API unset)" ;;
@@ -460,6 +474,30 @@ else
 	sed -i '/^transports:[[:space:]]*{/,/^}/ s|^\([[:space:]]*\)#*[[:space:]]*disable = .*|\1disable = "libjanus_websockets.so"|' "$JANUS_JCFG"
 fi
 
+# ---- ICE diagnostics: Janus events to the collector (slice A.5) ----
+# Written only when the collector runs, so JS_ICE_DIAG_HISTORY=0 generates exactly the config from before A.5. The
+# sample event handler POSTs to the collector on loopback; jsep (SDP) and media events are not subscribed.
+: "${SLV_ICE_DIAG_PORT:=14229}"
+if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
+	ensure_kv_in_section "$JANUS_JCFG" events broadcast true
+	# With broadcast on, Janus loads every event handler it has, and the unused ones each log a start-up WARN (GELF a
+	# FATAL "giving up"). Only the sample handler is used. Scoped to events:{}: plugins/transports/loggers have `disable` too.
+	sed -i '/^events:[[:space:]]*{/,/^}/ s|^\([[:space:]]*\)#*[[:space:]]*disable = .*|\1disable = "libjanus_wsevh.so,libjanus_nanomsgevh.so,libjanus_rabbitmqevh.so,libjanus_gelfevh.so,libjanus_mqttevh.so"|' "$JANUS_JCFG"
+	cat > "$CONF_DIR/janus.eventhandler.sampleevh.jcfg" <<EOF
+# Written by the legion-voice entrypoint (slice A.5): Janus session, handle, WebRTC and plugin events for the ICE
+# diagnostics collector on loopback. No jsep (SDP) and no media events. JS_ICE_DIAG_HISTORY=0 turns this off.
+general: {
+	enabled = true
+	events = "sessions,handles,webrtc,plugins"
+	grouping = true
+	json = "compact"
+	backend = "http://127.0.0.1:${SLV_ICE_DIAG_PORT}/events"
+	max_retransmissions = 3
+	retransmissions_backoff = 100
+}
+EOF
+fi
+
 # ---- 3. Operator overrides (mounted file > env) ----
 if [ -d "$OVERRIDE_DIR" ]; then
 	for f in "$OVERRIDE_DIR"/*.jcfg; do
@@ -467,6 +505,46 @@ if [ -d "$OVERRIDE_DIR" ]; then
 		echo "[entrypoint] applying override $(basename "$f")"
 		cp -f "$f" "$CONF_DIR/$(basename "$f")"
 	done
+fi
+
+# ---- Janus debug level vs TURN REST credentials (slice A.5) ----
+# At debug level 5 Janus prints the TURN REST request URI with the API key (turnrest.c:166) and the REST response with
+# the TURN username and password (turnrest.c:194), and at 6 the credentials again (ice.c:3657-3658). Said loudly at
+# every start, not only in the docs. The level is Janus's -d/--debug-level argument when given, else debug_level in
+# the final janus.jcfg (mounted overrides included), else Janus's default 4. TURN REST counts as configured from
+# JS_TURN_REST_API or from an uncommented turn_rest_api in that janus.jcfg.
+jcfg_value() {
+	sed -n "/^$2:[[:space:]]*{/,/^}/p" "$1" 2>/dev/null | grep -E "^[[:space:]]*$3[[:space:]]*=" | head -n 1 \
+		| sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]*#.*$//; s/^"//; s/"$//'
+}
+janus_arg_debug_level() {
+	level=""; take=""
+	for arg in "$@"; do
+		if [ -n "$take" ]; then level=$arg; take=""; continue; fi
+		case "$arg" in
+			-d|--debug-level) take=1 ;;
+			--debug-level=*)  level=${arg#--debug-level=} ;;
+			-d[0-9]*)         level=${arg#-d} ;;
+		esac
+	done
+	printf '%s' "$level"
+}
+JANUS_DEBUG_LEVEL=$(janus_arg_debug_level "$@")
+[ -n "$JANUS_DEBUG_LEVEL" ] || JANUS_DEBUG_LEVEL=$(jcfg_value "$JANUS_JCFG" general debug_level)
+case "$JANUS_DEBUG_LEVEL" in ''|*[!0-9]*) JANUS_DEBUG_LEVEL=4 ;; esac
+if [ -n "$JS_TURN_REST_API" ] || [ -n "$(jcfg_value "$JANUS_JCFG" nat turn_rest_api)" ]; then
+	if [ "$JANUS_DEBUG_LEVEL" -ge 5 ]; then
+		for line in \
+			"=====================================================================================================" \
+			"Janus debug level is ${JANUS_DEBUG_LEVEL} and TURN REST is configured (turn_rest_api)." \
+			"At debug level 5 and above Janus WILL PRINT TURN REST CREDENTIALS INTO THIS LOG: the REST request URI" \
+			"with the API key, and the REST response with the TURN username and password (at 6, the credentials again)." \
+			"Anyone who can read this log can use your TURN server. Set debug_level back to 4 (Janus's default), or" \
+			"stop using TURN REST while debugging, and treat any log written at this level as secret." \
+			"====================================================================================================="; do
+			echo "[entrypoint] WARNING: $line" >&2
+		done
+	fi
 fi
 
 # ---- 4. Periodic public address re-check (slice A.1) ----
@@ -480,6 +558,24 @@ if [ -n "$ADDR_HOST" ] && [ "$JS_PUBLIC_IP_DISCOVERY" != static ] && [ "$JS_PUBL
 		sh "$SLV_LIB_DIR/public-address-watch.sh" &
 elif [ -n "$ADDR_HOST" ]; then
 	echo "[entrypoint] INFO: periodic public address re-check off (JS_PUBLIC_IP_REFRESH_S=${JS_PUBLIC_IP_REFRESH_S}, JS_PUBLIC_IP_DISCOVERY=${JS_PUBLIC_IP_DISCOVERY})"
+fi
+
+# ---- 4b. ICE diagnostics collector (slice A.5) ----
+# Receives Janus's events (configured above) and keeps session records for `legion-voice-selfcheck --sessions`. It is
+# restarted if it exits, and reloads its file, so records survive. SLV_ICE_DIAG_CMD and SLV_ICE_DIAG_ONCE are test seams.
+: "${SLV_ICE_DIAG_CMD:=$SLV_LIB_DIR/ice_diag.py}"
+: "${SLV_ICE_DIAG_ONCE:=}"
+if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
+	export JS_ICE_DIAG_HISTORY JS_ADMIN_PORT JS_ADMIN_BASEPATH SLV_ICE_DIAG_PORT
+	(
+		while :; do
+			rc=0
+			"$SLV_ICE_DIAG_CMD" || rc=$?
+			[ -z "$SLV_ICE_DIAG_ONCE" ] || break
+			echo "[ice-diag] WARNING: the ICE diagnostics collector exited (${rc}); restarting it in 5 s" >&2
+			sleep 5
+		done
+	) &
 fi
 
 # ---- 5. Startup self-check (slice A.2) ----
@@ -501,5 +597,5 @@ if [ "$JS_SELFCHECK" = on ]; then
 fi
 
 if [ "$JS_WS_ENABLED" = true ]; then ws_desc="${JS_WS_PORT}"; else ws_desc="off"; fi
-echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${ws_desc} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_1_1_mapping=${NAT_MAPPING:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST} empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
+echo "[entrypoint] starting Janus: server_name=${JS_SERVER_NAME} http=${JS_HTTP_PORT}${JS_HTTP_BASEPATH} admin=${JS_ADMIN_PORT}${JS_ADMIN_BASEPATH} ws=${ws_desc} rtp=${JS_RTP_PORT_RANGE} public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_1_1_mapping=${NAT_MAPPING:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST} empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S} debug_level=${JANUS_DEBUG_LEVEL}"
 exec "$JANUS_BIN" "$@"
