@@ -15,6 +15,91 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.6: source addresses, deployment recipes (untagged) — 2026-09-15
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 07:00 | `c7b57f56` | `legion-voice-mixer:rollback-pre-a6` (`1e40da39`, the A.5 image, tagged before the rebuild) |
+
+The last slice of Phase A.
+- **Does a viewer's source address reach Janus?** Measured, not reasoned (`docs/docker-notes.md` → "Source addresses
+  (A.6)").
+- **Two deployment recipes**, each ending in a board to compare against: `docs/recipe-home-hosted.md` and
+  `docs/recipe-vps.md`.
+- **A nothing-installed phone method** for `--listen`.
+- **The path classifier reads the peer's side of the pair.**
+- **Harness S14.**
+
+**Part 1, measured with `tests/integration/source_probe.py`:**
+
+| Case | Janus's selected pair | Source | Diagnostics path |
+|---|---|---|---|
+| (a) published ports, Docker Desktop 28.3.0 / WSL2 (Legion Grid) | `174.82.163.190:10074 [prflx,udp] <-> 172.23.0.1:60319 [prflx,udp]` | rewritten to the gateway | `undetermined` |
+| (a) published ports, Linux dockerd 28.3.0, userland proxy on | `172.31.66.10:10005 [prflx,udp] <-> 172.31.66.20:35374 [host,udp]` | preserved | `direct` |
+| (b) published ports, Linux dockerd, `userland-proxy: false` | `172.31.66.10:10001 [prflx,udp] <-> 172.31.66.20:40854 [host,udp]` | preserved | `direct` |
+| (c) `network_mode: host`, Linux dockerd | `172.31.66.10:10019 [host,udp] <-> 172.31.66.20:44865 [host,udp]` | preserved | `direct` |
+
+- **How the Linux cases ran:** on an isolated `docker:28.3.0-dind`, with the peer in a separate container on the same
+  network. Docker Desktop (b) and (c) were **not measured**: each needs an engine restart, which would stop the grid's
+  databases, and John chose Linux-only.
+- **Recommendation:** keep published ports as the shipped default. They are the only mode that works on Docker
+  Desktop, and on Linux they already preserve addresses. Host networking is optional on a VPS, and costs port control.
+  `userland-proxy: false` is a daemon-wide resource choice, never needed for addresses.
+- **Product limitation on Docker Desktop:** no viewer's address reaches the mixer, so the diagnostics path is always
+  `undetermined`.
+
+**A.5's open items, closed:**
+- **Handle `7527824292841000`, with no agent or room, is S4's second peer.** S4 runs `docker compose restart janus`
+  as soon as both peers are ready. In the A.5 rerun the same peer (handle `4109178822902086`) finished DTLS at
+  11:12:09.888, 232 ms before `Stopping server` at 11:12:10.120. The sample event handler sets `stopping` before its
+  exit event (`janus_sampleevh.c:275`, `:277`) and does not drain its queue (`:454`), so that peer's joined and
+  webrtcup events were never delivered. It reproduced on both A.5 runs, and is now documented as a limit.
+- **The collector is running:** pid 328, started 11:12:32, alive. A.5's "collector not running" warning fell inside
+  S4's restart gap (last write 11:03:50, new collector 11:04:12, with S4 in progress on the harness log).
+
+**Verified:**
+- **Image build:** C suites OK; `test_addr_probe.py` 39, OK; `test_selfcheck.py` 67, OK; `test_ice_diag.py` 32, OK;
+  `entrypoint_test.sh` 131 passed, 0 failed.
+- **Start (Legion Grid, `c7b57f56`):** C1 PASS (174.82.163.190 discovered by stun), C2a WARN (local 10000 →
+  174.82.163.190:63888), C2b INCONCLUSIVE, C3–C6 PASS; exit 2. This is the board the home-hosted recipe quotes.
+- **Phone method:** `--listen` in the live container, receipt redirected to a scratch file. Headless Chrome opened the
+  printed `data:` link, the page read "sending to 174.82.163.190 port 10000", and the listener logged `PASS: the probe
+  arrived on UDP 10000 from 172.23.0.1:36704`. This was desktop Chrome through the router's hairpin; **no real phone
+  browser was tried.**
+- **Harness: 13/13** in 286.2 s (rooms 907389600..907389613), with `turn-test` up for S13 and removed after:
+  ```
+  PASS  S1  join/leave/rejoin (16.1 s)                 PASS  S8  hangup then rejoin with the same display (16.0 s)
+  PASS  S2  crash without leave (21.6 s)               PASS  S10 join whose PeerConnection never comes up is reaped (41.9 s)
+  PASS  S3  moderation mute persistence (16.5 s)       PASS  S11 a moderation-muted source lights no dot (17.0 s)
+  PASS  S4  mixer restart mid-session (43.1 s)         PASS  S12 spatial path: cull and pan (11.1 s)
+  PASS  S5  room switch = TP, grace destroy (77.3 s)   PASS  S13 relay path (6.2 s)
+  PASS  S6  peer_ctl table full (5.6 s)                PASS  S14 the diagnostics path verdict agrees with the source (8.4 s)
+  PASS  S7  geometry persistence (5.5 s)
+  ```
+  S14 info: `Janus pair 174.82.163.190:10029 [prflx,udp] <-> 172.23.0.1:53548 [prflx,udp]; A's own addresses
+  ['172.18.128.1', '172.22.0.1', '174.82.163.190', '192.168.1.225']; source rewritten; diagnostics path
+  undetermined`. The preserved branch runs only on a Linux mixer.
+- **Grid left on the shipped configuration:** published ports, compose file unchanged, no TURN, no `turn-test`, no
+  inbound receipt written. The measurement rig (dind containers, network, peer image) was removed.
+
+**Findings:**
+- **A.5's classifier underclaimed `direct`.** A published port's DNAT makes Janus's own side of the pair prflx even
+  when the peer's real address arrives, and A.5 treated prflx on either side as `undetermined`. A.6 reads the peer's
+  side. The unit test pins the measured Linux pair.
+- **TLS against a real CA chain is still untested.** The image carries Ubuntu 18.04's `ca-certificates` (137
+  certificates); whether libnice validates TURN certificates is unknown.
+
+### Behaviour changes on upgrade
+- **Session diagnostics:** a pair whose peer side is host or srflx now reads `direct` even when Janus's side is prflx.
+  On Docker Desktop nothing changes (the peer side is prflx there).
+- **`legion-voice-selfcheck --listen`** prints one more method, a `data:` link for a phone with nothing installed. It
+  also accepts the probe token without its dashes (the form that fits an ICE ufrag).
+
+### One-time migrations
+None.
+
+---
+
 ## Mixer A.5: ICE diagnostics (untagged) — 2026-09-15
 
 | Deployed (CDT) | Image | Rollback tag |

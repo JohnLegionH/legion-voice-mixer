@@ -70,6 +70,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -473,6 +474,30 @@ def check_c2b(inbound_file, range_text, max_age_h, public_addrs, now=None):
                          "not seen until the receipt goes stale (JS_SELFCHECK_INBOUND_MAX_AGE_H)"])
 
 
+def probe_ufrag(token):
+    """The token as an ICE ufrag (letters, digits, + and / only), for the browser method."""
+    return re.sub(r"[^A-Za-z0-9+/]", "", token)
+
+
+def probe_page_url(ufrag, address, port):
+    """A data: URL whose page needs nothing installed: it gives the browser a WebRTC offer whose only candidate is
+    address:port, so the browser's ICE connectivity checks (STUN Binding requests, USERNAME "<ufrag>:<its own>") carry
+    the probe to the listening port. Nothing but those checks is sent, and nothing is loaded from anywhere."""
+    sdp = "\\r\\n".join([
+        "v=0", "o=- 1 1 IN IP4 0.0.0.0", "s=-", "t=0 0", "a=group:BUNDLE 0",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel", "c=IN IP4 0.0.0.0", "a=mid:0",
+        "a=ice-ufrag:%s" % ufrag, "a=ice-pwd:legionvoiceprobepassword0", "a=fingerprint:sha-256 " + ":".join(["AB"] * 32),
+        "a=setup:actpass", "a=sctp-port:5000", "a=candidate:1 1 udp 2130706431 %s %d typ host" % (address, port), ""])
+    page = ("<!doctype html><meta name=viewport content='width=device-width'><title>legion-voice probe</title>"
+            "<body style='font:18px sans-serif;margin:1em'><b>legion-voice inbound probe</b><p id=s>starting</p><script>"
+            "(async()=>{const s=document.getElementById('s');try{const pc=new RTCPeerConnection();"
+            "await pc.setRemoteDescription({type:'offer',sdp:'%s'});await pc.setLocalDescription(await pc.createAnswer());"
+            "s.textContent='sending to %s port %d: keep this page open for 20 seconds';"
+            "setTimeout(()=>{pc.close();s.textContent='done: look at the listener'},20000)}"
+            "catch(e){s.textContent='this browser refused: '+e}})()</script>" % (sdp, address, port))
+    return "data:text/html;charset=utf-8," + urllib.parse.quote(page, safe="")
+
+
 def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time):
     """The --listen mode: bind a free port of the RTP range, print the outside-device commands, wait for one, and
     record a receipt for C2b. Returns the exit status (see the module docstring)."""
@@ -512,6 +537,7 @@ def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time)
         return 1
 
     token = token or "legion-voice-probe-" + os.urandom(4).hex()
+    ufrag = probe_ufrag(token)
     public = check_c1(cfg["state_file"])["_facts"].get("public", [])
     target = public[0] if public else "<this server's public IPv4>"
     if port is not None:
@@ -528,6 +554,10 @@ def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time)
              "  echo %s | timeout 3 nc -u -w1 %s %d" % (token, target, chosen),
              "(the nc form is for phones and minimal images without bash or python3; busybox nc -u -w1 can hang after "
              "sending, so timeout stops it, or use busybox timeout 3 if timeout is missing)",
+             "from a phone with nothing installed: turn its Wi-Fi OFF (mobile data only), send yourself the link below "
+             "(e.g. in a message), open it in the phone's browser within the %g s and keep the page open for 20 s. "
+             "The page makes the browser's WebRTC send connectivity checks carrying the probe to this port:" % seconds,
+             "  " + probe_page_url(ufrag, target, chosen),
              "UDP can drop a packet, so send it two or three times. Waiting..."]
     if not public:
         lines.insert(2, "no public address is advertised (see C1): replace %s with the address outside viewers use"
@@ -548,7 +578,7 @@ def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time)
                 data, source = sock.recvfrom(4096)
             except socket.timeout:
                 break
-            if token.encode("ascii") not in data:
+            if token.encode("ascii") not in data and ufrag.encode("ascii") not in data:
                 strays += 1
                 continue
             received = clock()

@@ -273,12 +273,20 @@ class PathTests(unittest.TestCase):
             self.store.apply_handle_info(hid, {"plugin": PLUGIN, "webrtc": {"ice": {"remote-candidates": lines}}})
         return ice_diag.view(self.store.live[hid])["path"]
 
-    def test_a_prflx_pair_is_undetermined_never_relay_or_direct(self):
-        for n, (lt, rt) in enumerate((("prflx", "prflx"), ("host", "prflx"), ("prflx", "srflx"))):
+    def test_a_prflx_peer_side_is_undetermined_never_relay_or_direct(self):
+        for n, (lt, rt) in enumerate((("prflx", "prflx"), ("host", "prflx"), ("srflx", "prflx"))):
             p = self.path(300 + n, lt, rt)
             self.assertEqual(p["verdict"], "undetermined", (lt, rt))
             self.assertEqual(p["caveat"], ice_diag.PATH_CAVEAT)
             self.assertIn("published-port", p["caveat"])
+
+    def test_janus_side_prflx_with_the_peers_own_address_is_direct(self):
+        """A.6, measured on Linux dockerd with published ports: 172.31.66.10:10019 [prflx,udp] <-> 172.31.66.20:45333
+        [host,udp]. The DNAT makes Janus's side prflx; the peer's real address arrived, so the path is direct."""
+        for n, (lt, rt) in enumerate((("prflx", "host"), ("prflx", "srflx"))):
+            p = self.path(305 + n, lt, rt)
+            self.assertEqual(p["verdict"], "direct", (lt, rt))
+            self.assertEqual(p["caveat"], ice_diag.PATH_CAVEAT)
 
     def test_relay_candidates_offered_with_a_prflx_pair_is_a_note_not_a_verdict(self):
         p = self.path(310, "prflx", "prflx", remote_relay=2)

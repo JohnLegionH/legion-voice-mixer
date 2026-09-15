@@ -215,18 +215,22 @@ def classify_path(rec):
         verdict, basis = "none", "no candidate pair was selected, so there is no path to classify"
     else:
         lt, rt = pair["local"]["type"], pair["remote"]["type"]
+        # The peer's side decides (A.6, measured): a published port DNATs Janus's own address, so Janus's local side reads
+        # prflx even when the peer's real address arrives untouched. The peer's side reads prflx only when its source
+        # address was rewritten on the way (Docker Desktop's port proxy) or learned from checks.
         if lt == "relay":
             verdict, basis = "relay", "Janus's side of the selected pair is a relay candidate: Janus sends through its own TURN server"
         elif rt == "relay":
             verdict, basis = "relay", "the peer's side of the selected pair is a relay candidate the peer signalled"
-        elif "prflx" in (lt, rt):
+        elif rt == "prflx":
             verdict = "undetermined"
-            basis = ("the selected pair has a prflx candidate (local %s, remote %s): an address learned from connectivity "
-                     "checks, which a relayed peer arriving through the port publish and a direct peer both produce"
-                     % (lt, rt))
-        elif lt in ("host", "srflx") and rt in ("host", "srflx"):
-            verdict, basis = "direct", ("both sides of the selected pair are host or server-reflexive candidates (local %s, "
-                                        "remote %s)" % (lt, rt))
+            basis = ("the peer's side of the selected pair is prflx (local %s): an address learned from connectivity "
+                     "checks, not one the peer signalled. A source address rewritten on the way (Docker Desktop's port "
+                     "proxy shows its gateway) produces this for relayed and direct peers alike" % lt)
+        elif rt in ("host", "srflx"):
+            verdict, basis = "direct", ("the peer's side of the selected pair is a %s candidate the peer signalled (local "
+                                        "%s), so its own address reached Janus and it is not relaying through a TURN "
+                                        "server of its own" % (rt, lt))
         else:
             verdict, basis = "undetermined", "unrecognised candidate types in the selected pair (local %s, remote %s)" % (lt, rt)
     if offered and verdict != "relay":

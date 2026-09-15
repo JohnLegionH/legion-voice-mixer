@@ -83,6 +83,11 @@ You should see `"janus.plugin.slvoice":{"name":"Legion SLVoice mixer"...}` in th
 > `:14225/voiceAdmin`) with the same secrets. For a generic Janus setup instead,
 > set `JS_HTTP_BASEPATH=/janus` and `JS_ADMIN_BASEPATH=/admin` in `.env`.
 
+> **Deploying for real:** follow one of the two recipes. Each lists the router forwards, firewall rules and
+> every `.env` value for its target, and ends with the self-check board you should see:
+> [`docs/recipe-home-hosted.md`](docs/recipe-home-hosted.md) (a home server behind consumer NAT with DDNS) or
+> [`docs/recipe-vps.md`](docs/recipe-vps.md) (a VPS or colo box with a public IPv4).
+
 To stop / update:
 
 ```sh

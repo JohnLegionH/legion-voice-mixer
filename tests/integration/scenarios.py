@@ -1,4 +1,4 @@
-"""The churn scenarios S1-S8 and S10-S13 -- the mixer's robustness contract (README.md in this directory).
+"""The churn scenarios S1-S8 and S10-S14 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down
 in a finally block. Every expectation is a poll of the oracle (Admin API handle_info, or the
@@ -7,6 +7,7 @@ plugin's list / listparticipants) with a bounded timeout; nothing sleeps blindly
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 
 from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Skip, compose, displays,
                                        fields, new_display, pick, until, wait_mixer_up)
+from tests.integration.source_probe import own_candidates, parse_pair, verdict
 
 
 @dataclass(frozen=True)
@@ -367,6 +369,45 @@ async def s13_relay_only_peer(ctx: Ctx) -> None:
     await until(a.packets_received, lambda n: n > 25, "A receives the mixer's audio back through the relay")
 
 
+async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
+    """A.6: the ICE diagnostics path verdict agrees with where the peer's packets actually came from.
+    Ground truth is the source probe's comparison: the remote end of Janus's selected pair is, or is not, one of the
+    addresses the peer itself holds (its own offer's candidates). After A's session ends, its diagnostics record must
+    read `undetermined` when the source was rewritten on the way (a Docker Desktop port publish), never direct or relay,
+    and `direct` when the source survived (a Linux published port or host networking). Only one branch can run on a
+    given deployment; the info line says which."""
+    r = ctx.new_room()
+    a = await ctx.join("A", r)
+    await ctx.ready(a)
+    sid, hid = a.ids
+    ice = await until(lambda: ctx.admin.handle_ice(a), lambda i: bool(i and i.get("selected-pair")),
+                      "A has a selected candidate pair")
+    truth = verdict(own_candidates(a._pc.localDescription.sdp), parse_pair(ice.get("selected-pair")))
+    await a.close()
+
+    async def record():
+        res = await compose(ctx.cfg, "exec", "-T", "janus", "legion-voice-selfcheck", "--session", str(hid), "--json",
+                            timeout=30.0)
+        try:
+            data = json.loads(res.stdout or "{}")
+        except ValueError:
+            return None
+        return data.get("session") if data.get("found") else None
+
+    rec = await until(record, lambda s: s is not None and s.get("live") is False,
+                      "A's ICE diagnostics record exists and has ended", timeout=20.0, step=1.0)
+    path = rec.get("path") or {}
+    print(f"      S14 info: Janus pair {ice.get('selected-pair')}; A's own addresses {truth.get('peer_addresses')}; "
+          f"source {truth['verdict']}; diagnostics path {path.get('verdict')}", flush=True)
+    expected = {"rewritten": "undetermined", "preserved": "direct"}.get(truth["verdict"])
+    if expected is None:
+        raise Fail("A's selected pair can be parsed", {"selected-pair": ice.get("selected-pair")})
+    if path.get("verdict") != expected:
+        raise Fail(f"a {truth['verdict']} source address reads {expected} in the diagnostics record",
+                   {"selected-pair": ice.get("selected-pair"), "peer_addresses": truth.get("peer_addresses"),
+                    "path": path})
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -382,4 +423,6 @@ SCENARIOS = [
              "O-80, O-83, spatial coverage", s12_spatial_cull_and_pan),
     Scenario("S13", "relay path: a peer offering only relay candidates carries media both ways",
              "A.3 TURN, relay path end to end", s13_relay_only_peer),
+    Scenario("S14", "the diagnostics path verdict agrees with where the peer's packets came from",
+             "A.6 source address, SC-126", s14_path_verdict_matches_source),
 ]

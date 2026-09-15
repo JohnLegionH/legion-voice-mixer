@@ -372,8 +372,8 @@ the mixer. Every verdict carries that caveat:
 | Verdict | Basis |
 |---|---|
 | `relay` | a relay candidate on either side of the selected pair: Janus's own TURN relay, or one the peer signalled |
-| `direct` | both sides host or srflx |
-| `undetermined` | a prflx candidate on either side (and no relay). If the peer signalled relay candidates, a note says it may be relaying; that is never promoted to a verdict |
+| `direct` | the peer's side is host or srflx: its own signalled address reached Janus. Janus's side may read prflx, which a published port's DNAT causes and which says nothing about the peer (A.6, measured) |
+| `undetermined` | the peer's side is prflx (and no relay): its source address was rewritten on the way, or learned only from checks. If the peer signalled relay candidates, a note says it may be relaying; that is never promoted to a verdict |
 | `none` | no pair was selected |
 
 **Exit status**, as in the check run: `0` = no FAIL and no INCONCLUSIVE among the sessions shown; `1` = any FAIL; `2` =
@@ -402,6 +402,12 @@ restart are kept as ended, with the end marked as not observed) and is lost when
 - remote candidate counts need the poll, so a session shorter than 2 s, or a mixer without `JS_ADMIN_SECRET` in the
   container's environment, shows them as not observed;
 - `JS_ICE_DIAG_HISTORY=0` turns all of it off, and `janus.jcfg` is then byte-identical to before A.5.
+- **Events queued when Janus stops are lost.** The sample event handler sets `stopping` before its exit event
+  (`janus_sampleevh.c:275`, `:277`), and its loop runs only while not stopping (`:454`). A session that joined in the
+  last moment before a mixer stop is recorded with no agent or room, and INCONCLUSIVE with its end not observed.
+  Seen on every harness run: S4 restarts the mixer 0.23 s after its second peer's DTLS completes.
+- **On Docker Desktop the path is always `undetermined`:** every viewer arrives from the Docker gateway (see
+  "Source addresses (A.6)").
 
 **TURN REST credentials at raised debug levels.** Janus prints them at debug level 5 and above (see "TURN for the
 mixer"). When the effective level is 5 or more and TURN REST is configured, every start prints a WARNING block that
@@ -487,6 +493,12 @@ operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Slice A.6: source addresses and recipes**
+  - **Path classifier:** the diagnostics path follows the peer's side of the selected pair. host or srflx there reads
+    `direct` even when Janus's side is prflx (a published port's DNAT). Docker Desktop is unchanged: `undetermined`.
+  - **`--listen`** prints a `data:` link for a phone with nothing installed, and accepts the probe token without its
+    dashes.
+  - No knob, default or compose change. The shipped network mode stays published ports ("Source addresses (A.6)").
 - **Slice A.5: ICE diagnostics**
   - **New knob `JS_ICE_DIAG_HISTORY` (default 200).** Janus's event broadcast is now on, with the sample event handler
     posting to a loopback collector, and `janus.jcfg` gains `broadcast = true` and an events `disable` of Janus's
@@ -726,6 +738,56 @@ depend on ICE. Only the WebRTC media leg needs the mapping.
 **Linux** host you can instead uncomment `network_mode: host` in
 `docker-compose.yml` — it skips the proxy entirely and lets Janus read the host
 interfaces directly for ICE. That block is kept commented for exactly this case.
+
+## Source addresses (A.6)
+
+**The question.** Does a viewer's real address reach Janus, or does the path in front of the container rewrite it?
+It decides whether the ICE diagnostics can say relay or direct, and whether anything in the mixer could ever act on
+a peer's address.
+
+**Measured 2026-09-15** with `tests/integration/source_probe.py`: one peer brings media up, and the remote end of
+Janus's selected pair is compared with the addresses the peer holds. The Linux cases ran on an isolated dockerd
+(`docker:28.3.0-dind`), the peer in its own container on another address of the same network, image `c7b57f56`.
+
+| Case | Janus's selected pair (local <-> remote) | Source address | Diagnostics path |
+|---|---|---|---|
+| (a) published ports, **Docker Desktop 28.3.0 on Windows (WSL2)**, peer on the host | `174.82.163.190:10074 [prflx,udp] <-> 172.23.0.1:60319 [prflx,udp]` | **rewritten** to the Docker network gateway | `undetermined` |
+| (a) published ports, **Linux dockerd 28.3.0**, userland proxy on (default) | `172.31.66.10:10005 [prflx,udp] <-> 172.31.66.20:35374 [host,udp]` | **preserved** | `direct` |
+| (b) published ports, Linux dockerd, `userland-proxy: false` | `172.31.66.10:10001 [prflx,udp] <-> 172.31.66.20:40854 [host,udp]` | **preserved** | `direct` |
+| (c) `network_mode: host`, Linux dockerd | `172.31.66.10:10019 [host,udp] <-> 172.31.66.20:44865 [host,udp]` | **preserved** | `direct` |
+
+The Docker Desktop row ran against the live Legion Grid mixer (image `1e40da39`); the classifier reads prflx on the
+peer's side as `undetermined` in both images. An earlier pass of the three Linux cases with the A.5 image found the
+same pairs' shape (prflx/host, prflx/host, host/host), which that image's classifier still called `undetermined` for
+(a) and (b). That underclaim is why A.6 changed the classifier.
+
+**What this means:**
+- **It is not a container limitation. It is Docker Desktop's.** Docker Desktop forwards a published port from
+  Windows into its VM with its own proxy, and every viewer then reaches Janus from `172.23.0.1`. A Linux host's
+  published ports use DNAT, and the viewer's own address arrives. Janus's *local* side still reads prflx there,
+  because the DNAT changes Janus's address, not the peer's; the classifier reads the peer's side (A.6).
+- **Product limitation on Docker Desktop:** no per-viewer address reaches the mixer, so the diagnostics path is
+  always `undetermined` and relay cannot be told from direct. Media works regardless.
+- **Not measured:** (b) and (c) on Docker Desktop. Each needs an engine restart, which would have stopped the
+  Legion Grid databases on the same engine. A viewer on the *same* Linux host as the mixer (loopback or hairpin,
+  where the userland proxy is involved) was not measured either.
+
+**Costs of each mode:**
+
+| Mode | Port control | Cost | Where it works |
+|---|---|---|---|
+| (a) published ports (shipped) | full: each port is published, and `JS_ADMIN_BIND` narrows the admin port | one `docker-proxy` process per published port and family: 46 and 48 counted in two runs of the 23-port test mixer (the shipped 204 ports mean hundreds) | Docker Desktop (Windows, macOS) and Linux |
+| (b) `userland-proxy: false` | as (a) | a **daemon-wide** setting in `/etc/docker/daemon.json` that changes every container on the host; `docker-proxy` processes fell to 2; `127.0.0.1:24223` from the Docker host still answered | Linux (Docker Desktop not measured) |
+| (c) `network_mode: host` | **none**: Janus binds HTTP, admin and WebSockets on every host interface; `JS_ADMIN_BIND` has no effect, and only a host firewall narrows them; ports can collide with host services | no proxies, no port publishing | Linux only. On Docker Desktop the ports land in the VM and the Windows host cannot reach them (verified before A.1) |
+
+**Recommendation.**
+- **The shipped compose file stays on published ports (a).** It is the only mode that works on Docker Desktop,
+  and on Linux it already preserves viewers' addresses, so (b) and (c) buy nothing for the address question.
+- **Home-hosted:** published ports. On Docker Desktop accept the limitation above; on a Linux home server the
+  addresses arrive.
+- **VPS / colo (Linux):** published ports. Host networking (c) only for an operator who wants the proxies gone
+  and firewalls every Janus port on the host itself. `userland-proxy: false` (b) is a resource choice with
+  daemon-wide effect, never needed for source addresses.
 
 ## Divergences from os-webrtc-janus-docker
 

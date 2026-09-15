@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -278,6 +279,29 @@ class Listen(Base):
         self.assertEqual((record["result"], record["port"]), (PASS, self.lo))
         r = selfcheck.check_c2b(self.cfg["inbound_file"], self.cfg["rtp_range"], 168, ["174.82.163.190"])
         self.assertEqual(r["status"], PASS, r["observed"])
+
+    def test_the_phone_page_link_carries_the_probe_and_a_browser_check_is_a_receipt(self):
+        """A.6: the nothing-installed method. The printed data: URL holds a WebRTC offer whose only candidate is the
+        public address and port, with the token as the ICE ufrag; the browser's STUN check carries USERNAME
+        "<ufrag>:<its own ufrag>", and that is accepted as the probe."""
+        out = io.StringIO()
+        ufrag = selfcheck.probe_ufrag(self.TOKEN)
+        self.assertEqual(ufrag, "legionvoiceprobetest")
+        stun_check = b"\x00\x01\x00\x24\x21\x12\xa4\x42" + os.urandom(12) + b"\x00\x06\x00\x19" + \
+            (ufrag + ":Ab3x").encode("ascii") + b"\x00\x00\x00"
+        self.send_later(self.lo, [stun_check])
+        code = selfcheck.listen(self.cfg, None, 5.0, out, token=self.TOKEN)
+        text = out.getvalue()
+        self.assertEqual(code, 0, text)
+        self.assertIn("from a phone with nothing installed: turn its Wi-Fi OFF", text)
+        link = [line.strip() for line in text.splitlines() if "data:text/html" in line][0].split("] ", 1)[1].strip()
+        self.assertTrue(link.startswith("data:text/html;charset=utf-8,"))
+        page = urllib.parse.unquote(link.split(",", 1)[1])
+        self.assertIn("a=ice-ufrag:%s" % ufrag, page)
+        self.assertIn("a=candidate:1 1 udp 2130706431 174.82.163.190 %d typ host" % self.lo, page)
+        self.assertIn("new RTCPeerConnection()", page)
+        self.assertNotIn("http", page.replace("http-equiv", ""))   # nothing is loaded from anywhere
+        self.assertEqual(read_json(self.cfg["inbound_file"])["result"], PASS)
 
     def test_picks_a_free_port_and_says_which(self):
         self.hold_udp(self.lo)
