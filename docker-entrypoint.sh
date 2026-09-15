@@ -66,6 +66,8 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 # Slice A.2: the startup self-check (docs/docker-notes.md, "Startup self-check").
 : "${JS_SELFCHECK:=on}"
 : "${JS_SELFCHECK_TIMEOUT_S:=20}"
+# Slice A.2b: hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS.
+: "${JS_SELFCHECK_INBOUND_MAX_AGE_H:=168}"
 
 # The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
 SLV_LIB_DIR=${SLV_LIB_DIR:-/usr/local/lib/legion-voice}
@@ -107,6 +109,11 @@ if [ "$JS_SELFCHECK_TIMEOUT_S" -eq 0 ]; then
 	echo "[entrypoint] WARNING: JS_SELFCHECK_TIMEOUT_S=0 is not a usable bound; using 20" >&2
 	JS_SELFCHECK_TIMEOUT_S=20
 fi
+JS_SELFCHECK_INBOUND_MAX_AGE_H=$(uint_or_default JS_SELFCHECK_INBOUND_MAX_AGE_H "$JS_SELFCHECK_INBOUND_MAX_AGE_H" 168)
+if [ "$JS_SELFCHECK_INBOUND_MAX_AGE_H" -eq 0 ]; then
+	echo "[entrypoint] WARNING: JS_SELFCHECK_INBOUND_MAX_AGE_H=0 is not a usable age; using 168" >&2
+	JS_SELFCHECK_INBOUND_MAX_AGE_H=168
+fi
 
 secret_state() {
 	if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo EMPTY; else echo set; fi
@@ -126,7 +133,7 @@ echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH}
 echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
 echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
-echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json])"
+echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} inbound_max_age_h=${JS_SELFCHECK_INBOUND_MAX_AGE_H} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json], inbound proof: legion-voice-selfcheck --listen)"
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
@@ -319,10 +326,11 @@ addr_write_state "$ADDR_JSON" "[entrypoint]"
 # values but not the defaults assigned above. No secrets go in this file.
 : "${SLV_EFFECTIVE_CONFIG:=/run/legion-voice/effective-config.json}"
 slv_json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-EFFECTIVE_JSON=$(printf '{"JS_RTP_PORT_RANGE":"%s","JS_HTTP_PORT":"%s","JS_HTTP_BASEPATH":"%s","JS_ADMIN_PORT":"%s","JS_ADMIN_BASEPATH":"%s","JS_ADMIN_BIND":"%s","JS_STUN_SERVER":"%s","JS_SELFCHECK_TIMEOUT_S":"%s"}' \
+EFFECTIVE_JSON=$(printf '{"JS_RTP_PORT_RANGE":"%s","JS_HTTP_PORT":"%s","JS_HTTP_BASEPATH":"%s","JS_ADMIN_PORT":"%s","JS_ADMIN_BASEPATH":"%s","JS_ADMIN_BIND":"%s","JS_STUN_SERVER":"%s","JS_SELFCHECK_TIMEOUT_S":"%s","JS_SELFCHECK_INBOUND_MAX_AGE_H":"%s"}' \
 	"$(slv_json_escape "$JS_RTP_PORT_RANGE")" "$(slv_json_escape "$JS_HTTP_PORT")" "$(slv_json_escape "$JS_HTTP_BASEPATH")" \
 	"$(slv_json_escape "$JS_ADMIN_PORT")" "$(slv_json_escape "$JS_ADMIN_BASEPATH")" "$(slv_json_escape "$JS_ADMIN_BIND")" \
-	"$(slv_json_escape "$JS_STUN_SERVER")" "$(slv_json_escape "$JS_SELFCHECK_TIMEOUT_S")")
+	"$(slv_json_escape "$JS_STUN_SERVER")" "$(slv_json_escape "$JS_SELFCHECK_TIMEOUT_S")" \
+	"$(slv_json_escape "$JS_SELFCHECK_INBOUND_MAX_AGE_H")")
 slv_write_file "$SLV_EFFECTIVE_CONFIG" "$EFFECTIVE_JSON" "[entrypoint]"
 
 set_kv "$HTTP_JCFG" http            true

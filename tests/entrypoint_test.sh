@@ -289,6 +289,13 @@ check "A.2 self-check on by default, bound 20 s, in the effective values" 'has "
 check "A.2 self-check started in the background with --startup" 'has "SELFCHECK-STUB --startup" && has STUB-JANUS-RAN'
 check "A.2 effective config written for the self-check, without secrets" 'grep -Fq "\"JS_RTP_PORT_RANGE\":\"10000-10200\"" "$CONF/state/effective-config.json" && grep -Fq "\"JS_HTTP_PORT\":\"14223\"" "$CONF/state/effective-config.json" && grep -Fq "\"JS_STUN_SERVER\":\"stun.l.google.com:19302\"" "$CONF/state/effective-config.json" && ! grep -Fq "test-api-secret" "$CONF/state/effective-config.json" && json_ok "$CONF/state/effective-config.json"'
 
+check "A.2b effective config and banner carry JS_SELFCHECK_INBOUND_MAX_AGE_H (default 168)" 'grep -Fq "\"JS_SELFCHECK_INBOUND_MAX_AGE_H\":\"168\"" "$CONF/state/effective-config.json" && has "inbound_max_age_h=168" && has "inbound proof: legion-voice-selfcheck --listen"'
+
+run_ep JS_SELFCHECK_INBOUND_MAX_AGE_H=0
+check "A.2b JS_SELFCHECK_INBOUND_MAX_AGE_H=0 -> WARNING, and 168" 'has "JS_SELFCHECK_INBOUND_MAX_AGE_H=0 is not a usable age; using 168" && grep -Fq "\"JS_SELFCHECK_INBOUND_MAX_AGE_H\":\"168\"" "$CONF/state/effective-config.json"'
+run_ep JS_SELFCHECK_INBOUND_MAX_AGE_H=24
+check "A.2b JS_SELFCHECK_INBOUND_MAX_AGE_H=24 -> passed to the self-check" 'grep -Fq "\"JS_SELFCHECK_INBOUND_MAX_AGE_H\":\"24\"" "$CONF/state/effective-config.json"'
+
 run_ep JS_SELFCHECK=off SLV_SELFCHECK_CMD="$SCSTUB"
 check "A.2 JS_SELFCHECK=off -> not started" '! has "SELFCHECK-STUB" && has "INFO: selfcheck=off"'
 

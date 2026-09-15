@@ -15,6 +15,53 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.2b: C2 corrected, inbound proof (untagged) — 2026-09-14
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 19:29 | `3b416bbe` | `legion-voice-mixer:rollback-pre-a2b` (`de395537`, the A.2 image, tagged before the rebuild) |
+
+This is an entrypoint-only change; the plugin code is the same as V-4.
+- **Why C2 changed.** A.2's C2 failed any container whose container-initiated UDP had its source port
+  remapped. That happens on every containerised deployment (Docker Desktop's VM NAT, iptables MASQUERADE),
+  while a forwarded server's media rides the inbound forward and the published port, a separate mapping.
+- **Now it is split:**
+  - **C2a** reports the outbound mapping as information: a remap is WARN, and only blocked outbound UDP
+    FAILs.
+  - **C2b** is inbound reachability. It is INCONCLUSIVE until
+    `docker compose exec janus legion-voice-selfcheck --listen` records a receipt from an outside device,
+    and it goes stale after `JS_SELFCHECK_INBOUND_MAX_AGE_H`.
+- **C6** warns in one viewer-side sentence.
+- **The END line and JSON** carry the worst status.
+
+**Verified:**
+- **Image build:** C suites; `test_addr_probe.py` 24 tests, OK; `test_selfcheck.py` 51 tests, OK;
+  `entrypoint_test.sh` 94 passed, 0 failed.
+- **Startup block on Legion Grid:**
+  - C1 PASS.
+  - **C2a WARN:** 10000/10100/10200 → 56371/56372/56373.
+  - **C2b INCONCLUSIVE:** no receipt.
+  - C3, C4, C5 PASS; C6 WARN.
+  - `worst INCONCLUSIVE; 4 PASS, 2 WARN, 0 FAIL, 1 INCONCLUSIVE; exit 2`. On demand: exit 2.
+- **`--listen --seconds 20`:** bound UDP 10000 and printed the bash and python3 commands for
+  `174.82.163.190:10000`. Nothing was sent from outside, so it ended INCONCLUSIVE, exit 2, and wrote no
+  receipt. Inbound reachability on this grid is **still unproven**.
+- **Harness:** 11/11 in 272.2 s.
+
+### Behaviour changes on upgrade
+- **C2 → C2a + C2b.** A deployment A.2 reported as C2 FAIL (exit 1) now reports C2a WARN and C2b
+  INCONCLUSIVE (exit 2) until an inbound receipt exists; then exit 0 when nothing else is wrong.
+- **C6's no-TURN WARN** no longer reasons from C2.
+- **The END line starts with `worst <status>`**; the JSON gains `verdict`. Check ids are
+  `C1 C2a C2b C3 C4 C5 C6`.
+- **New knob** `JS_SELFCHECK_INBOUND_MAX_AGE_H` (168). New file `/run/legion-voice/selfcheck-inbound.json`,
+  written only by `--listen`; it survives a restart but not a container recreate.
+
+### One-time migrations
+- None. To move C2b to PASS, run `--listen` once from the Docker host with an outside device at hand.
+
+---
+
 ## Mixer A.2: startup self-check (untagged) — 2026-09-14
 
 | Deployed (CDT) | Image | Rollback |

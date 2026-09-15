@@ -56,6 +56,7 @@ over the whole config dir by default (that was the old model).
 | `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | no jcfg key: with `restart`, the longest wait for zero participants before restarting anyway | `900` |
 | `JS_SELFCHECK` | no jcfg key: `on` runs the reachability self-check in the background once Janus starts, printing one `[selfcheck]` block. `off` skips it. Any other value WARNs and means `on` | `on` |
 | `JS_SELFCHECK_TIMEOUT_S` | no jcfg key: the self-check's time bound, at start and on demand. `0` or a non-integer WARNs and means `20` | `20` |
+| `JS_SELFCHECK_INBOUND_MAX_AGE_H` | no jcfg key: hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS; older receipts go back to INCONCLUSIVE. `0` or a non-integer WARNs and means `168` | `168` |
 | `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
 | `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the discovered and literal addresses (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
 | `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
@@ -199,11 +200,41 @@ INCONCLUSIVE means the check could not decide, and is never reported as PASS.
 | Check | What it tests | Results |
 |---|---|---|
 | C1 advertised address is public | the A.1 state file's `nat_1_1_mapping` | PASS: a public address. **CGNAT (100.64.0.0/10) is its own FAIL**, remediation TURN or a public IPv4. No public address: FAIL naming `JS_PUBLIC_HOST` / `JS_PUBLIC_IP` / `JS_NAT_EXTRA_IPS`. A confirmed address change not yet applied: WARN. Unreadable state: INCONCLUSIVE |
-| C2 media path | STUN Binding requests from sockets bound to the lowest, middle and highest port of `JS_RTP_PORT_RANGE` (the nearest free port if one is in use), to `JS_STUN_SERVER` | Every mapped port equals its local port: PASS. On a VPS whose public address is on the interface, the report says "no address translation" and gives no NAT warning. Any port remapped: FAIL "port-remapping or symmetric NAT: some users will have no direct path, TURN required". No answer while the same server answers an ephemeral port: FAIL "outbound UDP from the media range is blocked". No answer from any port: INCONCLUSIVE. **This proves the outbound mapping only.** A missing router forward or host firewall rule for inbound UDP can still pass C2; the external check is A.6's recipes |
+| C2a media path, outbound (information) | STUN Binding requests from sockets bound to the lowest, middle and highest port of `JS_RTP_PORT_RANGE` (the nearest free port if one is in use), to `JS_STUN_SERVER` | Every mapped port equals its local port: PASS. On a VPS whose public address is on the interface, the report says "no address translation". Any port remapped: **WARN** "container-initiated UDP is source-port remapped; this is normal for a published-port container and does not by itself break a forwarded server". Container-initiated flows are SNATed by the container network layer on every containerised deployment (Docker Desktop's VM, iptables MASQUERADE on Linux). No answer while the same server answers an ephemeral port: FAIL "outbound UDP from the media range is blocked". No answer from any port: INCONCLUSIVE. Every result states that inbound-forwarded flows are a separate mapping this probe cannot see |
+| C2b media path, inbound | the receipt `legion-voice-selfcheck --listen` recorded in `/run/legion-voice/selfcheck-inbound.json` | Inbound reachability cannot be seen from inside the container, so the default is **INCONCLUSIVE**, with `docker compose exec janus legion-voice-selfcheck --listen` in the remediation. PASS only for a receipt from an outside device that is no older than `JS_SELFCHECK_INBOUND_MAX_AGE_H` (default 168 h), is for a port still in the range, and was recorded while advertising an address still advertised: "inbound UDP reached port N from outside (observed <when>, from <source>, <age> ago)". A stale, unreadable or mismatched receipt: INCONCLUSIVE. Never a guessed PASS |
 | C3 RTP range | binds up to 9 sampled ports of the range, and compares `JS_RTP_PORT_RANGE` with `rtp_port_range` in the generated `janus.jcfg` | PASS: bindable (a port in use by Janus media is fine) and matching. FAIL: a port the container cannot bind, an invalid range, or a mismatch (a mounted override). INCONCLUSIVE: config unreadable, or every sampled port in use |
 | C4 signalling | `GET http://127.0.0.1:<JS_HTTP_PORT><JS_HTTP_BASEPATH>/info`; at start it waits for Janus within the bound | PASS: Janus `server_info` with `janus.plugin.slvoice`. FAIL: HTTP error (base path), not Janus, plugin missing, or connection refused. INCONCLUSIVE: connected but no reply within the bound |
 | C5 admin API | reports `JS_ADMIN_BIND`:`JS_ADMIN_PORT`, then connects to that port at each public address in the mapping | PASS: unreachable, **the desired result**. FAIL: the Janus admin API answers there. WARN: the port accepts but is not Janus. INCONCLUSIVE: no public address. It deliberately does not probe the LAN address, which the sim uses. From inside, a router that does not hairpin TCP also reads as unreachable, so confirm from outside (A.6) |
-| C6 STUN/TURN | `stun_server` / `turn_server` / `turn_rest_api` in the nat section of `janus.jcfg` | PASS: TURN configured. WARN with no TURN, naming who has no path: viewers on UDP-blocking networks always. Behind a CGNAT server (C1), viewers behind symmetric NAT or CGNAT have no path at all. After outbound port remapping (C2), those viewers have a direct path only if inbound UDP reaches the server, which C2 cannot see. On a server C2 found directly addressed, the WARN names no NAT types. INCONCLUSIVE: config unreadable. The hook A.3/A.4 fill in |
+| C6 STUN/TURN | `stun_server` / `turn_server` / `turn_rest_api` in the nat section of `janus.jcfg` | PASS: TURN configured. WARN with no TURN, in one sentence: "viewers whose own network gives them no direct path (symmetric NAT, CGNAT or blocked UDP) get no voice, whatever this server's own mapping". Who needs TURN depends on the viewer's network, not on C1 or C2. INCONCLUSIVE: config unreadable. The hook A.3/A.4 fill in |
+
+**Verdict.** The END line leads with the report's worst status, in the order FAIL > INCONCLUSIVE > WARN >
+PASS, and the JSON carries it as `verdict`. A correctly forwarded deployment with no TURN shows WARN at
+worst once C2b has a fresh receipt (exit 0). Until then it shows INCONCLUSIVE (exit 2). Neither case is
+a FAIL.
+
+**Inbound proof (`--listen`).** Run on the Docker host, in the directory with `docker-compose.yml`:
+```
+docker compose exec janus legion-voice-selfcheck --listen [--port N] [--seconds N]
+```
+1. It binds the lowest free port of `JS_RTP_PORT_RANGE`, or `--port N`; a port Janus is using is never
+   taken. It says which port and why.
+2. It prints a one-line command to run from a device outside the network, e.g. a phone on mobile data.
+   There are two forms, both needing no install: `bash -c 'echo <token> > /dev/udp/<public-ip>/<port>'`
+   and a `python3 -c` fallback.
+3. It waits `--seconds` (default 120).
+4. When a packet carrying the token arrives, it prints PASS with the source address and records
+   `{result, time, epoch, port, source, advertised, range}` in `/run/legion-voice/selfcheck-inbound.json`.
+   Later ordinary runs then report C2b as PASS until the receipt is older than
+   `JS_SELFCHECK_INBOUND_MAX_AGE_H`.
+
+Things to know:
+- **Source address:** with published ports the source shown can be the container runtime's port proxy,
+  not the device.
+- **Exit status:** 0 = received and recorded; 2 = nothing arrived (any earlier receipt is kept); 1 = no
+  free port or the receipt could not be written; 64 = usage error.
+- **Receipt lifetime:** the receipt lives in the container, so it survives `docker compose restart` but
+  not a recreate (`docker compose up -d` with a new image or config), which starts C2b again at
+  INCONCLUSIVE.
 
 **Inputs.** The self-check reads `/run/legion-voice/effective-config.json`, which the entrypoint writes
 at start. It holds the effective, non-secret values of `JS_RTP_PORT_RANGE`, `JS_HTTP_PORT`,
@@ -274,18 +305,32 @@ its knobs have no "before".
 | `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | `900` | n/a (used only with `JS_PUBLIC_IP_CHANGE_ACTION=restart`) | slice A.1 |
 | `JS_SELFCHECK` | `on` | no self-check. The default adds a background, diagnostics-only run after start: one `[selfcheck]` log block, brief UDP binds and STUN requests from the RTP range, and a TCP probe of the admin port at the public address. Nothing is configured or blocked by it. `off` restores the old behaviour | slice A.2 |
 | `JS_SELFCHECK_TIMEOUT_S` | `20` | n/a (the self-check's bound) | slice A.2 |
+| `JS_SELFCHECK_INBOUND_MAX_AGE_H` | `168` | n/a (C2b did not exist) | slice A.2b |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR`, `JANUS_BIN`, `SLV_LIB_DIR`,
 `SLV_ADDR_PROBE`, `SLV_ADDR_STATE_FILE` and the watcher's `SLV_ADDR_WATCH_MAX_CHECKS`,
 `SLV_ADDR_SLEEP`, `SLV_ADDR_RESTART_CMD`, `SLV_ADDR_POLL_S`, `SLV_ADDR_PROBE_TIMEOUT_S`, and the
-self-check's `SLV_EFFECTIVE_CONFIG`, `SLV_SELFCHECK_CMD`, `SLV_SELFCHECK_FILE`, `SLV_SELFCHECK_BIND` and
+self-check's `SLV_EFFECTIVE_CONFIG`, `SLV_SELFCHECK_CMD`, `SLV_SELFCHECK_FILE`, `SLV_SELFCHECK_INBOUND_FILE`, `SLV_SELFCHECK_BIND` and
 `SLV_SELFCHECK_CONNECT_MAP` are test seams for `tests/entrypoint_test.sh`, `tests/test_addr_probe.py`
 and `tests/test_selfcheck.py`, not operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Slice A.2b: C2 corrected, inbound proof**
+  - **C2 is now C2a and C2b.**
+    - A source-port remap on container-initiated UDP is a WARN (C2a), not a FAIL. That remap is normal
+      for any published-port container.
+    - Inbound reachability (C2b) is INCONCLUSIVE until `legion-voice-selfcheck --listen` records a
+      receipt from an outside device.
+    - A deployment that A.2 reported as C2 FAIL now reports C2a WARN and C2b INCONCLUSIVE: exit 2 instead
+      of 1.
+  - **C6's no-TURN WARN** is one viewer-side sentence and no longer reasons from C2.
+  - **Output changes:** the END line and the JSON carry the worst status (`verdict`). The block's check
+    ids are `C1 C2a C2b C3 C4 C5 C6`.
+  - **New knob** `JS_SELFCHECK_INBOUND_MAX_AGE_H` (168) and new file
+    `/run/legion-voice/selfcheck-inbound.json`, written only by `--listen`.
 - **Slice A.2: startup self-check**
   - **Every start** now runs `legion-voice-selfcheck` in the background (`JS_SELFCHECK=on`) and logs
     one `[selfcheck]` block. It only reports; it changes no configuration and never blocks or

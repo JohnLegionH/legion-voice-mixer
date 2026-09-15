@@ -1,32 +1,43 @@
 #!/usr/bin/env python3
-"""legion-voice-selfcheck: reachability self-check for the mixer container (slice A.2).
+"""legion-voice-selfcheck: reachability self-check for the mixer container (slices A.2, A.2b).
 
-  C1  the advertised address is public (the A.1 state file); CGNAT is its own FAIL
-  C2  media path: STUN from the lowest, middle and highest port of JS_RTP_PORT_RANGE; is each
-      source port preserved in the mapping? (outbound only)
-  C3  the RTP range is bindable in the container and matches Janus's rtp_port_range
-  C4  signalling: the HTTP transport answers on its port and base path
-  C5  the admin API does not answer at the public address
-  C6  the STUN/TURN servers Janus is configured with; WARN when there is no TURN
+  C1   the advertised address is public (the A.1 state file); CGNAT is its own FAIL
+  C2a  media path, outbound: STUN from the lowest, middle and highest port of JS_RTP_PORT_RANGE.
+       Information about container-initiated UDP. A remapped source port is a WARN (normal for a
+       published-port container); only no answer at all is a FAIL.
+  C2b  media path, inbound: whether UDP from outside reaches the RTP range. This cannot be seen from
+       inside the container, so it is INCONCLUSIVE unless `--listen` recorded a receipt from an outside
+       device within JS_SELFCHECK_INBOUND_MAX_AGE_H.
+  C3   the RTP range is bindable in the container and matches Janus's rtp_port_range
+  C4   signalling: the HTTP transport answers on its port and base path
+  C5   the admin API does not answer at the public address
+  C6   the STUN/TURN servers Janus is configured with; WARN when there is no TURN
 
 Each check reports an id, a title, PASS | FAIL | WARN | INCONCLUSIVE, what was observed, and a
 remediation for anything that is not PASS. INCONCLUSIVE means the check could not decide; it is never
-reported as PASS.
+reported as PASS. The report's verdict is its worst status, in the order FAIL > INCONCLUSIVE > WARN > PASS.
 
 usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]
+       legion-voice-selfcheck --listen [--port N] [--seconds N]
   (no flag)   print the bracketed [selfcheck] block
   --json      print the report as JSON instead
   --startup   the container-start run: wait for Janus's HTTP transport within the bound
   --timeout   the time bound in seconds (default JS_SELFCHECK_TIMEOUT_S, 20)
-Every run also writes the JSON report to /run/legion-voice/selfcheck.json.
-Exit status: 0 = no FAIL and no INCONCLUSIVE (every check PASS, or WARN advice only);
-             1 = any FAIL; 2 = any INCONCLUSIVE and no FAIL; 64 = usage error.
+  --listen    prove C2b: bind a free port of JS_RTP_PORT_RANGE (or --port N), print the one-line command
+              to run from a device outside the network, and wait --seconds (default 120) for it. A
+              receipt goes to /run/legion-voice/selfcheck-inbound.json.
+Every check run writes the JSON report to /run/legion-voice/selfcheck.json.
+Exit status (check run): 0 = no FAIL and no INCONCLUSIVE (PASS, or WARN advice only); 1 = any FAIL;
+                         2 = any INCONCLUSIVE and no FAIL; 64 = usage error.
+Exit status (--listen):  0 = the probe arrived and was recorded; 2 = nothing arrived in time;
+                         1 = no port could be bound, or the receipt could not be written; 64 = usage error.
 
 Inputs come from the effective values the entrypoint wrote to /run/legion-voice/effective-config.json,
 else from the environment, else from the entrypoint's defaults. The image's python3 is 3.6.
 Test seams (not operator knobs): SLV_EFFECTIVE_CONFIG, SLV_ADDR_STATE_FILE, JANUS_CONF_DIR,
-SLV_SELFCHECK_FILE, SLV_SELFCHECK_BIND (the address the RTP sockets bind; default 0.0.0.0) and
-SLV_SELFCHECK_CONNECT_MAP ("addr=addr,...": where C5 connects for an advertised address).
+SLV_SELFCHECK_FILE, SLV_SELFCHECK_INBOUND_FILE, SLV_SELFCHECK_BIND (the address the RTP sockets bind;
+default 0.0.0.0) and SLV_SELFCHECK_CONNECT_MAP ("addr=addr,...": where C5 connects for an advertised
+address).
 """
 
 import errno
@@ -43,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import addr_probe  # noqa: E402
 
 PASS, FAIL, WARN, INCONCLUSIVE = "PASS", "FAIL", "WARN", "INCONCLUSIVE"
+SEVERITY = {PASS: 0, WARN: 1, INCONCLUSIVE: 2, FAIL: 3}
 
 # The entrypoint's defaults, for a run with neither the effective-config file nor the variable.
 DEFAULTS = {
@@ -54,29 +66,33 @@ DEFAULTS = {
     "JS_ADMIN_BIND": "0.0.0.0",
     "JS_STUN_SERVER": "stun.l.google.com:19302",
     "JS_SELFCHECK_TIMEOUT_S": "20",
+    "JS_SELFCHECK_INBOUND_MAX_AGE_H": "168",
 }
 
 TITLES = {
     "C1": "advertised address is public",
-    "C2": "media path: outbound UDP mapping from the RTP range",
+    "C2a": "media path, outbound: UDP mapping from the RTP range (information)",
+    "C2b": "media path, inbound: UDP from outside reaches the RTP range",
     "C3": "RTP port range is bindable and matches Janus",
     "C4": "signalling: HTTP transport answers",
     "C5": "admin API is not reachable from outside",
     "C6": "STUN/TURN servers Janus will use",
 }
 
-REMAP_REMEDIATION = (
-    "configure a TURN server so those users get a relay (see C6). On a home router, forward UDP %s to "
-    "this host and look for an endpoint-independent (\"full cone\") mapping option. A container "
-    "runtime's own network layer (e.g. Docker Desktop's) can also remap outbound UDP before the "
-    "router sees it.")
+# Run on the Docker host, in the directory holding docker-compose.yml (the service is named janus).
+LISTEN_COMMAND = "docker compose exec janus legion-voice-selfcheck --listen"
+
+INBOUND_NOTE = (
+    "This observes container-initiated (outbound) UDP only. Inbound-forwarded flows, the ones a forwarded "
+    "server's media rides (a viewer's packets arriving through the router forward and the published port), are "
+    "a separate mapping this probe cannot see: that is C2b.")
 BLOCKED_REMEDIATION = (
-    "allow outbound (egress) UDP from source ports %s in the host firewall, and in any cloud security "
-    "group or router egress rule")
+    "allow outbound (egress) UDP from source ports %s in the host firewall, and in any cloud security group or "
+    "router egress rule")
 TURN_REMEDIATION = (
     "configure a TURN server for Janus: turn_server, turn_port, turn_type, turn_user and turn_pwd (or "
-    "turn_rest_api) in the nat section of janus.jcfg, via a mounted override in "
-    "/opt/janus/etc/janus.d. Env knobs for this arrive with A.3/A.4.")
+    "turn_rest_api) in the nat section of janus.jcfg, via a mounted override in /opt/janus/etc/janus.d. Env knobs "
+    "for this arrive with A.3/A.4.")
 
 
 def result(cid, status, observed, remediation=None, notes=None, facts=None):
@@ -104,6 +120,10 @@ def not_run(cid, budget, notes=None):
     return result(cid, INCONCLUSIVE,
                   "not run: the self-check time bound (%g s) was reached first" % budget.seconds,
                   "run legion-voice-selfcheck again, or raise JS_SELFCHECK_TIMEOUT_S", notes)
+
+
+def iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
 def ipv4_class(text):
@@ -179,6 +199,22 @@ def read_jcfg(path):
     return values
 
 
+def write_json(path, data):
+    """Atomic write; returns an error string or None."""
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+        return None
+    except OSError as err:
+        return str(err)
+
+
 # ---- C1 -----------------------------------------------------------------------------------------
 
 def check_c1(state_path):
@@ -225,7 +261,7 @@ def check_c1(state_path):
                   "the container", facts=facts)
 
 
-# ---- C2 -----------------------------------------------------------------------------------------
+# ---- C2a: outbound mapping (information) ---------------------------------------------------------
 
 def _bind_near(port, lo, hi, host, direction, tries=16):
     """Bind UDP to `port`, else to the nearest free port moving `direction` inside the range.
@@ -260,25 +296,26 @@ def _egress_ip(server_addr):
         sock.close()
 
 
-def check_c2(stun_server, range_text, budget, bind_host, advertised=()):
+def check_c2a(stun_server, range_text, budget, bind_host, advertised=()):
+    """STUN from the RTP range. Observes container-initiated UDP only: a remapped port is information (WARN),
+    no answer at all from the range while an ephemeral port is answered is the one FAIL."""
     rng = parse_range(range_text)
-    notes = ["This proves the OUTBOUND mapping only: a missing router forward or host firewall rule for inbound "
-             "UDP %s can still pass C2. Test inbound from outside the network (A.6 recipes)." % range_text]
+    notes = [INBOUND_NOTE]
     facts = {"direct": False, "remapped": False}
     if rng is None:
-        return result("C2", INCONCLUSIVE, "JS_RTP_PORT_RANGE=%r is not a valid LOW-HIGH range (see C3)" % range_text,
+        return result("C2a", INCONCLUSIVE, "JS_RTP_PORT_RANGE=%r is not a valid LOW-HIGH range (see C3)" % range_text,
                       "set JS_RTP_PORT_RANGE=LOW-HIGH, e.g. 10000-10200", notes, facts)
     try:
         host, port = addr_probe.parse_hostport(stun_server or "", 3478)
     except ValueError:
-        return result("C2", INCONCLUSIVE, "no usable STUN server (JS_STUN_SERVER=%r)" % stun_server,
+        return result("C2a", INCONCLUSIVE, "no usable STUN server (JS_STUN_SERVER=%r)" % stun_server,
                       "set JS_STUN_SERVER=host:port, e.g. stun.l.google.com:19302", notes, facts)
     if budget.expired():
-        return not_run("C2", budget, notes)
+        return not_run("C2a", budget, notes)
     try:
         server_addr = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
     except (OSError, IndexError) as err:
-        return result("C2", INCONCLUSIVE, "cannot resolve the STUN server %s (%s)" % (stun_server, err),
+        return result("C2a", INCONCLUSIVE, "cannot resolve the STUN server %s (%s)" % (stun_server, err),
                       "check DNS inside the container, or set JS_STUN_SERVER to an IP:port", notes, facts)
 
     lo, hi = rng
@@ -295,7 +332,7 @@ def check_c2(stun_server, range_text, budget, bind_host, advertised=()):
         taken.add(got)
         bound.append((wanted, got, sock))
     if not bound:
-        return result("C2", INCONCLUSIVE, "could not bind any sampled media port: %s" % ", ".join(bind_errors),
+        return result("C2a", INCONCLUSIVE, "could not bind any sampled media port: %s" % ", ".join(bind_errors),
                       "see C3: the RTP range must be bindable inside the container", notes, facts)
 
     timeout = min(3.0, budget.remaining())
@@ -322,19 +359,11 @@ def check_c2(stun_server, range_text, budget, bind_host, advertised=()):
     answered = [(wanted, got, answers[got]) for wanted, got, _ in bound if answers.get(got)]
     silent = [(wanted, got) for wanted, got, _ in bound if not answers.get(got)]
     detail = "; ".join("local %s -> %s:%d" % (label(w, g), a[0], a[1]) for w, g, a in answered)
-    remapped = [entry for entry in answered if entry[2][1] != entry[1]]
-    if remapped:
-        facts["remapped"] = True
-        observed = ("port-remapping or symmetric NAT: some users will have no direct path, TURN required. "
-                    "Mapped source port differs from the local port: %s" % detail)
-        if silent:
-            observed += "; no answer to local %s" % ", ".join(label(w, g) for w, g in silent)
-        return result("C2", FAIL, observed, REMAP_REMEDIATION % range_text, notes, facts)
     if silent:
         silent_text = ", ".join(label(w, g) for w, g in silent)
         control_answer = answers.get("control")
         if control_answer is None and not answered:
-            return result("C2", INCONCLUSIVE,
+            return result("C2a", INCONCLUSIVE,
                           "no STUN answer from %s to local ports %s, nor to an ephemeral port: the STUN server is "
                           "unreachable, so the media range cannot be judged" % (stun_server, silent_text),
                           "check outbound UDP to %s, or set JS_STUN_SERVER to a reachable STUN server, and run "
@@ -344,17 +373,177 @@ def check_c2(stun_server, range_text, budget, bind_host, advertised=()):
             observed += "; the same server answered an ephemeral port (mapped %s:%d)" % control_answer
         if answered:
             observed += "; answered: %s" % detail
-        return result("C2", FAIL, observed, BLOCKED_REMEDIATION % range_text, notes, facts)
-
+        return result("C2a", FAIL, observed, BLOCKED_REMEDIATION % range_text, notes, facts)
+    if any(a[1] != got for _, got, a in answered):
+        facts["remapped"] = True
+        return result("C2a", WARN,
+                      "container-initiated UDP is source-port remapped; this is normal for a published-port container "
+                      "and does not by itself break a forwarded server. Mapped source port differs from the local port: "
+                      "%s" % detail,
+                      "no action needed for a forwarded server; prove the inbound path with C2b: %s" % LISTEN_COMMAND,
+                      notes, facts)
     mapped_ips = sorted(set(a[0] for _, _, a in answered))
     observed = "mapped port equals the local port for all %d sampled ports (ports preserved): %s" % (len(answered), detail)
     if mapped_ips == [_egress_ip(server_addr)]:
         facts["direct"] = True
         observed += "; the mapped address is this host's own interface address (no address translation)"
     if advertised and any(ip not in advertised for ip in mapped_ips):
-        notes.append("mapped address %s is not in nat_1_1_mapping %s: viewers are told a different address than "
-                     "the one this host's traffic leaves from" % (", ".join(mapped_ips), ",".join(advertised)))
-    return result("C2", PASS, observed, None, notes, facts)
+        notes.append("mapped address %s is not in nat_1_1_mapping %s: this host's traffic leaves from a different "
+                     "address than the one viewers are told" % (", ".join(mapped_ips), ",".join(advertised)))
+    return result("C2a", PASS, observed, None, notes, facts)
+
+
+# ---- C2b: inbound reachability ------------------------------------------------------------------
+
+def _age_text(hours):
+    return "%d min" % int(hours * 60) if hours < 1 else "%.1f h" % hours
+
+
+def check_c2b(inbound_file, range_text, max_age_h, public_addrs, now=None):
+    """Inbound UDP to the RTP range cannot be observed from inside the container. PASS only on a receipt that
+    `--listen` recorded from an outside device, for a port still in the range, recorded while advertising an
+    address still advertised, and no older than max_age_h. Anything else is INCONCLUSIVE, never a guessed PASS."""
+    now = time.time() if now is None else now
+    how = ("run `%s` on the Docker host, then run the one-line command it prints from a device outside this "
+           "network (e.g. a phone on mobile data)" % LISTEN_COMMAND)
+    try:
+        with open(inbound_file) as handle:
+            record = json.load(handle)
+    except OSError:
+        return result("C2b", INCONCLUSIVE,
+                      "inbound UDP to the RTP range cannot be determined from inside the container, and no inbound "
+                      "receipt is recorded (%s)" % inbound_file,
+                      "to prove it: " + how)
+    except ValueError as err:
+        return result("C2b", INCONCLUSIVE, "the inbound receipt %s is unreadable (%s)" % (inbound_file, err),
+                      "record a new one: " + how)
+    try:
+        if record.get("result") != PASS:
+            raise ValueError("its result is %r, not PASS" % record.get("result"))
+        epoch, port = float(record["epoch"]), int(record["port"])
+        when, source = str(record["time"]), str(record["source"])
+    except (AttributeError, KeyError, TypeError, ValueError) as err:
+        return result("C2b", INCONCLUSIVE, "the inbound receipt %s is unusable (%s)" % (inbound_file, err),
+                      "record a new one: " + how)
+    rng = parse_range(range_text)
+    if rng is None or not rng[0] <= port <= rng[1]:
+        return result("C2b", INCONCLUSIVE,
+                      "the inbound receipt (UDP %d, observed %s) is for a port outside the current JS_RTP_PORT_RANGE "
+                      "%s" % (port, when, range_text),
+                      "record a new one: " + how)
+    advertised = [str(a) for a in (record.get("advertised") or [])]
+    if advertised and public_addrs and not set(advertised) & set(public_addrs):
+        return result("C2b", INCONCLUSIVE,
+                      "the inbound receipt (observed %s) was recorded while advertising %s; this server now "
+                      "advertises %s" % (when, ", ".join(advertised), ", ".join(public_addrs)),
+                      "record a new one: " + how)
+    age_h = max(0.0, (now - epoch) / 3600.0)
+    if age_h > max_age_h:
+        return result("C2b", INCONCLUSIVE,
+                      "the last inbound receipt (UDP %d, observed %s, from %s) is %s old, older than "
+                      "JS_SELFCHECK_INBOUND_MAX_AGE_H=%g" % (port, when, source, _age_text(age_h), max_age_h),
+                      "record a fresh one: " + how)
+    return result("C2b", PASS,
+                  "inbound UDP reached port %d from outside (observed %s, from %s, %s ago)"
+                  % (port, when, source, _age_text(age_h)),
+                  notes=["a receipt proves the path when it was recorded; a router or firewall change since then is "
+                         "not seen until the receipt goes stale (JS_SELFCHECK_INBOUND_MAX_AGE_H)"])
+
+
+def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time):
+    """The --listen mode: bind a free port of the RTP range, print the outside-device command, wait for it, and
+    record a receipt for C2b. Returns the exit status (see the module docstring)."""
+    out = sys.stdout if out is None else out
+
+    def say(*lines):
+        out.write("".join("[selfcheck-listen] %s\n" % line for line in lines))
+        out.flush()
+
+    rng = parse_range(cfg["rtp_range"])
+    if rng is None:
+        say("JS_RTP_PORT_RANGE=%r is not a valid LOW-HIGH range; cannot listen" % cfg["rtp_range"])
+        return 64
+    lo, hi = rng
+    if port is not None and not lo <= port <= hi:
+        say("--port %d is outside JS_RTP_PORT_RANGE %d-%d" % (port, lo, hi))
+        return 64
+    sock = chosen = None
+    in_use = 0
+    for candidate in ([port] if port is not None else range(lo, hi + 1)):
+        attempt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            attempt.bind((cfg["bind_host"], candidate))
+            sock, chosen = attempt, candidate
+            break
+        except OSError as err:
+            attempt.close()
+            if err.errno != errno.EADDRINUSE:
+                say("cannot bind UDP %d (%s); see C3" % (candidate, err.strerror or err))
+                return 1
+            if port is not None:
+                say("UDP %d is in use, probably by Janus media; omit --port to pick a free port" % port)
+                return 1
+            in_use += 1
+    if sock is None:
+        say("every port of JS_RTP_PORT_RANGE %d-%d is in use; try again when fewer calls are active" % (lo, hi))
+        return 1
+
+    token = token or "legion-voice-probe-" + os.urandom(4).hex()
+    public = check_c1(cfg["state_file"])["_facts"].get("public", [])
+    target = public[0] if public else "<this server's public IPv4>"
+    if port is not None:
+        why = "the port asked for"
+    else:
+        why = "the lowest free port of JS_RTP_PORT_RANGE %d-%d" % (lo, hi)
+        if in_use:
+            why += "; %d lower port(s) in use, e.g. by Janus media" % in_use
+    lines = ["listening on UDP %d (%s) for %g s" % (chosen, why, seconds),
+             "from a device OUTSIDE this network (e.g. a phone on mobile data, not this LAN), run one of these:",
+             "  bash -c 'echo %s > /dev/udp/%s/%d'" % (token, target, chosen),
+             "  python3 -c 'import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM)"
+             ".sendto(b\"%s\", (\"%s\", %d))'" % (token, target, chosen),
+             "UDP can drop a packet, so send it two or three times. Waiting..."]
+    if not public:
+        lines.insert(2, "no public address is advertised (see C1): replace %s with the address outside viewers use"
+                     % target)
+    elif len(public) > 1:
+        lines.insert(4, "other advertised public addresses: %s" % ", ".join(public[1:]))
+    say(*lines)
+
+    deadline = time.monotonic() + seconds
+    strays = 0
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            sock.settimeout(left)
+            try:
+                data, source = sock.recvfrom(4096)
+            except socket.timeout:
+                break
+            if token.encode("ascii") not in data:
+                strays += 1
+                continue
+            received = clock()
+            record = {"schema": 1, "result": PASS, "time": iso(received), "epoch": int(received), "port": chosen,
+                      "source": "%s:%d" % source[:2], "advertised": public, "range": "%d-%d" % (lo, hi)}
+            error = write_json(cfg["inbound_file"], record)
+            say("PASS: the probe arrived on UDP %d from %s at %s" % (chosen, record["source"], record["time"]))
+            if error:
+                say("could not record it in %s (%s)" % (cfg["inbound_file"], error))
+                return 1
+            say("recorded in %s: C2b reports PASS until the receipt is older than JS_SELFCHECK_INBOUND_MAX_AGE_H "
+                "(%g h)" % (cfg["inbound_file"], cfg["inbound_max_age_h"]),
+                "the source shown can be the container runtime's port proxy rather than the outside device")
+            return 0
+    finally:
+        sock.close()
+    say("INCONCLUSIVE: nothing carrying the probe arrived on UDP %d within %g s%s"
+        % (chosen, seconds, " (%d unrelated packet(s) ignored)" % strays if strays else ""),
+        "either it was not sent from outside, or inbound UDP does not reach this server: check the router forward "
+        "(UDP %d-%d to this host) and the host firewall. Any earlier receipt is kept." % (lo, hi))
+    return 2
 
 
 # ---- C3 -----------------------------------------------------------------------------------------
@@ -526,7 +715,9 @@ def check_c5(bind, port_text, base, public_addrs, budget, connect_map):
 
 # ---- C6 -----------------------------------------------------------------------------------------
 
-def check_c6(jcfg_path, range_text, c1, c2):
+def check_c6(jcfg_path):
+    """Whether Janus has a TURN relay. Who needs one depends on the viewer's own network, not on this server's
+    mapping, so this does not reason from C1 or C2."""
     try:
         values = read_jcfg(jcfg_path)
     except OSError as err:
@@ -547,22 +738,10 @@ def check_c6(jcfg_path, range_text, c1, c2):
                 "(StunServers), which this check cannot see" % (stun, turn or "none"))
     if turn:
         return result("C6", PASS, observed)
-    c1_facts, c2_facts = c1.get("_facts", {}), c2.get("_facts", {})
-    if c1_facts.get("cgnat"):
-        who = ("viewers behind symmetric NAT or CGNAT have no path at all (C1 found this server behind CGNAT, which "
-               "cannot be port-forwarded), and neither do viewers on networks that block UDP")
-    elif c2_facts.get("remapped"):
-        who = ("viewers behind symmetric NAT or CGNAT have no direct path unless inbound UDP %s reaches this server "
-               "(C2 found outbound port remapping and cannot see inbound), and viewers on networks that block UDP "
-               "have no path at all" % range_text)
-    elif c2_facts.get("direct"):
-        who = ("viewers on networks that block UDP have no path at all, and neither does any viewer if a host "
-               "firewall blocks inbound UDP %s (C2 cannot see inbound)" % range_text)
-    else:
-        who = ("viewers on networks that block UDP have no path at all, and viewers behind symmetric NAT or CGNAT "
-               "have none either if the router forward or firewall rule for inbound UDP %s is missing (C2 cannot "
-               "see inbound)" % range_text)
-    return result("C6", WARN, observed + ". No TURN configured: " + who, TURN_REMEDIATION)
+    return result("C6", WARN,
+                  observed + ". No TURN configured: viewers whose own network gives them no direct path (symmetric NAT, "
+                  "CGNAT or blocked UDP) get no voice, whatever this server's own mapping.",
+                  TURN_REMEDIATION)
 
 
 # ---- run, report ---------------------------------------------------------------------------------
@@ -586,10 +765,14 @@ def load_config(environ):
         if "=" in pair:
             advertised, target = pair.split("=", 1)
             connect_map[advertised.strip()] = target.strip()
-    try:
-        timeout = float(values["JS_SELFCHECK_TIMEOUT_S"])
-    except ValueError:
-        timeout = 20.0
+
+    def positive(key, fallback):
+        try:
+            value = float(values[key])
+        except ValueError:
+            return fallback
+        return value if value > 0 else fallback
+
     return {
         "rtp_range": values["JS_RTP_PORT_RANGE"],
         "stun_server": values["JS_STUN_SERVER"],
@@ -598,18 +781,20 @@ def load_config(environ):
         "admin_port": values["JS_ADMIN_PORT"],
         "admin_base": values["JS_ADMIN_BASEPATH"],
         "admin_bind": values["JS_ADMIN_BIND"],
-        "timeout": timeout if timeout > 0 else 20.0,
+        "timeout": positive("JS_SELFCHECK_TIMEOUT_S", 20.0),
+        "inbound_max_age_h": positive("JS_SELFCHECK_INBOUND_MAX_AGE_H", 168.0),
         "state_file": environ.get("SLV_ADDR_STATE_FILE") or "/run/legion-voice/public-address.json",
         "jcfg_path": os.path.join(environ.get("JANUS_CONF_DIR") or "/opt/janus/etc/janus", "janus.jcfg"),
         "report_file": environ.get("SLV_SELFCHECK_FILE") or "/run/legion-voice/selfcheck.json",
+        "inbound_file": environ.get("SLV_SELFCHECK_INBOUND_FILE") or "/run/legion-voice/selfcheck-inbound.json",
         "bind_host": environ.get("SLV_SELFCHECK_BIND") or "0.0.0.0",
         "connect_map": connect_map,
     }
 
 
 def run_checks(cfg, budget, startup=False):
-    """C1 and C3 are local and always run. C4, C2 and C5 touch the network inside the budget; at startup C4
-    first waits for Janus, leaving a reserve of the bound for C2 and C5."""
+    """C1, C2b and C3 are local and always run. C4, C2a and C5 touch the network inside the budget; at startup C4
+    first waits for Janus, leaving a reserve of the bound for C2a and C5."""
     c1 = check_c1(cfg["state_file"])
     c3 = check_c3(cfg["rtp_range"], cfg["jcfg_path"], cfg["bind_host"])
     if startup:
@@ -617,11 +802,16 @@ def run_checks(cfg, budget, startup=False):
     else:
         wait = min(3.0, budget.remaining())
     c4 = check_c4(cfg["http_port"], cfg["http_base"], budget, wait)
-    c2 = check_c2(cfg["stun_server"], cfg["rtp_range"], budget, cfg["bind_host"], c1["_facts"].get("mapping", []))
+    c2a = check_c2a(cfg["stun_server"], cfg["rtp_range"], budget, cfg["bind_host"], c1["_facts"].get("mapping", []))
+    c2b = check_c2b(cfg["inbound_file"], cfg["rtp_range"], cfg["inbound_max_age_h"], c1["_facts"].get("public", []))
     c5 = check_c5(cfg["admin_bind"], cfg["admin_port"], cfg["admin_base"], c1["_facts"].get("public", []),
                   budget, cfg["connect_map"])
-    c6 = check_c6(cfg["jcfg_path"], cfg["rtp_range"], c1, c2)
-    return [c1, c2, c3, c4, c5, c6]
+    c6 = check_c6(cfg["jcfg_path"])
+    return [c1, c2a, c2b, c3, c4, c5, c6]
+
+
+def worst_status(results):
+    return max((r["status"] for r in results), key=lambda status: SEVERITY[status]) if results else PASS
 
 
 def exit_code_for(results):
@@ -638,8 +828,8 @@ def build_report(results, mode, when, duration, bound):
                   for status in (PASS, WARN, FAIL, INCONCLUSIVE))
     checks = [dict((k, v) for k, v in r.items() if not k.startswith("_")) for r in results]
     return {"schema": 1, "tool": "legion-voice-selfcheck", "mode": mode, "time": when,
-            "duration_s": round(duration, 1), "timeout_s": bound, "summary": counts,
-            "exit_code": exit_code_for(results), "checks": checks}
+            "duration_s": round(duration, 1), "timeout_s": bound, "verdict": worst_status(results),
+            "summary": counts, "exit_code": exit_code_for(results), "checks": checks}
 
 
 def render_block(report, report_file):
@@ -648,52 +838,36 @@ def render_block(report, report_file):
     lines = ["[selfcheck] ===== BEGIN legion-voice self-check (%s run, %s, %.1f s, bound %g s) ====="
              % (report["mode"], report["time"], report["duration_s"], report["timeout_s"])]
     for check in report["checks"]:
-        lines.append("[selfcheck] %s %-12s %s" % (check["id"], check["status"], check["title"]))
-        lines.append("[selfcheck]    observed: %s" % check["observed"])
+        lines.append("[selfcheck] %-3s %-12s %s" % (check["id"], check["status"], check["title"]))
+        lines.append("[selfcheck]     observed: %s" % check["observed"])
         if check["remediation"]:
-            lines.append("[selfcheck]    remediation: %s" % check["remediation"])
+            lines.append("[selfcheck]     remediation: %s" % check["remediation"])
         for note in check["notes"]:
-            lines.append("[selfcheck]    note: %s" % note)
-    lines.append("[selfcheck] ===== END legion-voice self-check: %d PASS, %d WARN, %d FAIL, %d INCONCLUSIVE; exit %d; "
-                 "JSON %s =====" % (s["pass"], s["warn"], s["fail"], s["inconclusive"], report["exit_code"], report_file))
+            lines.append("[selfcheck]     note: %s" % note)
+    lines.append("[selfcheck] ===== END legion-voice self-check: worst %s; %d PASS, %d WARN, %d FAIL, %d INCONCLUSIVE; "
+                 "exit %d; JSON %s =====" % (report["verdict"], s["pass"], s["warn"], s["fail"], s["inconclusive"],
+                                             report["exit_code"], report_file))
     return "\n".join(lines) + "\n"
 
 
-def write_report(path, report):
-    """Atomic write; returns an error string or None."""
-    try:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as handle:
-            json.dump(report, handle, indent=2)
-            handle.write("\n")
-        os.replace(tmp, path)
-        return None
-    except OSError as err:
-        return str(err)
-
-
-USAGE = "usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]\n"
+USAGE = ("usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]\n"
+         "       legion-voice-selfcheck --listen [--port N] [--seconds N]\n")
 
 
 def main(argv=None, environ=None, runner=None, out=None):
     argv = sys.argv[1:] if argv is None else argv
     environ = os.environ if environ is None else environ
     out = sys.stdout if out is None else out
-    as_json = startup = False
-    timeout = None
+    flags = {"json": False, "startup": False, "listen": False}
+    numbers = {"--timeout": None, "--port": None, "--seconds": None}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--json":
-            as_json = True
-        elif arg == "--startup":
-            startup = True
-        elif arg == "--timeout" and i + 1 < len(argv):
+        if arg in ("--json", "--startup", "--listen"):
+            flags[arg[2:]] = True
+        elif arg in numbers and i + 1 < len(argv):
             try:
-                timeout = float(argv[i + 1])
+                numbers[arg] = int(argv[i + 1]) if arg == "--port" else float(argv[i + 1])
             except ValueError:
                 sys.stderr.write(USAGE)
                 return 64
@@ -705,15 +879,21 @@ def main(argv=None, environ=None, runner=None, out=None):
             sys.stderr.write(USAGE)
             return 64
         i += 1
+    if (numbers["--port"] is not None or numbers["--seconds"] is not None) and not flags["listen"]:
+        sys.stderr.write(USAGE)
+        return 64
     cfg = load_config(environ)
-    bound = timeout if timeout and timeout > 0 else cfg["timeout"]
+    if flags["listen"]:
+        seconds = numbers["--seconds"] if numbers["--seconds"] and numbers["--seconds"] > 0 else 120.0
+        return listen(cfg, numbers["--port"], seconds, out)
+    bound = numbers["--timeout"] if numbers["--timeout"] and numbers["--timeout"] > 0 else cfg["timeout"]
     budget = Budget(bound)
     started = time.monotonic()
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    results = (runner or run_checks)(cfg, budget, startup)
-    report = build_report(results, "startup" if startup else "on-demand", when, time.monotonic() - started, bound)
-    error = write_report(cfg["report_file"], report)
-    text = json.dumps(report, indent=2) + "\n" if as_json else render_block(report, cfg["report_file"])
+    results = (runner or run_checks)(cfg, budget, flags["startup"])
+    report = build_report(results, "startup" if flags["startup"] else "on-demand", when, time.monotonic() - started, bound)
+    error = write_json(cfg["report_file"], report)
+    text = json.dumps(report, indent=2) + "\n" if flags["json"] else render_block(report, cfg["report_file"])
     out.write(text)   # one write, so the block is not interleaved with other log output
     out.flush()
     if error:
