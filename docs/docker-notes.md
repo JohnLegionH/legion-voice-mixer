@@ -57,6 +57,13 @@ over the whole config dir by default (that was the old model).
 | `JS_SELFCHECK` | no jcfg key: `on` runs the reachability self-check in the background once Janus starts, printing one `[selfcheck]` block. `off` skips it. Any other value WARNs and means `on` | `on` |
 | `JS_SELFCHECK_TIMEOUT_S` | no jcfg key: the self-check's time bound, at start and on demand. `0` or a non-integer WARNs and means `20` | `20` |
 | `JS_SELFCHECK_INBOUND_MAX_AGE_H` | no jcfg key: hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS; older receipts go back to INCONCLUSIVE. `0` or a non-integer WARNs and means `168` | `168` |
+| `JS_TURN_SERVER` | `janus.jcfg` → nat `turn_server`: the mixer's own TURN server, static-credential style. Requires `JS_TURN_USER` and `JS_TURN_PWD` (FATAL otherwise). Janus resolves a hostname once at start | *(unset)*: no TURN, nothing written |
+| `JS_TURN_PORT` | nat `turn_port` (static style only) | `3478` when `JS_TURN_SERVER` is set |
+| `JS_TURN_TYPE` | nat `turn_type`: `udp`, `tcp` or `tls` (static style only; anything else is FATAL). How Janus reaches the TURN server; the relay still speaks UDP toward viewers | `udp` when `JS_TURN_SERVER` is set |
+| `JS_TURN_USER`, `JS_TURN_PWD` | nat `turn_user`, `turn_pwd` (static style). Logged only as `set`/`EMPTY` | *(unset)* |
+| `JS_TURN_REST_API` | nat `turn_rest_api`: an http(s) URL of a TURN REST API backend, the ephemeral-credential style. Mutually exclusive with every static knob (FATAL). Logged without user info, query or fragment | *(unset)* |
+| `JS_TURN_REST_API_KEY` | nat `turn_rest_api_key` (REST style). Logged only as `set`/`EMPTY` | *(unset)* |
+| `JS_TURN_REST_API_METHOD` | nat `turn_rest_api_method`: `GET` or `POST` (REST style; anything else is FATAL) | `POST` when `JS_TURN_REST_API` is set |
 | `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
 | `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the discovered and literal addresses (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
 | `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
@@ -205,7 +212,7 @@ INCONCLUSIVE means the check could not decide, and is never reported as PASS.
 | C3 RTP range | binds up to 9 sampled ports of the range, and compares `JS_RTP_PORT_RANGE` with `rtp_port_range` in the generated `janus.jcfg` | PASS: bindable (a port in use by Janus media is fine) and matching. FAIL: a port the container cannot bind, an invalid range, or a mismatch (a mounted override). INCONCLUSIVE: config unreadable, or every sampled port in use |
 | C4 signalling | `GET http://127.0.0.1:<JS_HTTP_PORT><JS_HTTP_BASEPATH>/info`; at start it waits for Janus within the bound | PASS: Janus `server_info` with `janus.plugin.slvoice`. FAIL: HTTP error (base path), not Janus, plugin missing, or connection refused. INCONCLUSIVE: connected but no reply within the bound |
 | C5 admin API | reports `JS_ADMIN_BIND`:`JS_ADMIN_PORT`, then connects to that port at each public address in the mapping | PASS: unreachable, **the desired result**. FAIL: the Janus admin API answers there. WARN: the port accepts but is not Janus. INCONCLUSIVE: no public address. It deliberately does not probe the LAN address, which the sim uses. From inside, a router that does not hairpin TCP also reads as unreachable, so confirm from outside (A.6) |
-| C6 STUN/TURN | `stun_server` / `turn_server` / `turn_rest_api` in the nat section of `janus.jcfg` | PASS: TURN configured. WARN with no TURN, in one sentence: "viewers whose own network gives them no direct path (symmetric NAT, CGNAT or blocked UDP) get no voice, whatever this server's own mapping". Who needs TURN depends on the viewer's network, not on C1 or C2. INCONCLUSIVE: config unreadable. The hook A.3/A.4 fill in |
+| C6 TURN for this server | `turn_server` or `turn_rest_api` in the nat section of the generated `janus.jcfg` (what Janus uses, mounted overrides included), judged against C1 | **No TURN, server publicly reachable per C1:** PASS; the server-side path is complete. A note says viewers whose own network blocks UDP need viewer-side TURN, which the mixer cannot provide (A.4). **No TURN, server CGNAT or unreachable per C1:** WARN; mixer-side TURN is the remedy, naming the knobs. **TURN configured:** a real TURN Allocate with the configured credentials, through the REST API when that style is set. It passes with the relay address obtained ("rescues a CGNAT or unreachable server") or FAILs with the reason. C1 INCONCLUSIVE: INCONCLUSIVE. Every result notes `turn_type` as information; it is never a pass criterion |
 
 **Verdict.** The END line leads with the report's worst status, in the order FAIL > INCONCLUSIVE > WARN >
 PASS, and the JSON carries it as `verdict`. A correctly forwarded deployment with no TURN shows WARN at
@@ -219,8 +226,11 @@ docker compose exec janus legion-voice-selfcheck --listen [--port N] [--seconds 
 1. It binds the lowest free port of `JS_RTP_PORT_RANGE`, or `--port N`; a port Janus is using is never
    taken. It says which port and why.
 2. It prints a one-line command to run from a device outside the network, e.g. a phone on mobile data.
-   There are two forms, both needing no install: `bash -c 'echo <token> > /dev/udp/<public-ip>/<port>'`
-   and a `python3 -c` fallback.
+   There are three forms, none needing an install:
+   - `bash -c 'echo <token> > /dev/udp/<public-ip>/<port>'`;
+   - a `python3 -c` fallback;
+   - `echo <token> | timeout 3 nc -u -w1 <public-ip> <port>`, for phones and minimal images without bash or
+     python3. busybox `nc -u -w1` can hang after sending, hence the `timeout`.
 3. It waits `--seconds` (default 120).
 4. When a packet carrying the token arrives, it prints PASS with the source address and records
    `{result, time, epoch, port, source, advertised, range}` in `/run/legion-voice/selfcheck-inbound.json`.
@@ -245,6 +255,72 @@ at start. It holds the effective, non-secret values of `JS_RTP_PORT_RANGE`, `JS_
 - a few hundred milliseconds of UDP binds on sampled RTP ports;
 - three STUN requests from the media range, plus one from an ephemeral port;
 - one TCP connection per public address to the admin port.
+
+### TURN for the mixer (A.3)
+
+**What mixer-side TURN is for.** Setting TURN on the mixer lets Janus allocate a relay on a TURN server and
+offer it to viewers as an extra candidate. That moves the **server's** candidate, and it rescues a mixer
+viewers cannot otherwise reach: one behind CGNAT, or with no usable forward.
+
+It does **not** give a viewer whose own network blocks UDP a path. `JS_TURN_TYPE` (`udp`/`tcp`/`tls`) only
+sets how Janus reaches the TURN server, and the relay still speaks UDP toward the viewer. A UDP-blocked
+viewer needs viewer-side TURN, delivered by the sim, which is slice A.4.
+
+So on a publicly reachable, forwarded mixer (C1 PASS), no TURN is the correct configuration, and C6 is PASS.
+
+**Configuring it.** **legion-voice ships no TURN server**; operators run their own, and coturn is the usual
+choice. There are two credential styles, never both:
+- **Static:** `JS_TURN_SERVER`, `JS_TURN_PORT` (3478), `JS_TURN_TYPE` (udp), `JS_TURN_USER`, `JS_TURN_PWD`.
+- **REST / ephemeral:** `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` (POST). Janus
+  requests `service=turn`, the key as `api=` and `key=`, and `username=`. It expects `{username, password,
+  ttl, uris}`. Janus's TURN REST support is compiled into this image (`janus_turnrest_*` symbols).
+
+The entrypoint writes the matching keys into the `nat` section of `janus.jcfg`. With no TURN knob set it
+writes nothing, and the generated `janus.jcfg` is byte-identical to the one before A.3
+(`tests/golden/janus.jcfg.pre-turn`).
+
+**Validation, all FATAL at start, naming knobs and never values:**
+- both styles set;
+- a server without both credentials;
+- credentials, port or type without a server;
+- a REST key or method without the URL;
+- an unknown type or method, or a bad port;
+- a non-http(s) REST URL;
+- a double quote or backslash in a value.
+
+**Logging.** Credentials and the REST key are logged only as `set`/`EMPTY`, and the REST URL without its
+user info, query or fragment, e.g. `[entrypoint] INFO: turn=static server=turn.example.test port=3478
+type=udp user=set pwd=set`.
+
+One caveat outside this entrypoint: Janus core itself logs the REST request URI, key included, at debug
+level 5 (VERB), and REST-issued credentials at 6 (HUGE). The image runs at Janus's default level 4. Do not
+raise `debug_level` on a mixer using TURN REST.
+
+**Seeing whether relay is live.** Every self-check run reports, for each slvoice handle, the ICE candidate
+types Janus offered (host / srflx / relay), with the peer's types and the selected pair. They come from the
+Admin API's `handle_info`, with `JS_ADMIN_SECRET` from the environment. Three places carry them:
+- the `[selfcheck] INFO candidates` line;
+- the report's `candidates` object;
+- `/run/legion-voice/candidates.json`.
+
+On demand: `docker compose exec janus legion-voice-selfcheck --candidates [--json]`.
+
+**Test fixture (`turn-test` profile).** `docker compose --profile turn-test up -d turn-test turn-test-rest`
+starts a coturn and a minimal TURN REST backend for testing only. They are not for production: throwaway
+credentials, a certificate generated at start, no hardening. Neither `docker compose up -d` nor the
+default profile ever starts them.
+
+The coturn runs in shared-secret mode, because coturn cannot mix that with static users. Throwaway values:
+
+| Style | Settings |
+|---|---|
+| Static | `JS_TURN_SERVER=turn-test`, `JS_TURN_USER=2145916800:legion-voice-static`, `JS_TURN_PWD=NGwezoW6rFCQ0gcjQKg34HJa1W8=` (a long-lived pair derived from the secret). Its expiry (2038-01-01) must stay below 2^31: coturn rejected a pair expiring in 2100 with `Cannot find credentials of user` |
+| REST | `JS_TURN_REST_API=http://turn-test-rest:8089/turn`, `JS_TURN_REST_API_KEY=turn-test-api-key` |
+
+The harness's relay scenario S13 uses the same coturn from the host: `--turn-uri
+'turn:127.0.0.1:3478?transport=tcp' --turn-secret turn-test-secret`.
+
+To tear down: `docker compose --profile turn-test rm -sf turn-test turn-test-rest`.
 
 ## Configuration compatibility rule
 
@@ -306,18 +382,33 @@ its knobs have no "before".
 | `JS_SELFCHECK` | `on` | no self-check. The default adds a background, diagnostics-only run after start: one `[selfcheck]` log block, brief UDP binds and STUN requests from the RTP range, and a TCP probe of the admin port at the public address. Nothing is configured or blocked by it. `off` restores the old behaviour | slice A.2 |
 | `JS_SELFCHECK_TIMEOUT_S` | `20` | n/a (the self-check's bound) | slice A.2 |
 | `JS_SELFCHECK_INBOUND_MAX_AGE_H` | `168` | n/a (C2b did not exist) | slice A.2b |
+| `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD` | *(unset)*: no TURN; the generated `janus.jcfg` is byte-identical | no TURN configurable from `.env` (only a mounted `janus.jcfg`) | slice A.3 |
+| `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` | *(unset)*: no TURN REST | as above | slice A.3 |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR`, `JANUS_BIN`, `SLV_LIB_DIR`,
 `SLV_ADDR_PROBE`, `SLV_ADDR_STATE_FILE` and the watcher's `SLV_ADDR_WATCH_MAX_CHECKS`,
 `SLV_ADDR_SLEEP`, `SLV_ADDR_RESTART_CMD`, `SLV_ADDR_POLL_S`, `SLV_ADDR_PROBE_TIMEOUT_S`, and the
-self-check's `SLV_EFFECTIVE_CONFIG`, `SLV_SELFCHECK_CMD`, `SLV_SELFCHECK_FILE`, `SLV_SELFCHECK_INBOUND_FILE`, `SLV_SELFCHECK_BIND` and
+self-check's `SLV_EFFECTIVE_CONFIG`, `SLV_SELFCHECK_CMD`, `SLV_SELFCHECK_FILE`, `SLV_SELFCHECK_INBOUND_FILE`, `SLV_SELFCHECK_CANDIDATES_FILE`, `SLV_SELFCHECK_BIND` and
 `SLV_SELFCHECK_CONNECT_MAP` are test seams for `tests/entrypoint_test.sh`, `tests/test_addr_probe.py`
 and `tests/test_selfcheck.py`, not operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Slice A.3: TURN for the mixer**
+  - **New TURN knobs.** Unset (the default), the generated `janus.jcfg` is byte-identical to before.
+    Set, they write the nat `turn_*` keys, and a partial or mixed-style configuration now refuses to
+    start (FATAL). Credentials appear in the log only as `set`/`EMPTY`.
+  - **C6 is rewritten.**
+    - A publicly reachable server with no TURN is now **PASS**; before, it was a WARN about viewers.
+    - A CGNAT or unreachable server with no TURN is WARN.
+    - Configured TURN is proven by a real Allocate: PASS with the relay address, or FAIL.
+    - On this kind of deployment the self-check's worst status therefore moves from C6's WARN to C2a's WARN.
+  - **Candidate types.** Every self-check run adds an `INFO candidates` line, a `candidates` object in the JSON,
+    and `/run/legion-voice/candidates.json`, all read from the Admin API. `--candidates` prints them alone.
+  - **`--listen`** also prints a busybox `nc` form.
+  - **New compose profile `turn-test`**, a test fixture only; off unless named.
 - **Slice A.2b: C2 corrected, inbound proof**
   - **C2 is now C2a and C2b.**
     - A source-port remap on container-initiated UDP is a WARN (C2a), not a FAIL. That remap is normal

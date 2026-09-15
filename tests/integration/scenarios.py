@@ -1,4 +1,4 @@
-"""The churn scenarios S1-S8 and S10-S12 -- the mixer's robustness contract (README.md in this directory).
+"""The churn scenarios S1-S8 and S10-S13 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down
 in a finally block. Every expectation is a poll of the oracle (Admin API handle_info, or the
@@ -331,6 +331,42 @@ async def s12_spatial_cull_and_pan(ctx: Ctx) -> None:
                          "B back at 20 m is re-added: A's mix is audible again")
 
 
+async def s13_relay_only_peer(ctx: Ctx) -> None:
+    """The relay path end to end. A offers ONLY relay candidates (TURN from --turn-uri, e.g. the turn-test profile);
+    B is a normal peer. A's media must cross the relay in both directions. The proof:
+    - A's offer holds relay candidates only;
+    - A's own ICE agent nominated pairs whose local candidate is its relay, with no non-relay socket left;
+    - B hears A;
+    - A receives audio back.
+    The mixer's selected pair is logged as information and not asserted: on a published-port mixer the relay's packets
+    reach Janus through the port publish, so Janus reports them as a prflx pair from the gateway, as it does for a
+    direct peer."""
+    cfg = ctx.cfg
+    if not cfg.turn_uri:
+        raise Skip("no TURN for the harness: `docker compose --profile turn-test up -d turn-test`, then pass "
+                   "--turn-uri 'turn:127.0.0.1:3478?transport=tcp' --turn-secret turn-test-secret")
+    r = ctx.new_room()
+    a = await ctx.join_relay_only("A", r)
+    b = await ctx.join("B", r)
+    offered = a.offered_candidates()
+    if not offered or {kind for kind, _ in offered} != {"relay"}:
+        raise Fail("A's offer carries only relay candidates", offered)
+    await ctx.ready(a, b)
+
+    async def relay_proof():
+        return a.relay_proof()
+
+    proof = await until(relay_proof, lambda p: bool(p["nominated_local_types"]), "A's ICE agent nominated a pair")
+    if set(proof["nominated_local_types"]) != {"relay"} or proof["non_relay_sockets"]:
+        raise Fail("A's nominated pairs use its relay candidate and no non-relay socket is left", proof)
+    ice = await ctx.admin.handle_ice(a) or {}
+    print(f"      S13 info: A relay candidates {sorted({addr for _, addr in offered})}; A's ICE {proof}; "
+          f"mixer selected pair {ice.get('selected-pair')}", flush=True)
+    await ctx.until_info(b, lambda i: (i.get("last_mix_rms") or 0.0) > 0.01,
+                         "A's tone, sent through the relay, is audible in B's mix")
+    await until(a.packets_received, lambda n: n > 25, "A receives the mixer's audio back through the relay")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -344,4 +380,6 @@ SCENARIOS = [
     Scenario("S11", "a moderation-muted source lights no dot for that listener", "SC-87", s11_muted_source_dot_dark),
     Scenario("S12", "spatial path: in-range source audible and panned, beyond the cutoff culled",
              "O-80, O-83, spatial coverage", s12_spatial_cull_and_pan),
+    Scenario("S13", "relay path: a peer offering only relay candidates carries media both ways",
+             "A.3 TURN, relay path end to end", s13_relay_only_peer),
 ]

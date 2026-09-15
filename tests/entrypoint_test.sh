@@ -267,6 +267,61 @@ printf '198.51.100.4\n198.51.100.4\n' > "$WORK/stun.seq"
 run_watch SLV_ADDR_WATCH_MAX_CHECKS=2 STUB_STUN_FILE="$WORK/stun.seq" JS_PUBLIC_IP_CHANGE_ACTION=restart STUB_PARTICIPANTS=3 JS_PUBLIC_IP_RESTART_MAX_WAIT_S=30
 check "A.1 watcher restart: participants stay -> restarts after the max wait, logging the outage" 'has "with 3 participant(s) still connected after 30 s: taking the outage" && has RESTART-CALLED'
 
+# ---- A.3: TURN for the mixer ----
+TURN_USER_V="turn-user-SECRET-u1"
+TURN_PWD_V="turn-pwd-SECRET-p1"
+TURN_KEY_V="turn-key-SECRET-k1"
+no_secrets() { ! has "$TURN_USER_V" && ! has "$TURN_PWD_V" && ! has "$TURN_KEY_V"; }
+natkey() { section janus.jcfg nat | grep -Eq "^[[:space:]]*$1 = $2\$"; }
+GOLDEN="$HERE/golden/janus.jcfg.pre-turn"
+
+run_ep JS_PUBLIC_IP=203.0.113.7
+NO_TURN_SUM=$(sha256sum "$CONF/janus.jcfg" | cut -d' ' -f1)
+check "A.3 no TURN -> no turn keys in the nat section, turn=none reported" '[ "$RC" -eq 0 ] && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_" && has "INFO: turn=none"'
+if [ -f /opt/janus/share/janus-templates/janus.jcfg ] && [ -z "${ENTRYPOINT_TEST_TPL:-}" ] && [ -f "$GOLDEN" ]; then
+	check "A.3 no TURN -> janus.jcfg byte-identical to the pre-A.3 entrypoint's (tests/golden)" 'cmp -s "$CONF/janus.jcfg" "$GOLDEN"'
+else
+	echo "skip golden janus.jcfg comparison (needs the image's own templates)"
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER= JS_TURN_PORT= JS_TURN_TYPE= JS_TURN_USER= JS_TURN_PWD= JS_TURN_REST_API= JS_TURN_REST_API_KEY= JS_TURN_REST_API_METHOD=
+check "A.3 no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha256sum "$CONF/janus.jcfg" | cut -d" " -f1)" = "$NO_TURN_SUM" ]'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER=turn.example.test JS_TURN_PORT=5349 JS_TURN_TYPE=TLS JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"
+check "A.3 static TURN -> starts" '[ "$RC" -eq 0 ] && has STUB-JANUS-RAN'
+check "A.3 static TURN -> each key written in the nat section" 'natkey turn_server "\"turn.example.test\"" && natkey turn_port 5349 && natkey turn_type "\"tls\"" && natkey turn_user "\"$TURN_USER_V\"" && natkey turn_pwd "\"$TURN_PWD_V\"" && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_rest_api"'
+check "A.3 static TURN -> reported with credentials as set, never their values" 'has "INFO: turn=static server=turn.example.test port=5349 type=tls user=set pwd=set" && has "turn_server = turn.example.test:5349 (tls), static credentials user=set pwd=set" && no_secrets'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"
+check "A.3 static TURN defaults -> port 3478, type udp" 'natkey turn_port 3478 && natkey turn_type "\"udp\"" && no_secrets'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 "JS_TURN_REST_API=https://rest.example.test/turn?tenant=hidden-tenant" JS_TURN_REST_API_KEY="$TURN_KEY_V" JS_TURN_REST_API_METHOD=get
+check "A.3 REST TURN -> each key written in the nat section" '[ "$RC" -eq 0 ] && natkey turn_rest_api "\"https://rest.example.test/turn\\?tenant=hidden-tenant\"" && natkey turn_rest_api_key "\"$TURN_KEY_V\"" && natkey turn_rest_api_method "\"GET\"" && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_(server|user|pwd) ="'
+check "A.3 REST TURN -> URL logged without its query, key as set" 'has "INFO: turn=rest rest_api=https://rest.example.test/turn rest_api_key=set rest_api_method=GET" && ! has "hidden-tenant" && no_secrets'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_REST_API=http://rest.example.test/turn
+check "A.3 REST TURN without a key -> no key line, method POST" 'natkey turn_rest_api_method "\"POST\"" && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_rest_api_key"'
+
+run_ep JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V" JS_TURN_REST_API=https://rest.example.test/turn JS_TURN_REST_API_KEY="$TURN_KEY_V"
+check "A.3 static and REST both configured -> FATAL naming both, no values" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_REST_API (REST credentials) and JS_TURN_SERVER, JS_TURN_USER, JS_TURN_PWD (static TURN settings) are both set" && ! has STUB-JANUS-RAN && no_secrets'
+run_ep JS_TURN_SERVER=turn.example.test
+check "A.3 server with no credentials -> FATAL" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_SERVER is set without credentials" && ! has STUB-JANUS-RAN'
+run_ep JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V"
+check "A.3 server with a user but no password -> FATAL" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_SERVER is set without credentials" && no_secrets'
+run_ep JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"
+check "A.3 credentials without a server -> FATAL (partial)" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_USER, JS_TURN_PWD set without JS_TURN_SERVER: a partial TURN configuration" && no_secrets'
+run_ep JS_TURN_REST_API_KEY="$TURN_KEY_V"
+check "A.3 REST key without the API URL -> FATAL (partial)" '[ "$RC" -eq 1 ] && has "set without JS_TURN_REST_API: a partial TURN REST configuration" && no_secrets'
+run_ep JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V" JS_TURN_TYPE=sctp
+check "A.3 bad JS_TURN_TYPE -> FATAL" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_TYPE='\''sctp'\'' is not one of udp, tcp, tls" && no_secrets'
+run_ep JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V" JS_TURN_PORT=70000
+check "A.3 bad JS_TURN_PORT -> FATAL" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_PORT=70000 is not a port number"'
+run_ep JS_TURN_REST_API=https://rest.example.test/turn JS_TURN_REST_API_METHOD=PUT
+check "A.3 bad JS_TURN_REST_API_METHOD -> FATAL" '[ "$RC" -eq 1 ] && has "JS_TURN_REST_API_METHOD='\''PUT'\'' is not GET or POST"'
+run_ep JS_TURN_REST_API=ftp://rest.example.test/turn
+check "A.3 non-http JS_TURN_REST_API -> FATAL" '[ "$RC" -eq 1 ] && has "JS_TURN_REST_API must be an http:// or https:// URL"'
+run_ep JS_TURN_SERVER=turn.example.test JS_TURN_USER="$TURN_USER_V" 'JS_TURN_PWD=pw"quote-SECRET'
+check "A.3 a double quote in a credential -> FATAL naming the knob only" '[ "$RC" -eq 1 ] && has "FATAL: JS_TURN_PWD contains a double quote or a backslash" && ! has "quote-SECRET"'
+
 # ---- A.2: an unauthorised or malformed participant poll is logged and never read as zero ----
 printf '198.51.100.4\n198.51.100.4\n' > "$WORK/stun.seq"
 run_watch SLV_ADDR_WATCH_MAX_CHECKS=2 STUB_STUN_FILE="$WORK/stun.seq" JS_PUBLIC_IP_CHANGE_ACTION=restart JS_PUBLIC_IP_RESTART_MAX_WAIT_S=30 \

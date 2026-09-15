@@ -30,7 +30,8 @@ if str(_CONNECTORS) not in sys.path:
 
 import aiohttp  # noqa: E402
 import av  # noqa: E402
-from aiortc import RTCPeerConnection  # noqa: E402
+from aioice.ice import TransportPolicy  # noqa: E402
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection  # noqa: E402
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack  # noqa: E402
 
 from common.janus import PLUGIN, JanusHttp  # noqa: E402
@@ -77,6 +78,10 @@ class Config:
     grace: int
     restart: bool
     join_timeout: int = 30
+    #: S13: the TURN server the relay-only peer uses (e.g. the turn-test profile); empty = S13 is skipped
+    turn_uri: str = ""
+    turn_user: str = ""
+    turn_pwd: str = ""
 
 
 def read_env(path: Path) -> dict:
@@ -284,6 +289,100 @@ class TestPeer(ConnectorPeer):
 
 # ---- oracle and control -----------------------------------------------------------------------
 
+class RelayOnlyPeer(TestPeer):
+    """A TestPeer that gathers ONLY relay candidates, through the TURN server in cfg.turn_uri (S13). Its offer carries
+    nothing but `typ relay`, so its media reaches the mixer through the relay or not at all.
+
+    aiortc 1.13 exposes no ICE transport policy, but aioice's Connection has one (TransportPolicy.RELAY). The peer
+    connection builds one ICE gatherer per DTLS transport in its private __createDtlsTransport. This wraps that
+    method on this instance only, so other peers in the process are untouched, and on each new gatherer:
+    - sets the RELAY policy, which keeps host candidates out of the offer;
+    - once gathering is done, detaches the host sockets from Connection._protocols, which is what pairing, checks and
+      sending use. aioice's RELAY policy alone does NOT restrict traffic: the host sockets stay in _protocols and
+      send connectivity checks straight to the remote candidates.
+    The detached sockets are not closed until the peer closes. Closing one makes aioice's connection_lost push an
+    end-of-stream marker into the connection's shared queue, and the DTLS layer then reads "Connection lost".
+    Both findings came from S13 runs. S13 checks the offer SDP and this peer's nominated pairs rather than
+    trusting any of it."""
+
+    def __init__(self, cfg: Config, name: str, room: int, display: str):
+        super().__init__(cfg, name, room, display)
+        server = RTCIceServer(urls=cfg.turn_uri, username=cfg.turn_user, credential=cfg.turn_pwd)
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[server]))
+        create = pc._RTCPeerConnection__createDtlsTransport
+        self._detached = []   # host sockets taken out of ICE; closed only after the peer connection closes
+
+        def relay_only_transport():
+            dtls = create()
+            connection = dtls.transport.iceGatherer._connection
+            connection._transport_policy = TransportPolicy.RELAY
+            gather = connection.gather_candidates
+
+            async def gather_relay_only(*args, **kwargs):
+                await gather(*args, **kwargs)
+                kept = []
+                for protocol in connection._protocols:
+                    if protocol.local_candidate is not None and protocol.local_candidate.type == "relay":
+                        kept.append(protocol)
+                    else:
+                        self._detached.append(protocol)
+                connection._protocols = kept
+
+            connection.gather_candidates = gather_relay_only
+            return dtls
+
+        pc._RTCPeerConnection__createDtlsTransport = relay_only_transport
+        self._pc = pc
+
+    async def close(self, timeout: float = 10.0) -> None:
+        await super().close(timeout)
+        for protocol in self._detached:
+            if protocol.transport is not None:
+                protocol.transport.close()
+        self._detached.clear()
+
+    def offered_candidates(self) -> list:
+        """(type, "ip:port") for every a=candidate line in this peer's offer."""
+        desc = self._pc.localDescription
+        found = []
+        for line in (desc.sdp.splitlines() if desc else []):
+            if line.startswith("a=candidate:") and " typ " in line:
+                parts = line.split()
+                found.append((line.split(" typ ", 1)[1].split()[0], f"{parts[4]}:{parts[5]}"))
+        return found
+
+    def _connections(self) -> list:
+        """The aioice Connections behind this peer's ICE transports, once each."""
+        transports = [t.receiver.transport for t in self._pc.getTransceivers() if t.receiver.transport is not None]
+        if self._pc.sctp is not None:
+            transports.append(self._pc.sctp.transport)
+        seen, found = set(), []
+        for dtls in transports:
+            connection = dtls.transport.iceGatherer._connection
+            if id(connection) not in seen:
+                seen.add(id(connection))
+                found.append(connection)
+        return found
+
+    def relay_proof(self) -> dict:
+        """What this peer's own ICE agent is using: the local candidate type of every nominated pair, and how many
+        non-relay sockets remain. It is the relay proof S13 relies on. The mixer's selected pair cannot prove the relay
+        on a published-port mixer: the relay's packets reach Janus through the port publish, so Janus sees them
+        arrive from the gateway as prflx."""
+        nominated, non_relay = [], 0
+        for connection in self._connections():
+            nominated += [pair.local_candidate.type for pair in connection._nominated.values()]
+            non_relay += sum(1 for p in connection._protocols
+                             if p.local_candidate is None or p.local_candidate.type != "relay")
+        return {"nominated_local_types": sorted(nominated), "non_relay_sockets": non_relay}
+
+    async def packets_received(self) -> int:
+        """RTP packets this peer has received from the mixer (aiortc inbound-rtp stats)."""
+        report = await self._pc.getStats()
+        return sum(getattr(s, "packetsReceived", 0) or 0 for s in report.values()
+                   if getattr(s, "type", "") == "inbound-rtp")
+
+
 class Admin:
     """The oracle: Janus Admin API over HTTP, admin_secret in the body (the sim's
     JanusAdminClient.BuildEnvelope)."""
@@ -314,6 +413,19 @@ class Admin:
         if data.get("janus") != "success":
             return None
         return (data.get("info") or {}).get("plugin_specific") or {}
+
+    async def handle_ice(self, peer: TestPeer):
+        """The handle's webrtc.ice block (local and remote candidates, selected pair), or None once it is gone."""
+        sid, hid = peer.ids
+        if sid is None or hid is None:
+            return None
+        try:
+            data = await self._post(f"/{sid}/{hid}", {"janus": "handle_info"})
+        except aiohttp.ClientError:
+            return None
+        if data.get("janus") != "success":
+            return None
+        return ((data.get("info") or {}).get("webrtc") or {}).get("ice") or {}
 
     async def peer_ctl_batch(self, room: int, op: str = "replace", mute: dict | None = None,
                              excl: dict | None = None) -> dict:
@@ -523,6 +635,13 @@ class Ctx:
         peer = TestPeer(self.cfg, name, room, display or new_display())
         self.peers.append(peer)
         return await peer.start()
+
+    async def join_relay_only(self, name: str, room: int, display: str | None = None) -> RelayOnlyPeer:
+        """create (486 = already there) then join with a peer that offers ONLY relay candidates (cfg.turn_uri)."""
+        await self.control.create_room(room, f"integration {self.name}")
+        peer = RelayOnlyPeer(self.cfg, name, room, display or new_display())
+        self.peers.append(peer)
+        return await peer.start(timeout=20.0)
 
     async def join_without_media(self, name: str, room: int, display: str | None = None) -> NoMediaPeer:
         """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer)."""

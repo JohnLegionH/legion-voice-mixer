@@ -20,13 +20,19 @@ SLV_ADDR_PROBE_TIMEOUT_S (default 3) bounds each network probe. It is a test sea
 knob. The image's python3 is 3.6: no dataclasses, no assignment expressions.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import random
+import re
 import socket
+import ssl
 import struct
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -216,6 +222,298 @@ def system_probe(name):
     except OSError:
         return None
     return infos[0][4][0] if infos else None
+
+
+# ---- TURN (slice A.3) ---------------------------------------------------------------------------------------------
+
+STUN_ALLOCATE = 0x0003
+STUN_REFRESH = 0x0004
+STUN_SUCCESS_CLASS = 0x0100
+ATTR_USERNAME = 0x0006
+ATTR_MESSAGE_INTEGRITY = 0x0008
+ATTR_ERROR_CODE = 0x0009
+ATTR_LIFETIME = 0x000D
+ATTR_REALM = 0x0014
+ATTR_NONCE = 0x0015
+ATTR_XOR_RELAYED_ADDRESS = 0x0016
+ATTR_REQUESTED_TRANSPORT = 0x0019
+REQUESTED_TRANSPORT_UDP = bytes([17, 0, 0, 0])
+
+TURN_ERROR_HINTS = {
+    401: "the credentials were rejected",
+    403: "forbidden by the server's policy",
+    437: "allocation mismatch",
+    438: "stale nonce",
+    441: "wrong credentials",
+    442: "unsupported transport protocol",
+    486: "allocation quota reached",
+    508: "insufficient capacity",
+}
+
+
+class TurnError(Exception):
+    """A TURN or TURN REST API attempt that failed. The message is a reason an operator can act on; it never carries
+    a credential or an API key."""
+
+
+def stun_attribute(atype, value):
+    return struct.pack(">HH", atype, len(value)) + value + b"\x00" * (-len(value) % 4)
+
+
+def build_stun_message(mtype, txid, attributes, integrity_key=None):
+    """A STUN message. With integrity_key, MESSAGE-INTEGRITY (HMAC-SHA1) is appended over the header and the attributes
+    before it, the header's length already counting the MESSAGE-INTEGRITY attribute (RFC 5389 section 15.4)."""
+    body = b"".join(stun_attribute(atype, value) for atype, value in attributes)
+    if integrity_key is not None:
+        header = struct.pack(">HHI", mtype, len(body) + 24, STUN_MAGIC) + txid
+        body += stun_attribute(ATTR_MESSAGE_INTEGRITY, hmac.new(integrity_key, header + body, hashlib.sha1).digest())
+    return struct.pack(">HHI", mtype, len(body), STUN_MAGIC) + txid + body
+
+
+def parse_stun_message(data):
+    """(type, transaction id, [(attribute type, value), ...]) for a well-formed STUN message, else None."""
+    if len(data) < 20:
+        return None
+    mtype, mlen, magic = struct.unpack(">HHI", data[:8])
+    if magic != STUN_MAGIC or mtype & 0xC000 or 20 + mlen > len(data):
+        return None
+    attributes = []
+    pos, end = 20, 20 + mlen
+    while pos + 4 <= end:
+        atype, alen = struct.unpack(">HH", data[pos:pos + 4])
+        value = data[pos + 4:pos + 4 + alen]
+        if len(value) < alen:
+            return None
+        attributes.append((atype, value))
+        pos += 4 + alen + (-alen % 4)
+    return mtype, data[8:20], attributes
+
+
+def _attribute(attributes, atype):
+    for kind, value in attributes:
+        if kind == atype:
+            return value
+    return None
+
+
+def _xor_address(value):
+    if value is None or len(value) < 8 or value[1] != FAMILY_IPV4:
+        return None
+    port = struct.unpack(">H", value[2:4])[0] ^ (STUN_MAGIC >> 16)
+    raw = struct.unpack(">I", value[4:8])[0] ^ STUN_MAGIC
+    return socket.inet_ntoa(struct.pack(">I", raw)), port
+
+
+def _describe_error(attributes):
+    value = _attribute(attributes, ATTR_ERROR_CODE)
+    if value is None or len(value) < 4:
+        return "no error code"
+    code = (value[2] & 0x07) * 100 + value[3]
+    reason = value[4:].decode("utf-8", "replace").strip()
+    hint = TURN_ERROR_HINTS.get(code)
+    return "%d %s%s" % (code, reason, " (%s)" % hint if hint else "")
+
+
+def long_term_key(username, realm, password):
+    """The long-term credential key, MD5(username:realm:password) (RFC 5389 section 15.4; ASCII credentials)."""
+    return hashlib.md5(("%s:%s:%s" % (username, realm, password)).encode("utf-8")).digest()
+
+
+class _TurnChannel(object):
+    """STUN request/response exchanges with a TURN server over udp, tcp or tls. For tls the server certificate is not
+    verified: this checks reachability and credentials, not the certificate chain."""
+
+    def __init__(self, host, port, transport, timeout):
+        self.label = "%s:%d over %s" % (host, port, transport)
+        self.transport = transport
+        self.timeout = timeout
+        self.buffer = b""
+        kind = socket.SOCK_DGRAM if transport == "udp" else socket.SOCK_STREAM
+        try:
+            self.addr = socket.getaddrinfo(host, port, socket.AF_INET, kind)[0][4]
+        except (OSError, IndexError) as err:
+            raise TurnError("cannot resolve %s (%s)" % (host, err))
+        if transport == "udp":
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            return
+        try:
+            raw = socket.create_connection(self.addr, timeout=timeout)
+        except OSError as err:
+            raise TurnError("cannot connect to %s (%s)" % (self.label, err))
+        if transport == "tcp":
+            self.sock = raw
+            return
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        try:
+            self.sock = context.wrap_socket(raw, server_hostname=host)
+        except (ssl.SSLError, OSError) as err:
+            raw.close()
+            raise TurnError("TLS handshake with %s failed (%s)" % (self.label, err))
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def exchange(self, message, txid):
+        deadline = time.monotonic() + self.timeout
+        try:
+            if self.transport == "udp":
+                return self._exchange_udp(message, txid, deadline)
+            self.sock.sendall(message)
+            while True:
+                header = self._read(20, deadline)
+                parsed = parse_stun_message(header + self._read(struct.unpack(">H", header[2:4])[0], deadline))
+                if parsed and parsed[1] == txid:
+                    return parsed
+        except socket.timeout:
+            raise TurnError("no answer from %s within %.1f s" % (self.label, self.timeout))
+        except (ssl.SSLError, OSError) as err:
+            raise TurnError("connection to %s failed (%s)" % (self.label, err))
+
+    def _exchange_udp(self, message, txid, deadline):
+        interval = 0.5
+        while time.monotonic() < deadline:
+            self.sock.sendto(message, self.addr)
+            wait_until = min(deadline, time.monotonic() + interval)
+            while True:
+                left = wait_until - time.monotonic()
+                if left <= 0:
+                    break
+                self.sock.settimeout(left)
+                try:
+                    data, _src = self.sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                parsed = parse_stun_message(data)
+                if parsed and parsed[1] == txid:
+                    return parsed
+            interval = min(interval * 2, 2.0)
+        raise socket.timeout()
+
+    def _read(self, count, deadline):
+        while len(self.buffer) < count:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise socket.timeout()
+            self.sock.settimeout(left)
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise TurnError("%s closed the connection" % self.label)
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:count], self.buffer[count:]
+        return data
+
+
+def turn_allocate(host, port, transport, username, password, timeout=5.0):
+    """Allocate a UDP relay on a TURN server with long-term credentials (RFC 8656), then release it with a
+    zero-lifetime Refresh. Returns the relayed (IPv4, port). Raises TurnError with the reason."""
+    if transport not in ("udp", "tcp", "tls"):
+        raise TurnError("unsupported TURN transport %r (udp, tcp or tls)" % transport)
+    channel = _TurnChannel(host, port, transport, timeout)
+    try:
+        requested = (ATTR_REQUESTED_TRANSPORT, REQUESTED_TRANSPORT_UDP)
+        auth, key = [], None
+        txid = os.urandom(12)
+        mtype, _, attributes = channel.exchange(build_stun_message(STUN_ALLOCATE, txid, [requested]), txid)
+        if mtype != STUN_ALLOCATE | STUN_SUCCESS_CLASS:
+            realm, nonce = _attribute(attributes, ATTR_REALM), _attribute(attributes, ATTR_NONCE)
+            if realm is None or nonce is None:
+                raise TurnError("Allocate refused before authentication: %s" % _describe_error(attributes))
+            key = long_term_key(username, realm.decode("utf-8", "replace"), password)
+            auth = [(ATTR_USERNAME, username.encode("utf-8")), (ATTR_REALM, realm), (ATTR_NONCE, nonce)]
+            txid = os.urandom(12)
+            mtype, _, attributes = channel.exchange(
+                build_stun_message(STUN_ALLOCATE, txid, [requested] + auth, key), txid)
+            if mtype != STUN_ALLOCATE | STUN_SUCCESS_CLASS:
+                raise TurnError("Allocate with the configured credentials failed: %s" % _describe_error(attributes))
+        relay = _xor_address(_attribute(attributes, ATTR_XOR_RELAYED_ADDRESS))
+        if relay is None:
+            raise TurnError("Allocate succeeded but returned no IPv4 XOR-RELAYED-ADDRESS")
+        try:
+            txid = os.urandom(12)
+            channel.exchange(build_stun_message(STUN_REFRESH, txid, [(ATTR_LIFETIME, struct.pack(">I", 0))] + auth,
+                                                key), txid)
+        except TurnError:
+            pass   # releasing is a courtesy: the allocation expires on its own
+        return relay
+    finally:
+        channel.close()
+
+
+def rest_credentials(secret, user, expiry):
+    """coturn's shared-secret ("TURN REST API") credentials: username '<expiry>:<user>', password
+    base64(HMAC-SHA1(secret, username))."""
+    username = "%d:%s" % (int(expiry), user)
+    digest = hmac.new(secret.encode("utf-8"), username.encode("utf-8"), hashlib.sha1).digest()
+    return username, base64.b64encode(digest).decode("ascii")
+
+
+_TURN_URI = re.compile(r"^(turns?):([^:?\s]+)(?::(\d+))?(?:\?transport=(udp|tcp))?$")
+
+
+def parse_turn_uri(uri):
+    """RFC 7065 'turn:host[:port][?transport=udp|tcp]' or 'turns:host[:port][?transport=tcp]' -> (host, port,
+    transport), transport being udp, tcp or tls. None for anything else."""
+    match = _TURN_URI.match((uri or "").strip())
+    if not match:
+        return None
+    scheme, host, port, transport = match.groups()
+    if scheme == "turns":
+        return None if transport == "udp" else (host, int(port or 5349), "tls")
+    return host, int(port or 3478), transport or "udp"
+
+
+def redact_url(url):
+    """scheme://host[:port]/path: no user info, query or fragment, which can carry keys."""
+    try:
+        parts = urllib.parse.urlsplit(url or "")
+        host = parts.hostname or ""
+        if parts.port:
+            host = "%s:%d" % (host, parts.port)
+    except ValueError:
+        return "(invalid URL)"
+    return "%s://%s%s" % (parts.scheme, host, parts.path) if parts.scheme and host else "(invalid URL)"
+
+
+def turn_rest_request(api, key, method, username, timeout):
+    """Credentials from a TURN REST API backend, requested as Janus requests them (vendor turnrest.c): service=turn,
+    the key sent as both api= and key=, and username=, in the query string and, for POST, also as the form body.
+    Returns (username, password, ttl, uris). Raises TurnError; no reason carries the key or a credential."""
+    params = [("service", "turn")]
+    if key:
+        params += [("api", key), ("key", key)]
+    if username:
+        params.append(("username", username))
+    query = urllib.parse.urlencode(params)
+    method = (method or "POST").upper()
+    where = redact_url(api)
+    request = urllib.request.Request("%s?%s" % (api, query),
+                                     data=None if method == "GET" else query.encode("ascii"), method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            body = reply.read(65536)
+    except urllib.error.HTTPError as err:
+        raise TurnError("the TURN REST API at %s answered HTTP %d" % (where, err.code))
+    except (urllib.error.URLError, OSError, ValueError) as err:
+        raise TurnError("cannot reach the TURN REST API at %s (%s)" % (where, getattr(err, "reason", err)))
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except ValueError:
+        raise TurnError("the TURN REST API at %s did not answer with JSON" % where)
+    if not isinstance(data, dict) or not isinstance(data.get("username"), str) \
+            or not isinstance(data.get("password"), str):
+        raise TurnError("the TURN REST API at %s answered without a string username and password" % where)
+    ttl = data.get("ttl", 0)
+    if "ttl" in data and (not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0):
+        raise TurnError("the TURN REST API at %s answered with a ttl that is not a positive integer" % where)
+    uris = data.get("uris")
+    if not isinstance(uris, list) or not uris:
+        raise TurnError("the TURN REST API at %s answered without a non-empty uris list" % where)
+    return data["username"], data["password"], ttl, [uri for uri in uris if isinstance(uri, str)]
 
 
 def sum_participants(plugindata):

@@ -15,6 +15,53 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer A.3: TURN for the mixer (untagged) — 2026-09-14
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 21:55 | `7539c51c` | `legion-voice-mixer:rollback-pre-a3` (`3b416bbe`, the A.2b image, tagged before the rebuild) |
+
+This is an entrypoint and self-check change; the plugin code is the same as V-4.
+- **New knobs:** `JS_TURN_*` configure the mixer's own TURN in two styles, static or REST/ephemeral, never both. A partial configuration is FATAL. Credentials are logged only as `set`/`EMPTY`.
+- **C6** judges TURN against C1 and proves configured TURN with a real Allocate.
+- **Candidate types:** Janus's host/srflx/relay candidates per handle, read from Admin API `handle_info`, in the report and `/run/legion-voice/candidates.json`.
+- **`turn-test` compose profile:** a coturn and a REST backend, test fixture only.
+- **Harness S13:** the relay path end to end.
+- **`--listen`:** gains a busybox `nc` form.
+
+Mixer-side TURN rescues a CGNAT or unreachable **server**. It does not give a UDP-blocked viewer a path; that is A.4 (sim side).
+
+**Verified:**
+- **Image build:** C suites; `test_addr_probe.py` 39 tests, OK; `test_selfcheck.py` 66 tests, OK; `entrypoint_test.sh` 114 passed, 0 failed. The entrypoint suite includes a byte-for-byte golden check against the pre-A.3 `janus.jcfg`.
+- **No TURN:** the live `janus.jcfg` is byte-identical to the pre-A.3 container's (sha256 `e38fd435…` both), and the banner reads `turn=none`. **C6 PASS:** "no TURN configured, and this server is publicly reachable per C1 (174.82.163.190): the server-side media path is correct and complete without a relay", with the A.4 note. The rest of the board is unchanged: C1 PASS, C2a WARN, C2b INCONCLUSIVE, C3–C5 PASS; exit 2.
+- **TURN configured against `turn-test`:**
+  - **REST:** C6 PASS, "TURN Allocate on turn:turn-test:3478?transport=udp with credentials from the TURN REST API at http://turn-test-rest:8089/turn succeeded: relay 172.23.0.3:49163".
+  - **Relay candidates on a live handle:** host 3, relay 3 in Janus's local candidates.
+  - **Static over TLS** (`turn-test:5349`): C6 PASS with relay `172.23.0.3:49176`, and the S12 session's handle had host 3, relay 3.
+  - **No leaks:** the credentials and REST key appear 0 times in the container log.
+- **Grid left with no TURN.** `.env` was restored from `.env.bak-a3`, and `turn-test` is torn down.
+- **Harness:** 12/12 in 278.3 s. S13: A offered only relay candidates, its ICE agent nominated a relay pair with 0 non-relay sockets, B heard A, and A received audio.
+
+**Findings:**
+- **TURN over TLS works** in this Janus with libnice 0.1.21.1 against coturn's self-signed certificate: Janus gathered relay candidates. Whether libnice verifies the certificate is not shown by this test.
+- **TURN REST support is compiled in:** the `janus_turnrest_*` symbols are in the binary, and Janus logged `TURN REST API backend: http://turn-test-rest:8089/turn`.
+- **Janus core logs REST credentials at raised debug levels.** It logs the REST request URI, key included, at debug level 5 (VERB) and REST-issued credentials at 6 (HUGE). The image runs at the default, 4.
+- **coturn rejects a shared-secret username expiring after 2^31.** A 2100 expiry got `Cannot find credentials of user`, so the fixture's static pair expires on 2038-01-01.
+- **aioice's `TransportPolicy.RELAY` hides host candidates but still checks from host sockets.** The harness detaches those sockets instead. Closing them breaks DTLS through aioice's `connection_lost`.
+- **On a published-port mixer, Janus cannot prove the relay path.** Its selected pair shows the relay's packets as a gateway prflx pair, so S13 proves the relay from the peer's own ICE agent.
+
+### Behaviour changes on upgrade
+- **New knobs** `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD`, `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY` and `JS_TURN_REST_API_METHOD`. Unset, nothing changes: `janus.jcfg` is byte-identical. Set, a partial or mixed configuration refuses to start.
+- **C6:** a publicly reachable server with no TURN is now PASS; it was a WARN. A CGNAT or unreachable server with no TURN is WARN. Configured TURN is PASS with the relay address, or FAIL with the reason.
+- **Candidate report:** every self-check run adds an `INFO candidates` line, a `candidates` object in the JSON and `/run/legion-voice/candidates.json`. `legion-voice-selfcheck --candidates` prints it alone.
+- **`--listen`** prints a busybox `nc` form as well.
+- **New `turn-test` compose profile**, a test fixture that only starts when named.
+
+### One-time migrations
+- None.
+
+---
+
 ## Mixer A.2b: C2 corrected, inbound proof (untagged) — 2026-09-14
 
 | Deployed (CDT) | Image | Rollback tag |

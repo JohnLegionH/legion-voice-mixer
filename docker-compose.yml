@@ -144,3 +144,48 @@ services:
       - ./injector-in:/injector       # drop or stream the source WAV here (SOURCE=/injector/in.wav)
       - ./recordings:/recordings      # used only with RECORD=1
     restart: unless-stopped
+
+  # ── TEST FIXTURE ONLY: TURN server (slice A.3) — NOT FOR PRODUCTION ──────────
+  # legion-voice ships no TURN server. Operators who need mixer-side TURN (a CGNAT or otherwise unreachable
+  # mixer) run their own, typically coturn, and point JS_TURN_* at it (docs/docker-notes.md, "TURN for the
+  # mixer"). This coturn and the REST backend below exist only to exercise JS_TURN_*, the self-check's C6
+  # and the harness's relay scenario (S13). They use throwaway credentials, a certificate generated at
+  # start, and no hardening. Behind a profile, so `docker compose up -d` alone NEVER starts them:
+  #   docker compose --profile turn-test up -d turn-test turn-test-rest
+  #   docker compose --profile turn-test rm -sf turn-test turn-test-rest     # tear down
+  # Shared-secret mode (coturn cannot mix it with static users). Throwaway credentials:
+  #   REST:   JS_TURN_REST_API=http://turn-test-rest:8089/turn  JS_TURN_REST_API_KEY=turn-test-api-key
+  #   static: JS_TURN_SERVER=turn-test  JS_TURN_USER=2145916800:legion-voice-static
+  #           JS_TURN_PWD=NGwezoW6rFCQ0gcjQKg34HJa1W8=   (a long-lived pair derived from the secret; its
+  #           expiry, 2038-01-01, must stay below 2^31: coturn rejects a later timestamp)
+  turn-test:
+    image: coturn/coturn:4.6.3
+    profiles: [turn-test]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj /CN=turn-test
+        -keyout /tmp/turn-test.key -out /tmp/turn-test.crt >/dev/null 2>&1 &&
+        exec turnserver -n --log-file=stdout --no-cli --fingerprint
+        --realm=legion-voice-turn-test --use-auth-secret --static-auth-secret=turn-test-secret
+        --listening-port=3478 --tls-listening-port=5349
+        --cert=/tmp/turn-test.crt --pkey=/tmp/turn-test.key
+        --min-port=49160 --max-port=49200
+    ports:
+      - "3478:3478/udp"   # TURN over UDP and TCP, also for the harness on the host
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"   # TURN over TLS
+    restart: "no"
+
+  turn-test-rest:
+    # TEST FIXTURE ONLY: the mixer image's python3 running docker/turn-test/turn_rest_backend.py.
+    image: ghcr.io/johnlegionh/legion-voice-mixer:latest
+    profiles: [turn-test]
+    entrypoint: ["python3", "/fixture/turn_rest_backend.py"]
+    environment:
+      TURN_TEST_SECRET: turn-test-secret
+      TURN_TEST_API_KEY: turn-test-api-key
+      TURN_TEST_URIS: "turn:turn-test:3478?transport=udp,turn:turn-test:3478?transport=tcp,turns:turn-test:5349?transport=tcp"
+    volumes:
+      - ./docker/turn-test:/fixture:ro
+    restart: "no"

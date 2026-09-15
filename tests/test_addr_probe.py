@@ -196,6 +196,123 @@ class ParticipantsPoll(unittest.TestCase):
         self.assertIn("addr_probe: participants: unauthorized", err.getvalue())
 
 
+class TurnRestVector(unittest.TestCase):
+    """coturn shared-secret (TURN REST) credentials against vectors computed independently with openssl:
+        printf '%s' '1700000000:legion-voice' | openssl dgst -sha1 -hmac 'turn-test-secret' -binary | base64
+        printf '%s' '2145916800:legion-voice-static' | openssl dgst -sha1 -hmac 'turn-test-secret' -binary | base64
+    The second is the turn-test fixture's documented static pair. Its expiry stays below 2^31, because coturn rejected a
+    pair expiring in 2100."""
+
+    def test_known_good_vector(self):
+        self.assertEqual(addr_probe.rest_credentials("turn-test-secret", "legion-voice", 1700000000),
+                         ("1700000000:legion-voice", "ScDtB8SL4GiYLaXf7MwGKlzp4ys="))
+
+    def test_turn_test_fixture_static_pair(self):
+        self.assertEqual(addr_probe.rest_credentials("turn-test-secret", "legion-voice-static", 2145916800),
+                         ("2145916800:legion-voice-static", "NGwezoW6rFCQ0gcjQKg34HJa1W8="))
+        self.assertLess(2145916800, 2 ** 31)
+
+
+class TurnUris(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(addr_probe.parse_turn_uri("turn:turn.example.test"), ("turn.example.test", 3478, "udp"))
+        self.assertEqual(addr_probe.parse_turn_uri("turn:t:3480?transport=tcp"), ("t", 3480, "tcp"))
+        self.assertEqual(addr_probe.parse_turn_uri("turns:t"), ("t", 5349, "tls"))
+        self.assertEqual(addr_probe.parse_turn_uri("turns:t:443?transport=tcp"), ("t", 443, "tls"))
+        for bad in ("turns:t?transport=udp", "stun:t:3478", "turn:", "http://t/"):
+            self.assertIsNone(addr_probe.parse_turn_uri(bad), bad)
+
+    def test_redact_url(self):
+        self.assertEqual(addr_probe.redact_url("https://user:pw@rest.example.test:8443/turn?key=abc#frag"),
+                         "https://rest.example.test:8443/turn")
+        self.assertEqual(addr_probe.redact_url("not a url"), "(invalid URL)")
+
+
+class TurnAllocate(unittest.TestCase):
+    USER, PWD = "turn-user", "turn-pwd"
+
+    def serve(self, **kwargs):
+        server = fakes.FakeTurn(users={self.USER: self.PWD}, **kwargs)
+        self.addCleanup(server.close)
+        return server
+
+    def test_udp_allocates_and_releases(self):
+        server = self.serve()
+        relay = addr_probe.turn_allocate("127.0.0.1", server.port, "udp", self.USER, self.PWD, 3)
+        self.assertEqual(relay, ("203.0.113.50", 49152))
+        self.assertEqual([t for t, _ in server.requests], [0x0003, 0x0004])
+
+    def test_tcp_allocates(self):
+        server = self.serve(transport="tcp")
+        self.assertEqual(addr_probe.turn_allocate("127.0.0.1", server.port, "tcp", self.USER, self.PWD, 3),
+                         ("203.0.113.50", 49152))
+
+    def test_wrong_password_is_the_reason(self):
+        server = self.serve()
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_allocate("127.0.0.1", server.port, "udp", self.USER, "wrong", 3)
+        self.assertIn("401", str(caught.exception))
+        self.assertNotIn("wrong", str(caught.exception).replace("wrong credentials", ""))
+
+    def test_silent_server(self):
+        server = self.serve(mode="silent")
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_allocate("127.0.0.1", server.port, "udp", self.USER, self.PWD, 1)
+        self.assertIn("no answer", str(caught.exception))
+
+    def test_closed_tcp_port(self):
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_allocate("127.0.0.1", fakes.closed_tcp_port(), "tcp", self.USER, self.PWD, 2)
+        self.assertIn("cannot connect", str(caught.exception))
+
+    def test_unsupported_transport(self):
+        with self.assertRaises(addr_probe.TurnError):
+            addr_probe.turn_allocate("127.0.0.1", 3478, "sctp", self.USER, self.PWD, 1)
+
+
+class TurnRestRequest(unittest.TestCase):
+    def serve(self, **kwargs):
+        server = fakes.FakeTurnRest("s3cret", ["turn:127.0.0.1:3478?transport=udp"], key="rest-key", **kwargs)
+        self.addCleanup(server.close)
+        return server
+
+    def test_post_like_janus(self):
+        server = self.serve()
+        username, password, ttl, uris = addr_probe.turn_rest_request(server.url, "rest-key", "POST", "probe", 3)
+        self.assertTrue(username.endswith(":probe"))
+        self.assertEqual(password, fakes.rest_password("s3cret", username))
+        self.assertEqual((ttl, uris), (3600, ["turn:127.0.0.1:3478?transport=udp"]))
+        method, params = server.requests[-1]
+        self.assertEqual(method, "POST")
+        self.assertEqual({k: params[k] for k in ("service", "api", "key", "username")},
+                         {"service": "turn", "api": "rest-key", "key": "rest-key", "username": "probe"})
+
+    def test_get(self):
+        server = self.serve()
+        addr_probe.turn_rest_request(server.url, "rest-key", "get", "probe", 3)
+        self.assertEqual(server.requests[-1][0], "GET")
+
+    def test_wrong_key_reason_has_no_key(self):
+        server = self.serve()
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_rest_request(server.url + "?tenant=secret-tenant", "wrong-key-value", "POST", "probe", 3)
+        message = str(caught.exception)
+        self.assertIn("HTTP", message)
+        self.assertNotIn("wrong-key-value", message)
+        self.assertNotIn("secret-tenant", message)
+
+    def test_bad_json(self):
+        server = self.serve(mode="bad_json")
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_rest_request(server.url, "rest-key", "POST", "probe", 3)
+        self.assertIn("JSON", str(caught.exception))
+
+    def test_unreachable(self):
+        with self.assertRaises(addr_probe.TurnError) as caught:
+            addr_probe.turn_rest_request("http://127.0.0.1:%d/turn" % fakes.closed_tcp_port(), "k", "POST", "p", 2)
+        self.assertIn("cannot reach", str(caught.exception))
+
+
 class LoopbackServer(object):
     """A one-thread UDP server on 127.0.0.1 that answers each datagram with responder(datagram)."""
 

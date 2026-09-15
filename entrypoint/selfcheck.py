@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""legion-voice-selfcheck: reachability self-check for the mixer container (slices A.2, A.2b).
+"""legion-voice-selfcheck: reachability self-check for the mixer container (slices A.2, A.2b, A.3).
 
   C1   the advertised address is public (the A.1 state file); CGNAT is its own FAIL
   C2a  media path, outbound: STUN from the lowest, middle and highest port of JS_RTP_PORT_RANGE.
@@ -11,38 +11,47 @@
   C3   the RTP range is bindable in the container and matches Janus's rtp_port_range
   C4   signalling: the HTTP transport answers on its port and base path
   C5   the admin API does not answer at the public address
-  C6   the STUN/TURN servers Janus is configured with; WARN when there is no TURN
+  C6   TURN for this server. Mixer-side TURN rescues a CGNAT or unreachable SERVER (C1). Without TURN, a public
+       server is PASS and a non-public one WARN. With TURN, a real Allocate (through the REST API when configured)
+       is PASS with the relay address, or FAIL with the reason. turn_type is information, never a pass criterion.
 
 Each check reports an id, a title, PASS | FAIL | WARN | INCONCLUSIVE, what was observed, and a
 remediation for anything that is not PASS. INCONCLUSIVE means the check could not decide; it is never
 reported as PASS. The report's verdict is its worst status, in the order FAIL > INCONCLUSIVE > WARN > PASS.
+Every run also reports the ICE candidate types Janus offered each slvoice handle (host / srflx / relay), from
+the Admin API's handle_info, and writes them to /run/legion-voice/candidates.json.
 
 usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]
        legion-voice-selfcheck --listen [--port N] [--seconds N]
-  (no flag)   print the bracketed [selfcheck] block
-  --json      print the report as JSON instead
-  --startup   the container-start run: wait for Janus's HTTP transport within the bound
-  --timeout   the time bound in seconds (default JS_SELFCHECK_TIMEOUT_S, 20)
-  --listen    prove C2b: bind a free port of JS_RTP_PORT_RANGE (or --port N), print the one-line command
-              to run from a device outside the network, and wait --seconds (default 120) for it. A
-              receipt goes to /run/legion-voice/selfcheck-inbound.json.
+       legion-voice-selfcheck --candidates [--json]
+  (no flag)     print the bracketed [selfcheck] block
+  --json        print the report as JSON instead
+  --startup     the container-start run: wait for Janus's HTTP transport within the bound
+  --timeout     the time bound in seconds (default JS_SELFCHECK_TIMEOUT_S, 20)
+  --listen      prove C2b: bind a free port of JS_RTP_PORT_RANGE (or --port N), print the one-line commands to run
+                from a device outside the network, and wait --seconds (default 120) for one. A receipt goes to
+                /run/legion-voice/selfcheck-inbound.json.
+  --candidates  only the candidate-type report (JS_ADMIN_SECRET from the environment)
 Every check run writes the JSON report to /run/legion-voice/selfcheck.json.
-Exit status (check run): 0 = no FAIL and no INCONCLUSIVE (PASS, or WARN advice only); 1 = any FAIL;
-                         2 = any INCONCLUSIVE and no FAIL; 64 = usage error.
-Exit status (--listen):  0 = the probe arrived and was recorded; 2 = nothing arrived in time;
-                         1 = no port could be bound, or the receipt could not be written; 64 = usage error.
+Exit status (check run):   0 = no FAIL and no INCONCLUSIVE (PASS, or WARN advice only); 1 = any FAIL;
+                           2 = any INCONCLUSIVE and no FAIL; 64 = usage error.
+Exit status (--listen):    0 = the probe arrived and was recorded; 2 = nothing arrived in time;
+                           1 = no port could be bound, or the receipt could not be written; 64 = usage error.
+Exit status (--candidates): 0 = the Admin API answered; 2 = it did not.
 
 Inputs come from the effective values the entrypoint wrote to /run/legion-voice/effective-config.json,
-else from the environment, else from the entrypoint's defaults. The image's python3 is 3.6.
+else from the environment, else from the entrypoint's defaults. TURN settings come from janus.jcfg, so C6
+checks what Janus actually uses, mounted overrides included. The image's python3 is 3.6.
 Test seams (not operator knobs): SLV_EFFECTIVE_CONFIG, SLV_ADDR_STATE_FILE, JANUS_CONF_DIR,
-SLV_SELFCHECK_FILE, SLV_SELFCHECK_INBOUND_FILE, SLV_SELFCHECK_BIND (the address the RTP sockets bind;
-default 0.0.0.0) and SLV_SELFCHECK_CONNECT_MAP ("addr=addr,...": where C5 connects for an advertised
-address).
+SLV_SELFCHECK_FILE, SLV_SELFCHECK_INBOUND_FILE, SLV_SELFCHECK_CANDIDATES_FILE, SLV_SELFCHECK_BIND (the address
+the RTP sockets bind; default 0.0.0.0) and SLV_SELFCHECK_CONNECT_MAP ("addr=addr,...": where C5 connects for
+an advertised address).
 """
 
 import errno
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -76,7 +85,7 @@ TITLES = {
     "C3": "RTP port range is bindable and matches Janus",
     "C4": "signalling: HTTP transport answers",
     "C5": "admin API is not reachable from outside",
-    "C6": "STUN/TURN servers Janus will use",
+    "C6": "TURN for this server (mixer-side relay)",
 }
 
 # Run on the Docker host, in the directory holding docker-compose.yml (the service is named janus).
@@ -89,10 +98,10 @@ INBOUND_NOTE = (
 BLOCKED_REMEDIATION = (
     "allow outbound (egress) UDP from source ports %s in the host firewall, and in any cloud security group or "
     "router egress rule")
-TURN_REMEDIATION = (
-    "configure a TURN server for Janus: turn_server, turn_port, turn_type, turn_user and turn_pwd (or "
-    "turn_rest_api) in the nat section of janus.jcfg, via a mounted override in /opt/janus/etc/janus.d. Env knobs "
-    "for this arrive with A.3/A.4.")
+TURN_KNOBS = ("JS_TURN_SERVER, JS_TURN_PORT and JS_TURN_TYPE with JS_TURN_USER and JS_TURN_PWD, or JS_TURN_REST_API "
+              "(with JS_TURN_REST_API_KEY and JS_TURN_REST_API_METHOD)")
+CANDIDATE_TYPES = ("host", "srflx", "relay", "prflx")
+_CANDIDATE_TYPE = re.compile(r"\btyp (host|srflx|relay|prflx)\b")
 
 
 def result(cid, status, observed, remediation=None, notes=None, facts=None):
@@ -451,7 +460,7 @@ def check_c2b(inbound_file, range_text, max_age_h, public_addrs, now=None):
 
 
 def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time):
-    """The --listen mode: bind a free port of the RTP range, print the outside-device command, wait for it, and
+    """The --listen mode: bind a free port of the RTP range, print the outside-device commands, wait for one, and
     record a receipt for C2b. Returns the exit status (see the module docstring)."""
     out = sys.stdout if out is None else out
 
@@ -502,12 +511,15 @@ def listen(cfg, port=None, seconds=120.0, out=None, token=None, clock=time.time)
              "  bash -c 'echo %s > /dev/udp/%s/%d'" % (token, target, chosen),
              "  python3 -c 'import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM)"
              ".sendto(b\"%s\", (\"%s\", %d))'" % (token, target, chosen),
+             "  echo %s | timeout 3 nc -u -w1 %s %d" % (token, target, chosen),
+             "(the nc form is for phones and minimal images without bash or python3; busybox nc -u -w1 can hang after "
+             "sending, so timeout stops it, or use busybox timeout 3 if timeout is missing)",
              "UDP can drop a packet, so send it two or three times. Waiting..."]
     if not public:
         lines.insert(2, "no public address is advertised (see C1): replace %s with the address outside viewers use"
                      % target)
     elif len(public) > 1:
-        lines.insert(4, "other advertised public addresses: %s" % ", ".join(public[1:]))
+        lines.insert(len(lines) - 1, "other advertised public addresses: %s" % ", ".join(public[1:]))
     say(*lines)
 
     deadline = time.monotonic() + seconds
@@ -713,11 +725,26 @@ def check_c5(bind, port_text, base, public_addrs, budget, connect_map):
                          "hairpin TCP also reads as unreachable, so confirm from outside the network (A.6 recipes)"])
 
 
-# ---- C6 -----------------------------------------------------------------------------------------
+# ---- C6: TURN for this server -------------------------------------------------------------------
 
-def check_c6(jcfg_path):
-    """Whether Janus has a TURN relay. Who needs one depends on the viewer's own network, not on this server's
-    mapping, so this does not reason from C1 or C2."""
+def _turn_type_note(turn_type):
+    return ("turn_type: %s. It only sets how Janus reaches the TURN server; the relay speaks UDP toward viewers, so it "
+            "is information and never a pass criterion" % turn_type)
+
+
+def _c6_pass(how, where, relay, public, notes):
+    if public:
+        notes.append("this server is also publicly reachable per C1, so the relay is a fallback candidate rather than "
+                     "the only path")
+    return result("C6", PASS,
+                  "TURN Allocate on %s with %s succeeded: relay %s:%d. Mixer-side TURN rescues a CGNAT or unreachable "
+                  "server by offering viewers this relay as a candidate" % (where, how, relay[0], relay[1]),
+                  notes=notes, facts={"relay": "%s:%d" % relay})
+
+
+def check_c6(jcfg_path, c1, budget):
+    """Whether mixer-side TURN is the right remedy for THIS server (C1), and whether the configured TURN works. The
+    TURN settings are read from janus.jcfg, so this checks what Janus uses. No reason carries a credential."""
     try:
         values = read_jcfg(jcfg_path)
     except OSError as err:
@@ -727,21 +754,186 @@ def check_c6(jcfg_path):
     def nat(key):
         return values.get(("nat", key))
 
-    stun = "%s:%s" % (nat("stun_server"), nat("stun_port") or "3478") if nat("stun_server") else "none"
-    if nat("turn_server"):
-        turn = "%s:%s (%s)" % (nat("turn_server"), nat("turn_port") or "3478", nat("turn_type") or "udp")
-    elif nat("turn_rest_api"):
-        turn = "TURN REST API %s" % nat("turn_rest_api")
-    else:
-        turn = None
-    observed = ("Janus nat config: stun_server %s; turn %s. Viewers get their own STUN list from the sim "
-                "(StunServers), which this check cannot see" % (stun, turn or "none"))
-    if turn:
-        return result("C6", PASS, observed)
-    return result("C6", WARN,
-                  observed + ". No TURN configured: viewers whose own network gives them no direct path (symmetric NAT, "
-                  "CGNAT or blocked UDP) get no voice, whatever this server's own mapping.",
-                  TURN_REMEDIATION)
+    public = (c1.get("_facts") or {}).get("public") or []
+    server, rest_api = nat("turn_server"), nat("turn_rest_api")
+    if not server and not rest_api:
+        notes = [_turn_type_note("n/a (no TURN configured)")]
+        if c1["status"] in (PASS, WARN) and public:
+            notes.insert(0, "viewers whose own network blocks UDP need viewer-side TURN, which this component cannot "
+                            "provide (A.4)")
+            return result("C6", PASS,
+                          "no TURN configured, and this server is publicly reachable per C1 (%s): the server-side media "
+                          "path is correct and complete without a relay" % ", ".join(public), notes=notes)
+        if c1["status"] == INCONCLUSIVE:
+            return result("C6", INCONCLUSIVE,
+                          "no TURN configured, and C1 could not tell whether this server is publicly reachable",
+                          "resolve C1 first: whether mixer-side TURN is needed depends on it", notes)
+        why = "behind CGNAT" if (c1.get("_facts") or {}).get("cgnat") else "not publicly reachable"
+        return result("C6", WARN,
+                      "no TURN configured, and this server is %s per C1: here mixer-side TURN is the remedy, offering "
+                      "viewers a relay candidate on a TURN server they can reach" % why,
+                      "configure a TURN server for the mixer: %s. The product ships no TURN server: run your own (coturn "
+                      "is the usual choice)." % TURN_KNOBS, notes)
+    if budget.expired():
+        return not_run("C6", budget)
+    if rest_api:
+        return _check_c6_rest(rest_api, nat("turn_rest_api_key"), nat("turn_rest_api_method") or "POST", public, budget)
+    try:
+        port = int(nat("turn_port") or 3478)
+    except ValueError:
+        return result("C6", FAIL, "turn_port %r in the nat section is not a port number" % nat("turn_port"),
+                      "set JS_TURN_PORT to the TURN server's port")
+    transport = (nat("turn_type") or "udp").lower()
+    notes = [_turn_type_note(transport)]
+    where = "%s:%d over %s" % (server, port, transport)
+    if not nat("turn_user") or not nat("turn_pwd"):
+        return result("C6", FAIL, "turn_server %s is configured without turn_user and turn_pwd" % where,
+                      "set JS_TURN_USER and JS_TURN_PWD, or use JS_TURN_REST_API instead", notes)
+    try:
+        relay = addr_probe.turn_allocate(server, port, transport, nat("turn_user"), nat("turn_pwd"),
+                                         min(5.0, max(0.5, budget.remaining())))
+    except addr_probe.TurnError as err:
+        return result("C6", FAIL, "TURN Allocate on %s with the configured static credentials failed: %s" % (where, err),
+                      "check JS_TURN_SERVER, JS_TURN_PORT and JS_TURN_TYPE against the TURN server, the credentials in "
+                      "JS_TURN_USER and JS_TURN_PWD, and that the server is reachable from this container", notes)
+    return _c6_pass("the configured static credentials", where, relay, public, notes)
+
+
+def _check_c6_rest(api, key, method, public, budget):
+    where_api = addr_probe.redact_url(api)
+    remediation = ("check JS_TURN_REST_API, JS_TURN_REST_API_KEY and JS_TURN_REST_API_METHOD, that the backend is "
+                   "reachable from this container, and that the TURN URIs it returns are reachable too")
+    try:
+        username, password, _ttl, uris = addr_probe.turn_rest_request(api, key, method, "legion-voice-selfcheck",
+                                                                      min(5.0, max(0.5, budget.remaining())))
+    except addr_probe.TurnError as err:
+        return result("C6", FAIL, "the TURN REST API gave no usable credentials: %s" % err, remediation,
+                      [_turn_type_note("n/a (the TURN REST API's URIs decide it)")])
+    usable = [(uri, addr_probe.parse_turn_uri(uri)) for uri in uris]
+    usable = [(uri, parsed) for uri, parsed in usable if parsed]
+    if not usable:
+        return result("C6", FAIL, "the TURN REST API at %s returned no usable TURN URI (%s)"
+                      % (where_api, ", ".join(uris) or "none"), remediation,
+                      [_turn_type_note("n/a (no usable URI)")])
+    notes = [_turn_type_note(", ".join(sorted(set(parsed[2] for _, parsed in usable))) + " (from the REST API's URIs)")]
+    failures = []
+    for uri, (host, port, transport) in usable:
+        if budget.expired():
+            failures.append("%s: not tried before the time bound" % uri)
+            continue
+        try:
+            relay = addr_probe.turn_allocate(host, port, transport, username, password,
+                                             min(5.0, max(0.5, budget.remaining())))
+        except addr_probe.TurnError as err:
+            failures.append("%s: %s" % (uri, err))
+            continue
+        if failures:
+            notes.append("earlier URIs failed: %s" % "; ".join(failures))
+        return _c6_pass("credentials from the TURN REST API at %s" % where_api, uri, relay, public, notes)
+    return result("C6", FAIL, "credentials came from the TURN REST API at %s, but TURN Allocate failed on every URI: %s"
+                  % (where_api, "; ".join(failures)), remediation, notes)
+
+
+# ---- ICE candidate types per handle (from the Admin API) -----------------------------------------
+
+def count_candidate_types(lines):
+    counts = dict((kind, 0) for kind in CANDIDATE_TYPES)
+    for line in lines or []:
+        match = _CANDIDATE_TYPE.search(str(line))
+        if match:
+            counts[match.group(1)] += 1
+    return counts
+
+
+def _admin_post(url, body, secret, timeout):
+    request = urllib.request.Request(url, data=json.dumps(dict(body, transaction="selfcheck-" + os.urandom(4).hex(),
+                                                               admin_secret=secret)).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as reply:
+        data = json.loads(reply.read().decode("utf-8"))
+    if data.get("janus") == "error":
+        error = data.get("error") or {}
+        raise ValueError("Admin API error %s: %s" % (error.get("code"), error.get("reason", "")))
+    return data
+
+
+def collect_candidates(admin_url, admin_secret, timeout=5.0, clock=time.time):
+    """For every slvoice handle: the ICE candidate types Janus offered (its local candidates), the peer's (remote), and
+    the selected pair, from Admin API handle_info. Never raises: an unusable Admin API gives available=False with the
+    reason, which never carries the secret."""
+    report = {"schema": 1, "time": iso(clock()), "available": False, "reason": None, "handles": [],
+              "totals": dict((kind, 0) for kind in CANDIDATE_TYPES)}
+    if not admin_secret:
+        report["reason"] = "JS_ADMIN_SECRET is not set in this environment"
+        return report
+    base = admin_url.rstrip("/")
+    deadline = time.monotonic() + timeout
+
+    def left():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("the Admin API walk took longer than %g s" % timeout)
+        return remaining
+
+    try:
+        sessions = _admin_post(base, {"janus": "list_sessions"}, admin_secret, left()).get("sessions") or []
+        for session in sessions:
+            try:
+                handles = _admin_post("%s/%s" % (base, session), {"janus": "list_handles"}, admin_secret,
+                                      left()).get("handles") or []
+            except ValueError:
+                continue   # the session ended between the two calls
+            for handle in handles:
+                try:
+                    info = _admin_post("%s/%s/%s" % (base, session, handle), {"janus": "handle_info"}, admin_secret,
+                                       left()).get("info") or {}
+                except ValueError:
+                    continue   # the handle went away
+                if info.get("plugin") != "janus.plugin.slvoice":
+                    continue
+                ice = (info.get("webrtc") or {}).get("ice") or {}
+                specific = info.get("plugin_specific") or {}
+                local = count_candidate_types(ice.get("local-candidates"))
+                report["handles"].append({"session": session, "handle": handle, "display": specific.get("display"),
+                                          "room": specific.get("room"), "local": local,
+                                          "remote": count_candidate_types(ice.get("remote-candidates")),
+                                          "selected_pair": ice.get("selected-pair")})
+                for kind in CANDIDATE_TYPES:
+                    report["totals"][kind] += local[kind]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
+        report["reason"] = "Admin API at %s: %s" % (base, getattr(err, "reason", err))
+        report["handles"], report["totals"] = [], dict((kind, 0) for kind in CANDIDATE_TYPES)
+        return report
+    report["available"] = True
+    return report
+
+
+def candidates_summary(report):
+    if not report.get("available"):
+        return "unavailable (%s)" % report.get("reason")
+    handles = report.get("handles") or []
+    if not handles:
+        return "no slvoice handles right now"
+    totals = report["totals"]
+    parts = ["%d slvoice handle(s); Janus offered host %d, srflx %d, relay %d in total"
+             % (len(handles), totals["host"], totals["srflx"], totals["relay"])]
+    for entry in handles[:5]:
+        parts.append("session %s (%s, room %s): host %d, srflx %d, relay %d"
+                     % (entry["session"], str(entry.get("display") or "?")[:8], entry.get("room"),
+                        entry["local"]["host"], entry["local"]["srflx"], entry["local"]["relay"]))
+    if len(handles) > 5:
+        parts.append("%d more in the JSON" % (len(handles) - 5))
+    return "; ".join(parts)
+
+
+def default_collector(cfg, budget=None):
+    timeout = 5.0 if budget is None else min(5.0, budget.remaining())
+    if timeout < 0.5:
+        return {"schema": 1, "time": iso(time.time()), "available": False,
+                "reason": "not collected: the self-check time bound was reached", "handles": [],
+                "totals": dict((kind, 0) for kind in CANDIDATE_TYPES)}
+    return collect_candidates("http://127.0.0.1:%s%s" % (cfg["admin_port"], cfg["admin_base"]), cfg["admin_secret"],
+                              timeout)
 
 
 # ---- run, report ---------------------------------------------------------------------------------
@@ -781,24 +973,26 @@ def load_config(environ):
         "admin_port": values["JS_ADMIN_PORT"],
         "admin_base": values["JS_ADMIN_BASEPATH"],
         "admin_bind": values["JS_ADMIN_BIND"],
+        "admin_secret": environ.get("JS_ADMIN_SECRET") or "",
         "timeout": positive("JS_SELFCHECK_TIMEOUT_S", 20.0),
         "inbound_max_age_h": positive("JS_SELFCHECK_INBOUND_MAX_AGE_H", 168.0),
         "state_file": environ.get("SLV_ADDR_STATE_FILE") or "/run/legion-voice/public-address.json",
         "jcfg_path": os.path.join(environ.get("JANUS_CONF_DIR") or "/opt/janus/etc/janus", "janus.jcfg"),
         "report_file": environ.get("SLV_SELFCHECK_FILE") or "/run/legion-voice/selfcheck.json",
         "inbound_file": environ.get("SLV_SELFCHECK_INBOUND_FILE") or "/run/legion-voice/selfcheck-inbound.json",
+        "candidates_file": environ.get("SLV_SELFCHECK_CANDIDATES_FILE") or "/run/legion-voice/candidates.json",
         "bind_host": environ.get("SLV_SELFCHECK_BIND") or "0.0.0.0",
         "connect_map": connect_map,
     }
 
 
 def run_checks(cfg, budget, startup=False):
-    """C1, C2b and C3 are local and always run. C4, C2a and C5 touch the network inside the budget; at startup C4
-    first waits for Janus, leaving a reserve of the bound for C2a and C5."""
+    """C1, C2b and C3 are local and always run. C4, C2a, C5 and C6 touch the network inside the budget; at startup
+    C4 first waits for Janus, leaving a reserve of the bound for the rest."""
     c1 = check_c1(cfg["state_file"])
     c3 = check_c3(cfg["rtp_range"], cfg["jcfg_path"], cfg["bind_host"])
     if startup:
-        wait = max(0.5, budget.remaining() - min(6.0, budget.seconds / 3.0))
+        wait = max(0.5, budget.remaining() - min(8.0, budget.seconds / 2.0))
     else:
         wait = min(3.0, budget.remaining())
     c4 = check_c4(cfg["http_port"], cfg["http_base"], budget, wait)
@@ -806,7 +1000,7 @@ def run_checks(cfg, budget, startup=False):
     c2b = check_c2b(cfg["inbound_file"], cfg["rtp_range"], cfg["inbound_max_age_h"], c1["_facts"].get("public", []))
     c5 = check_c5(cfg["admin_bind"], cfg["admin_port"], cfg["admin_base"], c1["_facts"].get("public", []),
                   budget, cfg["connect_map"])
-    c6 = check_c6(cfg["jcfg_path"])
+    c6 = check_c6(cfg["jcfg_path"], c1, budget)
     return [c1, c2a, c2b, c3, c4, c5, c6]
 
 
@@ -823,13 +1017,18 @@ def exit_code_for(results):
     return 0
 
 
-def build_report(results, mode, when, duration, bound):
+def build_report(results, mode, when, duration, bound, candidates=None, candidates_file=None):
     counts = dict((status.lower(), sum(1 for r in results if r["status"] == status))
                   for status in (PASS, WARN, FAIL, INCONCLUSIVE))
     checks = [dict((k, v) for k, v in r.items() if not k.startswith("_")) for r in results]
-    return {"schema": 1, "tool": "legion-voice-selfcheck", "mode": mode, "time": when,
-            "duration_s": round(duration, 1), "timeout_s": bound, "verdict": worst_status(results),
-            "summary": counts, "exit_code": exit_code_for(results), "checks": checks}
+    report = {"schema": 1, "tool": "legion-voice-selfcheck", "mode": mode, "time": when,
+              "duration_s": round(duration, 1), "timeout_s": bound, "verdict": worst_status(results),
+              "summary": counts, "exit_code": exit_code_for(results), "checks": checks}
+    if candidates is not None:
+        report["candidates"] = {"available": candidates.get("available"), "reason": candidates.get("reason"),
+                                "handles": len(candidates.get("handles") or []), "totals": candidates.get("totals"),
+                                "summary": candidates_summary(candidates), "file": candidates_file}
+    return report
 
 
 def render_block(report, report_file):
@@ -844,6 +1043,9 @@ def render_block(report, report_file):
             lines.append("[selfcheck]     remediation: %s" % check["remediation"])
         for note in check["notes"]:
             lines.append("[selfcheck]     note: %s" % note)
+    if report.get("candidates"):
+        lines.append("[selfcheck] INFO candidates (from Admin API handle_info): %s; JSON %s"
+                     % (report["candidates"]["summary"], report["candidates"]["file"]))
     lines.append("[selfcheck] ===== END legion-voice self-check: worst %s; %d PASS, %d WARN, %d FAIL, %d INCONCLUSIVE; "
                  "exit %d; JSON %s =====" % (report["verdict"], s["pass"], s["warn"], s["fail"], s["inconclusive"],
                                              report["exit_code"], report_file))
@@ -851,19 +1053,21 @@ def render_block(report, report_file):
 
 
 USAGE = ("usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]\n"
-         "       legion-voice-selfcheck --listen [--port N] [--seconds N]\n")
+         "       legion-voice-selfcheck --listen [--port N] [--seconds N]\n"
+         "       legion-voice-selfcheck --candidates [--json]\n")
 
 
-def main(argv=None, environ=None, runner=None, out=None):
+def main(argv=None, environ=None, runner=None, out=None, collector=None):
     argv = sys.argv[1:] if argv is None else argv
     environ = os.environ if environ is None else environ
     out = sys.stdout if out is None else out
-    flags = {"json": False, "startup": False, "listen": False}
+    collector = collector or default_collector
+    flags = {"json": False, "startup": False, "listen": False, "candidates": False}
     numbers = {"--timeout": None, "--port": None, "--seconds": None}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ("--json", "--startup", "--listen"):
+        if arg in ("--json", "--startup", "--listen", "--candidates"):
             flags[arg[2:]] = True
         elif arg in numbers and i + 1 < len(argv):
             try:
@@ -886,12 +1090,23 @@ def main(argv=None, environ=None, runner=None, out=None):
     if flags["listen"]:
         seconds = numbers["--seconds"] if numbers["--seconds"] and numbers["--seconds"] > 0 else 120.0
         return listen(cfg, numbers["--port"], seconds, out)
+    if flags["candidates"]:
+        candidates = collector(cfg, None)
+        write_json(cfg["candidates_file"], candidates)
+        out.write(json.dumps(candidates, indent=2) + "\n" if flags["json"]
+                  else "[selfcheck] INFO candidates (from Admin API handle_info): %s; JSON %s\n"
+                  % (candidates_summary(candidates), cfg["candidates_file"]))
+        out.flush()
+        return 0 if candidates.get("available") else 2
     bound = numbers["--timeout"] if numbers["--timeout"] and numbers["--timeout"] > 0 else cfg["timeout"]
     budget = Budget(bound)
     started = time.monotonic()
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     results = (runner or run_checks)(cfg, budget, flags["startup"])
-    report = build_report(results, "startup" if flags["startup"] else "on-demand", when, time.monotonic() - started, bound)
+    candidates = collector(cfg, budget)
+    write_json(cfg["candidates_file"], candidates)
+    report = build_report(results, "startup" if flags["startup"] else "on-demand", when, time.monotonic() - started,
+                          bound, candidates, cfg["candidates_file"])
     error = write_json(cfg["report_file"], report)
     text = json.dumps(report, indent=2) + "\n" if flags["json"] else render_block(report, cfg["report_file"])
     out.write(text)   # one write, so the block is not interleaved with other log output

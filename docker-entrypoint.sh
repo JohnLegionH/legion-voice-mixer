@@ -68,6 +68,17 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 : "${JS_SELFCHECK_TIMEOUT_S:=20}"
 # Slice A.2b: hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS.
 : "${JS_SELFCHECK_INBOUND_MAX_AGE_H:=168}"
+# Slice A.3: TURN for the mixer itself (docs/docker-notes.md, "TURN for the mixer"). All unset = no TURN, and the
+# generated janus.jcfg is byte-for-byte what it was before these knobs existed. Static credentials
+# (JS_TURN_SERVER + JS_TURN_USER + JS_TURN_PWD) and REST credentials (JS_TURN_REST_API) are mutually exclusive.
+: "${JS_TURN_SERVER:=}"
+: "${JS_TURN_PORT:=}"
+: "${JS_TURN_TYPE:=}"
+: "${JS_TURN_USER:=}"
+: "${JS_TURN_PWD:=}"
+: "${JS_TURN_REST_API:=}"
+: "${JS_TURN_REST_API_KEY:=}"
+: "${JS_TURN_REST_API_METHOD:=}"
 
 # The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
 SLV_LIB_DIR=${SLV_LIB_DIR:-/usr/local/lib/legion-voice}
@@ -114,6 +125,20 @@ if [ "$JS_SELFCHECK_INBOUND_MAX_AGE_H" -eq 0 ]; then
 	echo "[entrypoint] WARNING: JS_SELFCHECK_INBOUND_MAX_AGE_H=0 is not a usable age; using 168" >&2
 	JS_SELFCHECK_INBOUND_MAX_AGE_H=168
 fi
+# TURN mode (validated after the effective values are printed): none | static | rest | partial.
+if [ -n "$JS_TURN_REST_API" ]; then TURN_MODE=rest
+elif [ -n "$JS_TURN_SERVER" ]; then TURN_MODE=static
+elif [ -n "${JS_TURN_PORT}${JS_TURN_TYPE}${JS_TURN_USER}${JS_TURN_PWD}${JS_TURN_REST_API_KEY}${JS_TURN_REST_API_METHOD}" ]; then TURN_MODE=partial
+else TURN_MODE=none
+fi
+TURN_PORT=${JS_TURN_PORT:-3478}
+TURN_TYPE=$(printf '%s' "${JS_TURN_TYPE:-udp}" | tr '[:upper:]' '[:lower:]')
+TURN_REST_METHOD=$(printf '%s' "${JS_TURN_REST_API_METHOD:-POST}" | tr '[:lower:]' '[:upper:]')
+
+# A URL without user info, query or fragment, for the log: a TURN REST API URL can carry a key.
+redact_url() {
+	printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)([^/@?#]*@)?([^/?#]*)([^?#]*).*$#\1\3\4#'
+}
 
 secret_state() {
 	if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo EMPTY; else echo set; fi
@@ -134,6 +159,12 @@ echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") adm
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
 echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
 echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} inbound_max_age_h=${JS_SELFCHECK_INBOUND_MAX_AGE_H} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json], inbound proof: legion-voice-selfcheck --listen)"
+# TURN credentials are reported as set/EMPTY, like the API secrets; a REST URL without its query.
+case "$TURN_MODE" in
+	none) echo "[entrypoint] INFO: turn=none (JS_TURN_SERVER and JS_TURN_REST_API unset)" ;;
+	rest) echo "[entrypoint] INFO: turn=rest rest_api=$(redact_url "$JS_TURN_REST_API") rest_api_key=$(secret_state "$JS_TURN_REST_API_KEY") rest_api_method=${TURN_REST_METHOD}" ;;
+	*)    echo "[entrypoint] INFO: turn=${TURN_MODE} server=${JS_TURN_SERVER:-<none>} port=${TURN_PORT} type=${TURN_TYPE} user=$(secret_state "$JS_TURN_USER") pwd=$(secret_state "$JS_TURN_PWD")" ;;
+esac
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
@@ -157,6 +188,60 @@ if [ -n "$missing" ]; then
 		exit 1
 	fi
 fi
+
+# ---- TURN for the mixer: validate (slice A.3) ----
+# Two styles, never both: static (JS_TURN_SERVER, JS_TURN_PORT, JS_TURN_TYPE, JS_TURN_USER, JS_TURN_PWD) or REST
+# (JS_TURN_REST_API, JS_TURN_REST_API_KEY, JS_TURN_REST_API_METHOD). A partial configuration is FATAL, not a
+# silent start without TURN. Messages name knobs, never credential values.
+turn_fatal() {
+	echo "[entrypoint] FATAL: $1; refusing to start. See docs/docker-notes.md, \"TURN for the mixer\"." >&2
+	exit 1
+}
+turn_static_set=""
+for knob in JS_TURN_SERVER JS_TURN_PORT JS_TURN_TYPE JS_TURN_USER JS_TURN_PWD; do
+	eval "knob_value=\${$knob}"
+	if [ -n "$knob_value" ]; then turn_static_set="${turn_static_set:+$turn_static_set, }$knob"; fi
+done
+if [ -n "$JS_TURN_REST_API" ] && [ -n "$turn_static_set" ]; then
+	turn_fatal "JS_TURN_REST_API (REST credentials) and ${turn_static_set} (static TURN settings) are both set; the two styles are mutually exclusive, so set one"
+fi
+if [ -z "$JS_TURN_REST_API" ] && { [ -n "$JS_TURN_REST_API_KEY" ] || [ -n "$JS_TURN_REST_API_METHOD" ]; }; then
+	turn_fatal "JS_TURN_REST_API_KEY or JS_TURN_REST_API_METHOD is set without JS_TURN_REST_API: a partial TURN REST configuration"
+fi
+if [ -z "$JS_TURN_REST_API" ] && [ -z "$JS_TURN_SERVER" ] && [ -n "$turn_static_set" ]; then
+	turn_fatal "${turn_static_set} set without JS_TURN_SERVER: a partial TURN configuration"
+fi
+if [ "$TURN_MODE" = static ] && { [ -z "$JS_TURN_USER" ] || [ -z "$JS_TURN_PWD" ]; }; then
+	turn_fatal "JS_TURN_SERVER is set without credentials: set both JS_TURN_USER and JS_TURN_PWD, or use JS_TURN_REST_API instead"
+fi
+if [ "$TURN_MODE" = static ]; then
+	case "$TURN_TYPE" in
+		udp|tcp|tls) ;;
+		*) turn_fatal "JS_TURN_TYPE='${JS_TURN_TYPE}' is not one of udp, tcp, tls" ;;
+	esac
+	case "$TURN_PORT" in
+		''|*[!0-9]*) turn_fatal "JS_TURN_PORT='${JS_TURN_PORT}' is not a port number" ;;
+	esac
+	if [ "$TURN_PORT" -lt 1 ] || [ "$TURN_PORT" -gt 65535 ]; then
+		turn_fatal "JS_TURN_PORT=${JS_TURN_PORT} is not a port number"
+	fi
+fi
+if [ "$TURN_MODE" = rest ]; then
+	case "$JS_TURN_REST_API" in
+		http://*|https://*) ;;
+		*) turn_fatal "JS_TURN_REST_API must be an http:// or https:// URL" ;;
+	esac
+	case "$TURN_REST_METHOD" in
+		GET|POST) ;;
+		*) turn_fatal "JS_TURN_REST_API_METHOD='${JS_TURN_REST_API_METHOD}' is not GET or POST" ;;
+	esac
+fi
+for knob in JS_TURN_SERVER JS_TURN_USER JS_TURN_PWD JS_TURN_REST_API JS_TURN_REST_API_KEY; do
+	eval "knob_value=\${$knob}"
+	case "$knob_value" in
+		*'"'*|*'\'*) turn_fatal "${knob} contains a double quote or a backslash, which janus.jcfg cannot hold as written" ;;
+	esac
+done
 
 # ---- Public address: a literal, or discovered from a hostname (slice A.1) ----
 # nat_1_1_mapping needs IPv4 literals.
@@ -311,6 +396,26 @@ else
 	echo "[entrypoint] WARNING: under bridge networking Janus advertises only its private container IP," >&2
 	echo "[entrypoint] WARNING: so WebRTC MEDIA WILL FAIL for every viewer (signalling/ICE may still look ok)." >&2
 	echo "[entrypoint] WARNING: set JS_PUBLIC_IP (LAN or public IPv4) or JS_PUBLIC_HOST in .env. See docs/docker-notes.md." >&2
+fi
+
+# ---- TURN keys in the nat section (slice A.3) ----
+# Written only when TURN is configured, so a start without TURN generates exactly the config it did before these
+# knobs existed. The stock template ships each key commented; ensure_kv_in_section uncomments it in place.
+# Credentials go into the file, never into the log.
+if [ "$TURN_MODE" = static ]; then
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_server "\"${JS_TURN_SERVER}\""
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_port "${TURN_PORT}"
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_type "\"${TURN_TYPE}\""
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_user "\"${JS_TURN_USER}\""
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_pwd "\"${JS_TURN_PWD}\""
+	echo "[entrypoint] turn_server = ${JS_TURN_SERVER}:${TURN_PORT} (${TURN_TYPE}), static credentials user=$(secret_state "$JS_TURN_USER") pwd=$(secret_state "$JS_TURN_PWD")"
+elif [ "$TURN_MODE" = rest ]; then
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_rest_api "\"${JS_TURN_REST_API}\""
+	if [ -n "$JS_TURN_REST_API_KEY" ]; then
+		ensure_kv_in_section "$JANUS_JCFG" nat turn_rest_api_key "\"${JS_TURN_REST_API_KEY}\""
+	fi
+	ensure_kv_in_section "$JANUS_JCFG" nat turn_rest_api_method "\"${TURN_REST_METHOD}\""
+	echo "[entrypoint] turn_rest_api = $(redact_url "$JS_TURN_REST_API") method=${TURN_REST_METHOD} key=$(secret_state "$JS_TURN_REST_API_KEY")"
 fi
 
 # ---- Resolution record (slice A.1) ----

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
 import itertools
 import json
 import logging
@@ -40,6 +43,13 @@ def parse_args(argv):
     p.add_argument("--join-timeout", type=int, default=30,
                    help="the mixer's JS_JOIN_MEDIA_TIMEOUT_S, which S10 waits out (default 30)")
     p.add_argument("--no-restart", action="store_true", help="skip S4 (docker compose restart janus)")
+    p.add_argument("--turn-uri", default="",
+                   help="S13: TURN server for the relay-only peer, e.g. 'turn:127.0.0.1:3478?transport=tcp' "
+                        "(the turn-test profile); without it S13 is skipped")
+    p.add_argument("--turn-secret", default="",
+                   help="S13: coturn shared secret; credentials are derived as a TURN REST API would")
+    p.add_argument("--turn-user", default="", help="S13: static TURN username (instead of --turn-secret)")
+    p.add_argument("--turn-pwd", default="", help="S13: static TURN password")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
 
@@ -53,6 +63,11 @@ def fmt(value) -> str:
 
 async def main_async(args) -> int:
     env = read_env(Path(args.env))
+    turn_user, turn_pwd = args.turn_user, args.turn_pwd
+    if args.turn_secret and not turn_user:
+        # coturn shared-secret credentials, valid for an hour: '<expiry>:<user>', base64(HMAC-SHA1(secret, user)).
+        turn_user = "%d:legion-voice-harness" % (int(time.time()) + 3600)
+        turn_pwd = base64.b64encode(hmac.new(args.turn_secret.encode(), turn_user.encode(), hashlib.sha1).digest()).decode()
     cfg = Config(
         janus_url=args.janus_url.rstrip("/"),
         admin_url=args.admin_url.rstrip("/"),
@@ -62,6 +77,9 @@ async def main_async(args) -> int:
         grace=args.grace,
         restart=not args.no_restart,
         join_timeout=args.join_timeout,
+        turn_uri=args.turn_uri,
+        turn_user=turn_user,
+        turn_pwd=turn_pwd,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}
