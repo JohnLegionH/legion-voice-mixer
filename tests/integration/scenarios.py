@@ -916,6 +916,311 @@ async def s24_old_mixer_ignores_capability(ctx: Ctx) -> None:
     await ctx.until_info(a, _audible, "the old mixer admitted a stamped join and mixes it exactly as before")
 
 
+# ---- Phase 0 slice 0.5: the remaining §9 assertions ------------------------------------------------------------
+# S25-S30 and S32 need fail-closed ON (a scratch mixer, never the grid's); S31 needs a mixer STARTED below the §5
+# minimum (scratch.sh up-clamp). Each skips on the wrong mixer, so one run proves which mode it ran against.
+#
+# Fail-first (the standing finding): 0.5 adds no mixer code, so these pass against the pre-0.5 image. Their proof is
+# a run against legion-voice-mixer:rollback-pre-03 -- no vis_protocol, no peer_ctl_heartbeat, no vis_authority, no
+# stale_generation, no takeover -- with --prove-fail, so the skip these would otherwise report counts as the failure
+# it is; plus a mutation proof that inverts the one condition each scenario is about.
+
+
+async def s25_arming_with_source_excluded(ctx: Ctx) -> None:
+    """§9 6. L armed with S excluded and T armed: L hears T, never S, and S is absent from the roster the mixer
+    builds for L at join. query_session has no roster field -- the joined event is the only place that view exists,
+    which is why L joins AFTER the arming."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    s = await ctx.join("S", r)          # the excluded source
+    t = await ctx.join("T", r)          # the source L may hear
+    await ctx.ready(s, t)
+    await _mode(ctx, s, want_fail_closed=True)
+
+    dl = new_display()
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {dl: 1, s.display: 1, t.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace",
+                                                excl={dl: [s.display], s.display: [], t.display: []},
+                                                mute={dl: [], s.display: [], t.display: []},
+                                                epoch=e1, generation=1),
+                 "arming L with S excluded, and S and T", slvoice="applied", status="ok")
+
+    l = await ctx.join("L", r, dl)
+    await ctx.ready(l)
+    # Assertion ORDER matters here, and getting it wrong cost this scenario its proof once. The roster check is
+    # what §9 6 is about, so nothing else that depends on the same exclusion may run before it: with the columns
+    # asserted first, a mutation that removes the exclusion fails at THAT line instead and the roster claim is
+    # never exercised at all. Row 4 is safe to assert first -- it holds whether or not S is excluded.
+    await ctx.until_info(l, lambda i: i.get("vis_row") == 4, "L joins already armed (row 4)")
+    roster = l.roster()
+    if s.display in roster:
+        raise Fail("§9 6: S is absent from L's initial roster", {"roster": roster, "S": s.display, "T": t.display})
+    if t.display not in roster:
+        raise Fail("§9 6: T IS in L's initial roster", {"roster": roster, "S": s.display, "T": t.display})
+    info = await ctx.info(l)
+    if info.get("excluded_entries") != 1:
+        raise Fail("§9 6: L joined carrying its authority's one exclusion", pick(info))
+    await ctx.until_info(l, _audible, "§9 6: L hears T")
+    if s.display in l.dots or any(d == s.display for d, _ in l.presence):
+        raise Fail("§9 6: L gets no dot and no presence for the excluded S",
+                   {"dots_for_S": l.dots.get(s.display), "presence": l.presence})
+
+
+async def s26_per_listener_staleness(ctx: Ctx) -> None:
+    """§9 14. A heartbeat naming L at a generation above the stored one silences L ONLY: M in the same room stays
+    audible, the reply lists L in stale_listeners, and a replace for L restores it. Also §9 25's last clause: the
+    reply's policy_generation echoes the highest applied value."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    l = await ctx.join("L", r)
+    m = await ctx.join("M", r)
+    src = await ctx.join("SRC", r)
+    await ctx.ready(l, m, src)
+    await _mode(ctx, l, want_fail_closed=True)
+
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {l.display: 1, m.display: 1, src.display: 1}).start()
+    ctx.background.append(hb)
+    armed = await ctx.admin.peer_ctl_batch(r, "replace",
+                                           excl={l.display: [], m.display: [], src.display: []},
+                                           mute={l.display: [], m.display: [], src.display: []},
+                                           epoch=e1, generation=1)
+    _check_reply(armed, "arming L, M and SRC", slvoice="applied", status="ok", policy_generation=1)
+    await ctx.until_info(l, _audible, "L hears SRC")
+    await ctx.until_info(m, _audible, "M hears SRC")
+
+    # §9 25: three applied generations in sequence, each echoed back as the highest applied.
+    for gen in (2, 3):
+        reply = await ctx.admin.peer_ctl_batch(r, "replace",
+                                               excl={l.display: [], m.display: [], src.display: []},
+                                               mute={l.display: [], m.display: [], src.display: []},
+                                               epoch=e1, generation=gen)
+        _check_reply(reply, f"§9 25: the reply echoes the highest applied generation ({gen})",
+                     slvoice="applied", status="ok", policy_generation=gen)
+    hb.listeners = {l.display: 3, m.display: 3, src.display: 3}
+    await ctx.until_info(l, _audible, "still audible at generation 3")
+
+    # L alone is named at a generation ABOVE what the mixer stored: L goes stale, M is untouched.
+    hb.listeners = {l.display: 99, m.display: 3, src.display: 3}
+    await ctx.until_info(l, lambda i: _silent(i) and i.get("vis_row") == 3,
+                         "§9 14: a generation above the stored one silences L (row 3)")
+    await _hold(ctx, m, _audible, "§9 14: M in the same room stays audible", 2.0)
+    reply = hb.last_reply or {}
+    room = (reply.get("rooms") or {}).get(str(r)) or {}
+    if l.display not in (room.get("stale_listeners") or []):
+        raise Fail("§9 14: the heartbeat reply lists L in stale_listeners", reply)
+    if m.display in (room.get("stale_listeners") or []):
+        raise Fail("§9 14: and does NOT list M", reply)
+
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: []}, mute={l.display: []},
+                                                epoch=e1, generation=100),
+                 "re-arming L", slvoice="applied", status="ok")
+    hb.listeners = {l.display: 100, m.display: 3, src.display: 3}
+    await ctx.until_info(l, _audible, "§9 14: a replace for L restores it")
+
+
+async def s27_out_of_order_generation(ctx: Ctx) -> None:
+    """§9 17. After a replace at generation 10, a delayed add at generation 9 is rejected and leaves L's set
+    unchanged. Also §9 1's remaining half: an exclusion replace carrying NO epoch fields still silences."""
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r, a, b = await _declared_pair(ctx)
+    await _mode(ctx, a, want_fail_closed=True)
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {a.display: 10, b.display: 10}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                                mute={a.display: [], b.display: []}, epoch=e1, generation=10),
+                 "arming at generation 10", slvoice="applied", status="ok", policy_generation=10)
+    await ctx.until_info(a, lambda i: _audible(i) and i.get("excluded_entries") == 0, "armed at 10: A hears B")
+    before = _vis(await ctx.info(a)).get("stale_generation_rejects") or 0
+
+    late = await ctx.admin.peer_ctl_batch(r, "add", excl={a.display: [b.display]}, epoch=e1, generation=9,
+                                          base={a.display: 10})
+    if late.get("status") != "stale_generation" and late.get("reason") != "stale_generation":
+        raise Fail("§9 17: a generation below the stored one is refused as stale_generation", late)
+    await _hold(ctx, a, lambda i: _audible(i) and i.get("excluded_entries") == 0,
+                "§9 17: the out-of-order add left A's set unchanged", 1.5)
+    after = _vis(await ctx.info(a)).get("stale_generation_rejects") or 0
+    if after <= before:
+        raise Fail("§9 17: stale_generation_rejects climbs", {"before": before, "after": after})
+    logs = await mixer_logs(ctx.cfg, since)
+    if f"policy_generation 9 is not above 10 (out of order)" not in logs:
+        raise Fail("§9 17: the mixer logs the out-of-order refusal naming both generations",
+                   {"searched_for": "policy_generation 9 is not above 10 (out of order)"})
+
+    # §9 1's remaining half, in an UNDECLARED room so the authority does not apply: an exclusion replace with no
+    # epoch fields at all still silences, exactly as before Phase 0.
+    r2 = ctx.new_room()
+    await ctx.control.create_room(r2, f"integration {ctx.name}", vis_authority=False)
+    c = await ctx.join("C", r2)
+    d = await ctx.join("D", r2)
+    await ctx.ready(c, d)
+    await ctx.until_info(c, _audible, "§9 1: un-batched listener hears the source")
+    plain = await ctx.admin.peer_ctl_batch(r2, "replace", excl={c.display: [d.display]}, mute={c.display: []})
+    if plain.get("slvoice") != "applied" or "status" in plain:
+        raise Fail("§9 1: an unstamped exclusion replace is applied, with no Phase 0 status", plain)
+    await ctx.until_info(c, lambda i: _silent(i) and i.get("excluded_entries") == 1,
+                         "§9 1: an exclusion replace with no epoch fields still silences")
+
+
+async def s28_pre_join_arming_survives_deferral(ctx: Ctx) -> None:
+    """§9 18. An EMPTY arming replace sent before L joins is replayed at join: L is audible on joining with no
+    heartbeat in between. Empty columns are what makes this hard -- a deferred record with both channels empty was
+    dropped before the §2 fix, so the joiner would have waited for a heartbeat round trip."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    b = await ctx.join("B", r)
+    await ctx.ready(b)
+    await _mode(ctx, b, want_fail_closed=True)
+
+    dl = new_display()
+    e1 = _epoch(1)
+    # Arm BOTH the absent L and the present B, then send no heartbeat at all for the rest of the scenario.
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={dl: [], b.display: []},
+                                                mute={dl: [], b.display: []}, epoch=e1, generation=1),
+                 "an empty arming replace for a listener not yet in the room", slvoice="applied", status="ok")
+    l = await ctx.join("L", r, dl)
+    await ctx.ready(l)
+    await ctx.until_info(l, lambda i: i.get("vis_row") == 4,
+                         "§9 18: the pre-join arming was replayed at join (row 4), with no heartbeat")
+    await ctx.until_info(l, _audible, "§9 18: and L is audible on joining")
+
+
+async def s29_declared_room_no_listeners(ctx: Ctx) -> None:
+    """§9 23. A declared room with no listeners gets no heartbeat: it is grace-destroyed exactly as today, and a
+    fresh join plus an arming replace is audible again."""
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    grace = ctx.cfg.grace
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    a = await ctx.join("A", r)
+    b = await ctx.join("B", r)
+    await ctx.ready(a, b)
+    await _mode(ctx, a, want_fail_closed=True)
+    await a.close()
+    await b.close()
+    emptied = time.monotonic()
+
+    await until(ctx.control.room_ids, lambda ids: r not in ids,
+                f"§9 23: the declared room is grace-destroyed after {grace} s with no listeners and no heartbeat",
+                timeout=grace + 20, step=1.0)
+    waited = time.monotonic() - emptied
+    if waited < grace - 1:
+        raise Fail("§9 23: destroyed no earlier than its grace", {"waited_s": round(waited, 1), "grace_s": grace})
+    logs = await mixer_logs(ctx.cfg, since)
+    if f"room {r} destroyed after" not in logs:
+        raise Fail("§9 23: the mixer logs the grace destroy for this room",
+                   {"searched_for": f"[slvoice] room {r} destroyed after <n>s empty"})
+
+    await ctx.reopen_control()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    a2 = await ctx.join("A2", r)
+    b2 = await ctx.join("B2", r)
+    await ctx.ready(a2, b2)
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {a2.display: 1, b2.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a2.display: [], b2.display: []},
+                                                mute={a2.display: [], b2.display: []}, epoch=e1, generation=1),
+                 "arming the re-created room", slvoice="applied", status="ok")
+    await ctx.until_info(a2, _audible, "§9 23: a new join plus an arming replace is audible again")
+
+
+async def s30_recorder_in_declared_room(ctx: Ctx) -> None:
+    """§9 24. A recording tap in a declared room is silent until armed, like any other participant (open question 3
+    documents that decision). SC-96's "recorder" join key is old; what is new is asserting the tap is gated."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    src = await ctx.join("SRC", r)
+    await ctx.ready(src)
+    await _mode(ctx, src, want_fail_closed=True)
+
+    rec = await ctx.join("REC", r, recorder=True)
+    await ctx.ready(rec)
+    info = await ctx.info(rec)
+    if info.get("recorder") is not True:
+        raise Fail("§9 24: the mixer records this participant as a recorder tap", pick(info))
+    await ctx.until_info(rec, lambda i: _silent(i) and i.get("vis_row") == 1,
+                         "§9 24: an unarmed recorder tap is silent in a declared room")
+    await _hold(ctx, rec, _silent, "§9 24: and stays silent while unarmed", 2.0)
+
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {rec.display: 1, src.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={rec.display: [], src.display: []},
+                                                mute={rec.display: [], src.display: []}, epoch=e1, generation=1),
+                 "arming the recorder and the source", slvoice="applied", status="ok")
+    await ctx.until_info(rec, _audible, "§9 24: armed, the recorder tap hears the room")
+
+
+async def s31_stale_ms_clamp(ctx: Ctx) -> None:
+    """§9 27. A mixer STARTED with JS_VIS_STALE_MS below the §5 constraint logs the clamp, and the effective window
+    it reports equals the constraint -- not the value it was given."""
+    started_with = ctx.cfg.stale_ms_started_with
+    if not started_with:
+        raise Skip("--stale-ms-started-with not given: this needs a mixer started below the §5 minimum "
+                   "(scratch.sh up-clamp)")
+    r, a, b = await _declared_pair(ctx)
+    # The clamp is orthogonal to enforcement: §9 27 is about the window the mixer ACCEPTED at startup, which it
+    # reports and logs whether or not fail-closed is on. Only the pre-0.3 guard applies here.
+    info = await ctx.until_info(a, lambda i: isinstance(i.get("visibility"), dict), "A reports a visibility block")
+    vis = _vis(info)
+    if "fail_closed" not in vis:
+        raise Skip("the mixer reports no visibility authority (a pre-0.3 image)")
+    reported = vis.get("stale_ms")
+    minimum = 2 * 1000 + 5000 + 250        # §5: 2 x heartbeat + admin timeout + tick slip
+    if started_with >= minimum:
+        raise Skip(f"--stale-ms-started-with {started_with} is not below the §5 minimum {minimum}")
+    if reported != minimum:
+        raise Fail(f"§9 27: the effective window equals the §5 constraint ({minimum} ms), not the value given",
+                   {"started_with": started_with, "reported_stale_ms": reported})
+    logs = await mixer_logs(ctx.cfg, "2000-01-01T00:00:00Z")
+    want = f"JS_VIS_STALE_MS={started_with} is below the minimum {minimum} ms"
+    if want not in logs:
+        raise Fail("§9 27: the mixer logs the clamp at startup", {"searched_for": want})
+
+
+async def s32_takeover_after_the_window(ctx: Ctx) -> None:
+    """§9 13 second half. S18 reaches a takeover through a graceful stop; this is the path the design specifies:
+    E2 simply goes stale for the window, and then E1 -- LOWER than E2 -- is adopted, disarming every record."""
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r, a, b = await _declared_pair(ctx)
+    vis = await _mode(ctx, a, want_fail_closed=True)
+    stale_s = (vis.get("stale_ms") or 8000) / 1000.0
+    e1, e2 = _epoch(1), _epoch(2)
+    hb = Heartbeater(ctx.admin, e2, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                                mute={a.display: [], b.display: []}, epoch=e2, generation=1),
+                 "arming in E2", slvoice="applied", status="ok", authority_epoch=e2)
+    await ctx.until_info(a, _audible, "armed in E2: A hears B")
+
+    # While E2 is FRESH a lower epoch is refused -- the other half of §9 13, asserted here as the control.
+    fresh = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []},
+                                           epoch=e1, generation=1)
+    _check_reply(fresh, "§9 13a: while E2 is fresh, E1 is stale_epoch", slvoice="error", status="stale_epoch",
+                 authority_epoch=e2)
+
+    last = await hb.pause()
+    await ctx.until_info(a, _silent, "E2 stops confirming: A goes silent at the window",
+                         timeout=max(2.0, last + stale_s + 2.0 - time.monotonic()))
+    # Past the window the SAME lower epoch is adopted as a takeover.
+    take = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
+                                          mute={a.display: [], b.display: []}, epoch=e1, generation=1)
+    _check_reply(take, "§9 13b: once E2 is stale, the lower E1 takes over", slvoice="applied", status="ok",
+                 authority_epoch=e1)
+    logs = await mixer_logs(ctx.cfg, since)
+    if "takeover" not in logs or f"room {r}: authority epoch" not in logs:
+        raise Fail("§9 13b: the mixer logs the takeover and how many records it disarmed",
+                   {"searched_for": f"room {r}: authority epoch <E2> -> <E1> (takeover, via peer_ctl_batch); "
+                                    f"<n> listener record(s) disarmed"})
+    hb1 = Heartbeater(ctx.admin, e1, r, {a.display: 1, b.display: 1}).start()
+    ctx.background.append(hb1)
+    await ctx.until_info(a, _audible, "§9 13b: the takeover's own arming makes A audible again")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -953,4 +1258,20 @@ SCENARIOS = [
              "0.4 requirement on, §11.4, O-46", s23_join_capability_required),
     Scenario("S24", "a pre-0.4 image ignores join_cap and session_id",
              "0.4 new sim / old mixer, §11.8", s24_old_mixer_ignores_capability),
+    Scenario("S25", "arming with a source excluded: L hears T, never S, and S is absent from L's roster",
+             "0.5 fail-closed on, §9 6", s25_arming_with_source_excluded),
+    Scenario("S26", "per-listener staleness: a generation above the stored one silences that listener only",
+             "0.5 fail-closed on, §9 14, 25", s26_per_listener_staleness),
+    Scenario("S27", "out of order: an add below the stored generation is refused and changes nothing",
+             "0.5 fail-closed on, §9 17, 1", s27_out_of_order_generation),
+    Scenario("S28", "pre-join arming survives deferral: an empty replace before the join is replayed at it",
+             "0.5 fail-closed on, §9 18", s28_pre_join_arming_survives_deferral),
+    Scenario("S29", "a declared room with no listeners is grace-destroyed, and re-arms after a fresh join",
+             "0.5 fail-closed on, §9 23", s29_declared_room_no_listeners),
+    Scenario("S30", "a recorder tap in a declared room is silent until armed",
+             "0.5 fail-closed on, §9 24, O-88", s30_recorder_in_declared_room),
+    Scenario("S31", "a window below the §5 constraint is clamped, logged, and reported as the constraint",
+             "0.5 §9 27", s31_stale_ms_clamp),
+    Scenario("S32", "a lower epoch takes over once the fresh one has been stale for the window",
+             "0.5 fail-closed on, §9 13", s32_takeover_after_the_window),
 ]

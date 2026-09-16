@@ -53,6 +53,13 @@ def parse_args(argv):
     p.add_argument("--join-cap-secret", default="",
                    help="S22-S24 (slice 0.4): the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join "
                         "capabilities as the sim does; without it those scenarios are skipped")
+    p.add_argument("--stale-ms-started-with", type=int, default=0,
+                   help="S31 (slice 0.5, §9 27): the JS_VIS_STALE_MS this mixer was STARTED with, when that is "
+                        "below the §5 minimum, so S31 can check the clamp took effect. Without it S31 skips")
+    p.add_argument("--prove-fail", action="store_true",
+                   help="slice 0.5: report a SKIP as a FAIL. Only for the 'behaviour absent' proof runs against "
+                        "an older image, where a scenario that merely skips proves nothing. Never for a "
+                        "reporting run")
     p.add_argument("--container", default="",
                    help="S17/S20: a mixer started with `docker run` (the 0.3 fail-closed scratch mixer): read its logs "
                         "and restart it by this container name instead of the compose service")
@@ -88,6 +95,8 @@ async def main_async(args) -> int:
         turn_pwd=turn_pwd,
         container=args.container,
         join_cap_secret=args.join_cap_secret,
+        stale_ms_started_with=args.stale_ms_started_with,
+        prove_fail=args.prove_fail,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}
@@ -123,7 +132,9 @@ async def main_async(args) -> int:
                 await ctx.open()
                 await sc.fn(ctx)
             except Skip as e:
-                status, detail = "SKIP", str(e)
+                # --prove-fail: a scenario that skips against a build lacking the behaviour proves nothing, so
+                # the proof runs turn that into the failure it really is.
+                status, detail = ("FAIL", f"skipped, and --prove-fail: {e}") if cfg.prove_fail else ("SKIP", str(e))
             except Fail as e:
                 status, detail = "FAIL", f"{e.what}; observed: {fmt(e.observed)}"
             except Exception as e:

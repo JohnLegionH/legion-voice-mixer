@@ -112,6 +112,33 @@ Built at mixer `4492dbc`. Where this section and the body below differ, this sec
 
 ---
 
+### Amendment 2026-09-16 (slice 0.5, harness)
+
+Built at mixer harness `<this commit>`. **No mixer code changed:** 0.5 adds scenarios, not behaviour. The image
+rebuilt for it (`70808a66`) is a stamp-only rebuild of 0.4's `ea88de16`, and the live mixer was not redeployed.
+The §9 coverage map is at the end of that section.
+
+1. **No Phase 0 defect was found.** Every assertion §9 specifies is implemented and observable in the mixer as
+   built — including the two that looked like gaps from the coverage map: out-of-order rejection exists
+   (`janus_slvoice.c:2336`, `gen <= room->vis_policy_gen` → `stale_generation`, counted in
+   `stale_generation_rejects`), and the lower-epoch takeover exists (`visauth.h:78` `SLV_VIS_EPOCH_TAKEOVER`,
+   logging `%u listener record(s) disarmed`). The defects this slice found were in its **own scenarios**, not in
+   Phase 0; they are listed in the slice report.
+2. **§9 6 is not observable through `query_session`.** "S is absent from L's roster" exists only in the
+   `joined` event's `participants` array, which `janus_slvoice_join_commit_locked` filters by the listener's own
+   exclusion set and, under fail-closed, by the pair rule. The harness now keeps that event
+   (`TestPeer.joined_event` / `roster()`). **Consequence for 0.6:** the roster a listener already holds cannot be
+   re-derived from the admin API afterwards — it must be captured at the join or not at all.
+3. **The fail-first rule needs two proofs for a harness-only slice, not one.** 0.5 adds no mixer code, so every
+   new scenario passes against the pre-0.5 image; and against a pre-0.3 image each one merely *skips*. Running
+   them there with `--prove-fail` turns the skip into a failure, but all eight then fail with the **same**
+   message ("the mixer reports no visibility authority"), which proves the image lacks the authority and nothing
+   about what each scenario detects. Only the second proof — invert the one condition the scenario is about and
+   confirm it fails on **its own** assertion — establishes that. Both are recorded in the harness README.
+4. **Recorder taps are gated, and now proven so (ledger O-88).** S30 shows a tap joined with `"recorder": true`
+   in a declared room is silent at row 1 until armed. That is the safe outcome for a recorder and the wrong one
+   for a connector NPC, which is exactly why §6.4 blocks `JS_VIS_FAIL_CLOSED` while O-88 is open.
+
 ## 0. The mechanism today
 
 ### 0.1 Sim side: one feeder, sender and sink per region
@@ -751,6 +778,41 @@ oracle (`last_mix_rms`), with a test tone as the source.
     heartbeat because no `vis_protocol` is advertised.
 27. **Window clamp:** starting the mixer with `JS_VIS_STALE_MS` below the §5 constraint logs the clamp, and
     the effective window in `query_session` equals the constraint.
+
+### Coverage, as built (slice 0.5, 2026-09-16)
+
+Scenarios are in `tests/integration/scenarios.py`; **bold** ones were built by 0.5. S25-S30 and S32 need a
+fail-closed scratch mixer, S31 a mixer started below the §5 minimum, S21 a pre-0.3 image — never the live grid's.
+
+| # | assertion | covered by |
+|---|---|---|
+| 1 | knob off, no epoch fields | S15 (audible unbatched; an unstamped batch applied) + **S27** (the exclusion half: an exclusion `replace` with no epoch fields still silences) |
+| 2 | knob off, never armed | S15 |
+| 3 | knob on, undeclared room | S17 |
+| 4 | knob on, declared, no arming | S16 |
+| 5 | empty arming `replace` | S16, and `tests/test_visauth.c` for the 3-mix-tick bound |
+| 6 | arming with S excluded | **S25** |
+| 7 | pair rule | S16 |
+| 8 | heartbeats alone keep policy fresh | S16 — **but for 10 s, not the design's 30 s.** A deliberate shortfall: the extra 20 s buys the same property at triple the runtime. Named here rather than claimed as coverage |
+| 9 | staleness | S16 at ±1 s (a polling limit), and `test_visauth` at the exact −500 / +100 ms |
+| 10 | recovery in the same epoch | S16 |
+| 11 | a new-epoch heartbeat does not revalidate | S16 |
+| 12 | new-epoch arming | S16 |
+| 13 | lower epoch | S18 (refused while fresh; takeover after a graceful **stop**) + **S32** (takeover after the **window**, the path this section specifies, with the records disarmed) |
+| 14 | per-listener staleness in a live room | **S26** |
+| 15 | omission | S18 |
+| 16 | delta base check | S18 |
+| 17 | out of order | **S27** |
+| 18 | pre-join arming survives deferral | **S28** |
+| 19 | reconnect | S19 |
+| 20 | fan-out | S19 |
+| 21 | mixer restart | S20 |
+| 22 | graceful stop | S18 |
+| 23 | room with no listeners | **S29** |
+| 24 | recorder in a declared room | **S30** |
+| 25 | reply shape | S15 (the keys, and one `mixer_instance` across calls) + **S26** (`policy_generation` echoes the highest applied) |
+| 26 | old image regression catch | S21 |
+| 27 | window clamp | **S31** (the effective window and the startup WARN) + `test_visauth` (the arithmetic) |
 
 ---
 

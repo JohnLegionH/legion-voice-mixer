@@ -39,6 +39,8 @@ self-heals; pass `--no-restart` when people are talking.
 | `--no-restart` | off | skip S4 and S20 |
 | `--container NAME` | none | a mixer started with `docker run` (the 0.3/0.4 scratch mixers): S17 reads `docker logs NAME`, S20 runs `docker restart NAME` |
 | `--join-cap-secret S` | none | slice 0.4: the mixer's `JS_JOIN_CAP_SECRET`, so the harness can mint join capabilities as the sim does. Without it S22 and S23 skip |
+| `--stale-ms-started-with N` | none | slice 0.5: the `JS_VIS_STALE_MS` this mixer was **started** with, when that is below the §5 minimum (`scratch.sh up-clamp` uses 1000). Without it S31 skips, because a correctly configured mixer cannot show the clamp |
+| `--prove-fail` | off | slice 0.5: report a `SKIP` as a `FAIL`. Only for the "behaviour absent" proof runs against an older image, where a scenario that merely skips proves nothing. **Never for a reporting run** |
 | `-v` | off | peer and harness logs, tracebacks |
 
 Output is one `PASS` / `FAIL` / `SKIP` line per scenario — a FAIL carries the expectation and the
@@ -97,11 +99,37 @@ shown wrong; report it, do not bend the scenario to pass.
 | S22 | **`JS_JOIN_CAP_REQUIRED=0` only**, and needs `--join-cap-secret`. A joins a declared room with a valid capability; B with one bound to another agent; C with none; D joins an undeclared room with none | all four join. `seen` and `accepted` climb; `refused.cap_wrong_agent` and `refused.cap_missing` each climb by one; `enforced_refusals` stays 0; the undeclared room counts no missing capability | **0.4 shadow**: every capability is verified and counted, and no join is refused (§11.4) |
 | S23 | **`JS_JOIN_CAP_REQUIRED=1` only.** A valid capability joins a declared room; then nine joins that must each be refused: a replay of the same capability (same agent and session, new Janus session), none at all, malformed, wrong key, expired, wrong agent, wrong session, wrong room, and one minted under another epoch. Finally a capability-less join into an undeclared room | the valid one is admitted; each refusal answers `error_code` 496 with its own `reason` (`cap_replayed`, `cap_missing`, `cap_malformed`, `cap_bad_signature`, `cap_expired`, `cap_wrong_agent`, `cap_wrong_session`, `cap_wrong_room`, `cap_stale_generation`); the undeclared room still admits; `enforced_refusals` reaches 9 | **0.4 O-46**: the join is gated, and every refusal says which check failed (§11.4) |
 | S24 | **A pre-0.4 image only** (skips when the mixer reports `join_cap` state). A joins with `join_cap` and `session_id` set, B joins normally | both join and A hears B: the old mixer ignores both keys | **0.4 skew**: a minting sim against an old mixer degrades to today's behaviour (§11.8) |
+| S25 | **Fail-closed on only.** S and T join R (`vis_authority`). One replace arms L with S excluded, and arms S and T. **Then** L joins, so the mixer builds L's roster after the arming | L joins already at `vis_row` 4 with `excluded_entries` 1; S is **absent** from the roster the joined event carries and T is present; L hears T; L gets no dot and no presence for S | **§9 6** an excluded source is invisible as well as inaudible. `query_session` has no roster field, so the joined event is the only place that view exists |
+| S26 | **Fail-closed on only.** L, M and SRC armed and audible; generations 2 and 3 applied in turn; then one heartbeat naming **L alone** at generation 99 | each reply echoes the highest applied `policy_generation`; L goes silent at `vis_row` 3 while **M stays audible for 2 s**; the heartbeat reply lists L in `stale_listeners` and not M; a replace for L restores it | **§9 14** staleness is per listener, not per room, and **§9 25**'s last clause |
+| S27 | **Fail-closed on only.** Armed at generation 10, then a delayed `add` at generation 9. Then, in an **undeclared** room, an exclusion replace carrying no epoch fields at all | the late add is refused `stale_generation`, A's set is unchanged for 1.5 s, `stale_generation_rejects` climbs, and the log names both generations; the unstamped exclusion still silences | **§9 17** out-of-order rejection, and **§9 1**'s remaining half |
+| S28 | **Fail-closed on only.** An **empty** arming replace for a display not yet in the room, then that display joins. No heartbeat is ever sent | L joins straight to `vis_row` 4 and is audible, with no heartbeat round trip | **§9 18** pre-join arming survives deferral — empty columns are what makes it hard (design §2) |
+| S29 | **Fail-closed on only.** A declared room is emptied and left with no heartbeat for `--grace`; then re-created, rejoined and armed | destroyed no earlier than its grace, with the `room <R> destroyed after <n>s empty` line; a fresh join plus an arming replace is audible again | **§9 23** a declared room with no listeners behaves exactly as today |
+| S30 | **Fail-closed on only.** SRC joins R (`vis_authority`); REC joins with `"recorder": true`, then is armed | `handle_info` reports `recorder` true; REC is silent at `vis_row` 1 and stays silent for 2 s unarmed; armed, it hears the room | **§9 24** a recording tap is gated like any participant (open question 3, ledger **O-88**) |
+| S31 | **A mixer started below the §5 minimum only** (`scratch.sh up-clamp`, `JS_VIS_STALE_MS=1000`); needs `--stale-ms-started-with` | the reported `stale_ms` is **7250**, the §5 constraint, not the 1000 it was given, and the startup log holds `JS_VIS_STALE_MS=1000 is below the minimum 7250 ms` | **§9 27** the window clamp is enforced and visible, not just computed (`test_visauth` covers the arithmetic) |
+| S32 | **Fail-closed on only.** Armed in E2 with heartbeats; a lower E1 while E2 is fresh; then heartbeats stop, the window passes, and the same E1 is sent again | while E2 is fresh E1 is `stale_epoch`; once the window passes A goes silent and E1 is **adopted** (`authority_epoch` E1) with the takeover logged and records disarmed; re-arming in E1 restores audio | **§9 13**'s second half — the takeover path the design specifies, which S18 reaches only through a graceful stop |
 
 **Phase 0 runs (0.3).** S15 runs against the deployed mixer (fail-closed off). S16-S20 need a mixer with
 `JS_VIS_FAIL_CLOSED=1`, which must never be the live grid's: start a scratch container on other ports and pass
 `--janus-url`, `--admin-url`, its throwaway secrets and `--container <name>`. S21 needs the pre-0.3 image, also as
 a scratch container. `--container NAME` makes S17 read `docker logs NAME` and S20 run `docker restart NAME`.
+
+**Phase 0 runs (0.5).** S25-S30 and S32 need `JS_VIS_FAIL_CLOSED=1` and a normal window; S31 needs a mixer
+**started** below the §5 minimum. Both are scratch containers, never the live grid's — `scratch.sh up-fc`
+(ports 47223/47225, `JS_EMPTY_ROOM_GRACE_S=15`, so pass `--grace 15` for S29) and `scratch.sh up-clamp`
+(ports 46223/46225, `JS_VIS_STALE_MS=1000`, so pass `--stale-ms-started-with 1000`). When overriding a knob
+that `COMMON` already pins, put the `-e` **after** `$COMMON`: the last one wins, and getting that backwards
+is why the clamp mixer first came up in shadow mode.
+
+**Proving a new scenario is worth having.** A scenario counts only once it has been shown to fail when the
+thing it asserts is absent. Two proofs, because the first alone is weak:
+1. **Behaviour absent** — run it against `legion-voice-mixer:rollback-pre-03` (no `vis_protocol`, no
+   `peer_ctl_heartbeat`, no `vis_authority`, no `stale_generation`, no takeover) with `--prove-fail`, which
+   reports the skip as the failure it really is. This proves the image lacks the authority, and no more: all
+   eight 0.5 scenarios fail there with the *same* message.
+2. **Mutation** — invert the one condition the scenario is about and confirm it fails with *its own*
+   assertion text. This is the proof that the scenario tests what it claims; the first proof cannot show
+   that, which is how S13 once passed while its "relay-only" peer was still sending checks from host
+   sockets.
 
 **Source-address probe (`source_probe.py`, A.6).** Not a scenario: one peer, one question, for any
 mixer you can reach. `python -m tests.integration.source_probe [--janus-url URL] [--admin-url URL]

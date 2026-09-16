@@ -88,6 +88,13 @@ class Config:
     #: slice 0.4: the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
     #: Empty = S22-S24 skip (they cannot mint what the mixer would accept).
     join_cap_secret: str = ""
+    #: slice 0.5 (§9 27): the JS_VIS_STALE_MS this mixer was STARTED with, when that is below the §5 minimum.
+    #: S31 needs a mixer deliberately started under the clamp; 0 = it skips, because a correctly configured
+    #: mixer cannot show the clamp.
+    stale_ms_started_with: int = 0
+    #: slice 0.5: turn Skip into Fail. Only for the "behaviour absent" proof runs against an older image, where
+    #: a scenario that merely skips proves nothing. Never for a reporting run.
+    prove_fail: bool = False
 
 
 def read_env(path: Path) -> dict:
@@ -193,7 +200,7 @@ class TestPeer(ConnectorPeer):
     (no leave, no detach), as a crashed or unplugged viewer would."""
 
     def __init__(self, cfg: Config, name: str, room: int, display: str,
-                 join_cap: str | None = None, session_id: str | None = None):
+                 join_cap: str | None = None, session_id: str | None = None, recorder: bool = False):
         super().__init__({"janus_url": cfg.janus_url, "api_secret": cfg.api_secret,
                           "room": room, "display": display},
                          logging.getLogger(f"integration.peer.{name}"))
@@ -203,6 +210,15 @@ class TestPeer(ConnectorPeer):
         #: Phase 0 slice 0.4: what the sim would send on the join; None sends neither key, as a pre-0.4 sim does.
         self.join_cap = join_cap
         self.session_id = session_id
+        #: Phase 0 slice 0.5 (§9 24): join as a recording tap ("recorder": true, SC-96). The mixer reads it at
+        #: join (janus_slvoice.c:3095) and reports it in query_session; §9 24 asserts a recorder in a declared
+        #: room is silent until armed, like any other participant.
+        self.recorder = recorder
+        #: The "joined" event as it arrived, including the initial roster the mixer built for THIS listener
+        #: (janus_slvoice_join_commit_locked): filtered by the listener's own exclusion set and, under
+        #: fail-closed, by the pair rule. §9 6 reads "S is absent from L's roster" from here -- query_session
+        #: has no roster field, so this event is the only place that view exists.
+        self.joined_event: dict | None = None
         self.crashed = False
         #: SC-87: every {p, v} this peer received for each source display, in arrival order.
         self.dots: dict[str, list] = {}
@@ -216,13 +232,21 @@ class TestPeer(ConnectorPeer):
         return f"{self.name}(display={self.display[:8]}, room={self.room}, session={sid}, handle={hid})"
 
     def join_extra(self) -> dict:
-        """Slice 0.4: the join capability and the viewer-session id the sim sends, when this peer has them."""
+        """Slice 0.4: the join capability and the viewer-session id the sim sends, when this peer has them.
+        Slice 0.5: "recorder" for a recording tap (§9 24)."""
         extra = {}
         if self.join_cap is not None:
             extra["join_cap"] = self.join_cap
         if self.session_id is not None:
             extra["session_id"] = self.session_id
+        if self.recorder:
+            extra["recorder"] = True
         return extra
+
+    def roster(self) -> list:
+        """The displays in the initial roster the mixer sent this peer at join (§9 6). Empty before the join
+        event arrives; a peer the mixer omitted is simply absent."""
+        return [row.get("display") for row in ((self.joined_event or {}).get("participants") or [])]
 
     def local_track(self):
         return ToneTrack()
@@ -243,6 +267,10 @@ class TestPeer(ConnectorPeer):
                 self.presence.append((display, "j" if "j" in entry else "l"))
 
     def on_plugin_event(self, data: dict) -> None:
+        if data.get("audiobridge") == "joined":
+            #: Kept whether or not the future is already resolved: the roster rides this event and nothing
+            #: else carries it (§9 6).
+            self.joined_event = data
         if self._join_result.done():
             return
         if data.get("audiobridge") == "joined" or "error_code" in data:
@@ -745,11 +773,13 @@ class Ctx:
         return room
 
     async def join(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
-                   join_cap: str | None = None, session_id: str | None = None) -> TestPeer:
+                   join_cap: str | None = None, session_id: str | None = None,
+                   recorder: bool = False) -> TestPeer:
         """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
-        sim would send; both None is a pre-0.4 join."""
+        sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24)."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
-        peer = TestPeer(self.cfg, name, room, display or new_display(), join_cap=join_cap, session_id=session_id)
+        peer = TestPeer(self.cfg, name, room, display or new_display(), join_cap=join_cap, session_id=session_id,
+                        recorder=recorder)
         self.peers.append(peer)
         return await peer.start()
 
