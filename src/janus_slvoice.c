@@ -491,6 +491,12 @@ typedef struct janus_slvoice_session {
 	janus_slvoice_room *room;    /* ref held while joined; NULL otherwise (guarded by mutex) */
 	char *display;               /* display name from join = the agent UUID string (§3.2) */
 	gboolean recorder;           /* SC-96: joined with "recorder": true, i.e. a recording tap */
+	/* O-91: what THIS session's last join attempt carried. The join_cap counters in query_session are
+	 * PROCESS-WIDE and cannot attribute a capability to a session, so a soak could never answer "did that
+	 * join carry one". These two can. cap_verdict is a static string from slv_joincap_reason (never freed);
+	 * NULL means no join has been evaluated on this session yet. */
+	gboolean cap_present;        /* the join carried a non-empty join_cap */
+	const char *cap_verdict;     /* "ok", "cap_missing", ... ; NULL until a join is evaluated */
 	int opus_pt;                 /* negotiated Opus payload type; -1 until join */
 	gboolean has_datachannel;    /* offer contained an m=application line */
 	gboolean dc_answered;        /* our answer accepted the m=application line */
@@ -1667,6 +1673,12 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	if(session->display)
 		json_object_set_new(info, "display", json_string(session->display));
 	json_object_set_new(info, "recorder", session->recorder ? json_true() : json_false());   /* SC-96 */
+	/* O-91: the per-session capability marker, on EVERY session record whether or not it is in a room. The
+	 * join_cap block inside "visibility" below is process-wide and cannot attribute anything to a session;
+	 * these two can, which is what the 0.6 soak needs. "none" = no join evaluated on this session yet. */
+	json_object_set_new(info, "join_cap_present", session->cap_present ? json_true() : json_false());
+	json_object_set_new(info, "join_cap_verdict",
+		json_string(session->cap_verdict != NULL ? session->cap_verdict : "none"));
 	json_object_set_new(info, "opus_pt", json_integer(session->opus_pt));
 	/* Inbound / outbound liveness. */
 	json_object_set_new(info, "rtp_in_count", json_integer((json_int_t)session->rtp_in_count));
@@ -3047,6 +3059,14 @@ static void *janus_slvoice_handler(void *data) {
 				janus_mutex_unlock(&room->mutex);
 				slv_joincap_verdict cap_v = janus_slvoice_joincap_verify(join_cap, display, cap_session,
 					(int64_t)room_id, cap_epoch, cap_gen, cap_declared);
+				/* O-91: record the verdict on the SESSION, before any refusal below. Set here, not at the
+				 * membership commit, deliberately: a join refused for the capability, for capacity, or by a
+				 * failed negotiate still leaves a session record, and "what its last join attempt carried" is
+				 * exactly what a soak needs to attribute. Same mutex as the other per-join fields. */
+				janus_mutex_lock(&session->mutex);
+				session->cap_present = (join_cap != NULL && *join_cap != '\0');
+				session->cap_verdict = slv_joincap_reason(cap_v);
+				janus_mutex_unlock(&session->mutex);
 				if(cap_v != SLV_JOINCAP_OK && slv_join_cap_required && cap_declared) {
 					g_atomic_int_inc(&slv_join_cap_enforced);
 					janus_refcount_decrease(&room->ref);

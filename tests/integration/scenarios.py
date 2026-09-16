@@ -856,6 +856,20 @@ async def s22_join_capability_shadow(ctx: Ctx) -> None:
     if after != before:
         raise Fail("an undeclared room counts no missing capability", {"before": before, "after": after})
 
+    # O-91: the PER-SESSION marker. Everything checked above is process-wide and cannot say whether a GIVEN
+    # join carried a capability -- which is why a soak could not attribute what it counted. These two fields
+    # can. Checked on all four sessions after the fact, so this also shows the marker persists rather than
+    # being a transient of the join. A session that never joined reads "none"; no harness peer can be in that
+    # state (every peer joins), so that default is covered by construction, not by this check.
+    for peer, want_present, want_verdict in ((a, True, "ok"), (b, True, "cap_wrong_agent"),
+                                             (c, False, "cap_missing"), (d, False, "cap_missing")):
+        i = await ctx.info(peer)
+        if i.get("join_cap_present") is not want_present or i.get("join_cap_verdict") != want_verdict:
+            raise Fail(f"O-91: {peer.name}'s session records join_cap_present={want_present} and "
+                       f"join_cap_verdict={want_verdict!r}",
+                       {"peer": peer.name, "join_cap_present": i.get("join_cap_present"),
+                        "join_cap_verdict": i.get("join_cap_verdict")})
+
 
 async def s23_join_capability_required(ctx: Ctx) -> None:
     """Requirement ON: a valid capability joins a declared room, and every refusal names its own reason."""
@@ -1253,7 +1267,7 @@ SCENARIOS = [
     Scenario("S21", "a pre-0.3 image applies stamped batches as unstamped and never advertises vis_protocol",
              "0.3 new sim / old mixer, §9 26", s21_old_image_ignores_stamp),
     Scenario("S22", "join capability shadow: verified and counted, and no join refused",
-             "0.4 requirement off, §11.4", s22_join_capability_shadow),
+             "0.4 requirement off, §11.4; O-91 per-session marker", s22_join_capability_shadow),
     Scenario("S23", "join capability required: a valid one joins; every refusal names its reason",
              "0.4 requirement on, §11.4, O-46", s23_join_capability_required),
     Scenario("S24", "a pre-0.4 image ignores join_cap and session_id",
