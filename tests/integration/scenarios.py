@@ -868,7 +868,9 @@ async def s23_join_capability_required(ctx: Ctx) -> None:
     if (a.join_reply or {}).get("audiobridge") != "joined":
         raise Fail("a valid capability is admitted", a.join_reply)
 
-    await _refused(ctx, "REPLAY", r, new_display(), "cap_replayed", join_cap=good, session_id=session_a)
+    # The replay must present the SAME agent and session as the capability binds, or the §11.4 order refuses it at
+    # cap_wrong_agent before the nonce is ever consulted. Only the Janus session differs, which is what a replay is.
+    await _refused(ctx, "REPLAY", r, da, "cap_replayed", join_cap=good, session_id=session_a)
     await _refused(ctx, "MISSING", r, new_display(), "cap_missing")
     await _refused(ctx, "MALFORMED", r, new_display(), "cap_malformed",
                    join_cap="v1.not-a-payload.not-a-signature", session_id=new_display())
@@ -893,9 +895,10 @@ async def s23_join_capability_required(ctx: Ctx) -> None:
     plain = await ctx.join_without_media("PLAIN", r2)
     if (plain.join_reply or {}).get("audiobridge") != "joined":
         raise Fail("an undeclared room is never gated by the capability", plain.join_reply)
-    info = await ctx.info(a)
-    if _cap_state(info).get("enforced_refusals", 0) < 9:
-        raise Fail("every refusal above was enforced and counted", _cap_state(info))
+    # Read the counters off the peer that joined last: they are process-wide, and A's Janus session is the oldest
+    # in this run, so it is the one that can have been reaped by the time the refusals are done.
+    await ctx.until_info(plain, lambda i: _cap_state(i).get("enforced_refusals", 0) >= 9,
+                         "every refusal above was enforced and counted")
 
 
 async def s24_old_mixer_ignores_capability(ctx: Ctx) -> None:

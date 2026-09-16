@@ -1344,9 +1344,14 @@ static slv_joincap_verdict janus_slvoice_joincap_verify(const char *cap, const c
 	static gint64 skew_warned_us = 0;   /* one skew WARN a minute (benign race: a log line) */
 	if(cap == NULL || *cap == '\0') {
 		/* Only a declared room counts a missing capability: A2A, static, harness and connector rooms are never
-		 * gated, so "no capability" is their normal state, not a finding. */
-		if(declared)
+		 * gated, so "no capability" is their normal state, not a finding. It LOGS like every other refusal: a
+		 * refusal that logs nothing leaves an operator with no answer to "why can nobody join". */
+		if(declared) {
 			g_atomic_int_inc(&slv_join_cap_refused[SLV_JOINCAP_MISSING]);
+			JANUS_LOG(LOG_WARN, "[%s] join capability %s for %s in room %"PRId64" (%s)\n", JANUS_SLVOICE_PACKAGE,
+				slv_joincap_reason(SLV_JOINCAP_MISSING), display ? display : "(no display)", room,
+				slv_join_cap_required ? "refused" : "counted only: not enforced here");
+		}
 		return SLV_JOINCAP_MISSING;
 	}
 	g_atomic_int_inc(&slv_join_cap_seen);
