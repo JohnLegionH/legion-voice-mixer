@@ -15,6 +15,51 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer 0.4: sim-issued join capability, requirement off (untagged) — 2026-09-15
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 20:36 | `ea88de16` | `legion-voice-mixer:rollback-pre-04` (`115663b3`, the 0.3 image, tagged before the rebuild) |
+
+Phase 0 slice 0.4: the mixer half of `docs/voice/nonspatial-phase0-design.md` §11, built at `0ad9d37`. The sim
+mints a short-lived capability bound to agent + session + room + epoch + generation + expiry + nonce, and the
+mixer verifies it. **Deployed with `JS_JOIN_CAP_REQUIRED=0` and no secret**, so joins are exactly as before.
+
+- **Scoping.** Enforced only when `JS_JOIN_CAP_REQUIRED=1` **and** the room was created with `vis_authority`
+  — the same scoping as 0.3's fail-closed. A2A, static, harness and connector rooms are never gated.
+- **Refusals** carry `error_code` 496 and a machine-readable `reason`, checked in the §11.4 order:
+  `cap_missing`, `cap_malformed`, `cap_bad_signature`, `cap_wrong_agent`, `cap_wrong_session`,
+  `cap_wrong_room`, `cap_expired`, `cap_replayed`, `cap_replay_store_full`, `cap_stale_generation`.
+- **A capability admits; it does not arm.** It grants no audibility and stays independent of the visibility
+  authority.
+- **Bounded replay store:** 4096 live nonces, swept by `exp + skew`; when full a join is refused with
+  `cap_replay_store_full` — failing closed on the security control even while the feature is off. A mixer
+  restart leaves no nonce memory, so a replay inside the capability's remaining ≤60 s lifetime would succeed.
+  That hole is small and time-boxed, and is written down rather than implied.
+- **Clock skew ±120 s**: far above NTP-managed drift and far below the value of a stolen capability, for two
+  hosts in different datacentres. A join admitted only inside the tolerance logs a rate-limited WARN naming
+  the offset.
+- **Capability values are never logged, at any level, on either side.**
+
+### Behaviour changes on upgrade
+
+- **None with the knob off.** `JS_JOIN_CAP_REQUIRED` defaults to 0, and the plugin logs
+  `Join capability: OFF (JS_JOIN_CAP_REQUIRED=0, no JS_JOIN_CAP_SECRET); joins are exactly as before`.
+- With `JS_JOIN_CAP_REQUIRED=1`, a join to a `vis_authority` room without a valid capability is refused with
+  error 496 and a reason. Setting the requirement with an empty `JS_JOIN_CAP_SECRET` is **FATAL at start-up**
+  (O-65 fail-closed), not a silent downgrade.
+- While the requirement is off but a secret is set, a capability is verified and counted and never refused,
+  and a generation mismatch is counted and logged rather than refused — so the 0.6 soak has something to
+  measure.
+- A pre-0.4 mixer ignores `join_cap` and `session_id` on the join, and a 0.4 mixer with the knob off accepts a
+  join that carries neither. Both mixed-version directions degrade to today's behaviour; neither refuses.
+
+### One-time migrations
+
+- None.
+
+---
+
 ## Mixer 0.3: visibility authority, fail-closed off (untagged) — 2026-09-15
 
 | Deployed (CDT) | Image | Rollback tag |
