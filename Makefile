@@ -34,10 +34,12 @@ PKGCONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config
 # janus-gateway pulls in glib-2.0 and jansson via its Requires:; we name them
 # explicitly too so a build still works if only their .pc files are present.
 # Phase 1B echoes audio, so opus (decode/encode) is a dependency again.
-PKGS := janus-gateway glib-2.0 jansson opus
+# openssl: slice 0.4's join capability verifies an HMAC-SHA256 with a constant-time compare
+# (src/joincap.c). Janus already links OpenSSL for DTLS, so this adds no new runtime dependency.
+PKGS := janus-gateway glib-2.0 jansson opus openssl
 
 PKG_CFLAGS := $(shell $(PKGCONFIG) --cflags $(PKGS) 2>/dev/null)
-PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson opus 2>/dev/null) -lm
+PKG_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 jansson opus openssl 2>/dev/null) -lm
 
 CFLAGS  ?= -O2 -g
 # EXTRA_CFLAGS is an append-only hook for extra defines passed from the caller,
@@ -53,7 +55,7 @@ LDLIBS  += $(PKG_LIBS)
 
 # Phase 2 adds the per-room N-minus-one mixer; the pure mixing math lives in
 # src/mixer/mix.c (Janus/Opus-free) so it is shared with the unit test below.
-SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
+SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/deferred.c src/joincap.c src/mixer/mix.c
 OBJS := $(SRCS:.c=.o)
 
 # Unit tests. Both are plain C binaries with NO Janus link:
@@ -95,7 +97,12 @@ BENCH_LIBS         := $(PKG_LIBS) -pthread -Wl,--unresolved-symbols=ignore-all
 TEST_LIFECYCLE_BIN  := tests/test_room_lifecycle
 TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
 TEST_VISAUTH_BIN  := tests/test_visauth
-TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
+TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/deferred.c src/joincap.c src/mixer/mix.c
+# test_joincap: slice 0.4's join capability (src/joincap.c). Links OpenSSL and libc only.
+TEST_JOINCAP_BIN  := tests/test_joincap
+TEST_JOINCAP_SRCS := tests/test_joincap.c src/joincap.c
+TEST_SSL_CFLAGS   := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags openssl 2>/dev/null)
+TEST_SSL_LIBS     := $(shell $(PKGCONFIG) --libs openssl 2>/dev/null)
 TEST_CFLAGS  := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags jansson 2>/dev/null)
 TEST_LIBS    := $(shell $(PKGCONFIG) --libs jansson 2>/dev/null) -lm
 # roster.h is glib-only (no jansson/Janus); its test links glib.
@@ -124,7 +131,7 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
@@ -135,6 +142,10 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BI
 	./$(TEST_LIFECYCLE_BIN)
 	./$(TEST_REDACT_BIN)
 	./$(TEST_VISAUTH_BIN)
+	./$(TEST_JOINCAP_BIN)
+
+$(TEST_JOINCAP_BIN): $(TEST_JOINCAP_SRCS) src/joincap.h
+	$(CC) $(TEST_SSL_CFLAGS) -o $@ $(TEST_JOINCAP_SRCS) $(TEST_SSL_LIBS)
 
 # test_visauth: Phase 0 slice 0.3 (keying, the decision table, staleness, replies, shadow counters). Like
 # test_room_lifecycle it #includes janus_slvoice.c and builds with the bench flags.
@@ -184,4 +195,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(BENCH_TICK_BIN)

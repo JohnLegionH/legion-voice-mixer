@@ -8,8 +8,12 @@ plugin's list / listparticipants) with a bounded timeout; nothing sleeps blindly
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import re
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -763,6 +767,152 @@ async def s21_old_image_ignores_stamp(ctx: Ctx) -> None:
         raise Fail("peer_ctl_heartbeat is an unknown request to the old image", hb)
 
 
+# ---- Phase 0 slice 0.4: the sim-issued join capability (design §11, ledger O-46) -------------------------------
+# The harness mints capabilities exactly as the sim does, so it needs the mixer's JS_JOIN_CAP_SECRET
+# (--join-cap-secret). S22 needs a mixer with the requirement OFF, S23 one with it ON (a scratch mixer, never the
+# grid's), and S24 a pre-0.4 image. Each skips on the wrong mixer.
+
+_NO_EPOCH = "0" * 16
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _mint_cap(secret: str, agent: str, session: str, room: int, epoch: str = _NO_EPOCH, generation: int = 0,
+              iat: int | None = None, lifetime: int = 60, nonce: str | None = None) -> str:
+    """The sim's JoinCapability.Mint, in Python: v1.<b64url payload>.<b64url HMAC-SHA256>."""
+    iat = int(time.time()) if iat is None else iat
+    nonce = nonce or secrets.token_hex(16)
+    payload = f"{agent}|{session}|{room}|{epoch}|{generation}|{iat}|{iat + lifetime}|{nonce}"
+    signing = "v1." + _b64u(payload.encode())
+    return signing + "." + _b64u(hmac.new(secret.encode(), signing.encode(), hashlib.sha256).digest())
+
+
+def _cap_state(info) -> dict:
+    return (_vis(info) or {}).get("join_cap") or {}
+
+
+async def _cap_mode(ctx: Ctx, peer, want_required: bool) -> dict:
+    """The mixer's capability mode, or Skip when it is the wrong one (or a pre-0.4 image)."""
+    if not ctx.cfg.join_cap_secret:
+        raise Skip("--join-cap-secret not given: the harness cannot mint what this mixer would accept")
+    info = await ctx.until_info(peer, lambda i: isinstance(_vis(i), dict), f"{peer.name} reports a visibility block")
+    state = _cap_state(info)
+    if "required" not in state:
+        raise Skip("the mixer reports no join_cap state (a pre-0.4 image)")
+    if state["required"] is not want_required:
+        raise Skip(f"this scenario needs JS_JOIN_CAP_REQUIRED={1 if want_required else 0}; the mixer reports "
+                   f"required={state['required']}")
+    if not state.get("key_set"):
+        raise Fail("the mixer has a JS_JOIN_CAP_SECRET set", state)
+    return state
+
+
+async def _refused(ctx: Ctx, name: str, room: int, display: str, reason: str, **kw) -> None:
+    """One join that must be refused with exactly `reason`."""
+    peer = await ctx.join_without_media(name, room, display, vis_authority=True, expect_join=False, **kw)
+    reply = peer.join_reply or {}
+    if reply.get("audiobridge") == "joined":
+        raise Fail(f"a join with {reason} is refused, not admitted", reply)
+    if reply.get("error_code") != 496 or reply.get("reason") != reason:
+        raise Fail(f"the refusal names {reason} with error_code 496", reply)
+
+
+async def s22_join_capability_shadow(ctx: Ctx) -> None:
+    """Requirement OFF: capabilities are verified and counted, and no join is ever refused for one."""
+    r = ctx.new_room()
+    secret = ctx.cfg.join_cap_secret
+    da, session_a = new_display(), new_display()
+    a = await ctx.join("A", r, da, vis_authority=True,
+                       join_cap=_mint_cap(secret, da, session_a, r), session_id=session_a)
+    await ctx.ready(a)
+    state = await _cap_mode(ctx, a, want_required=False)
+    if state.get("accepted", 0) < 1 or state.get("seen", 0) < 1:
+        raise Fail("a valid capability is verified and counted", state)
+
+    # A capability for another agent: still admitted (shadow), and counted under its own reason.
+    db, session_b = new_display(), new_display()
+    b = await ctx.join("B", r, db, vis_authority=True,
+                       join_cap=_mint_cap(secret, da, session_b, r), session_id=session_b)
+    await ctx.ready(b)
+    await ctx.until_info(b, lambda i: (_cap_state(i).get("refused") or {}).get("cap_wrong_agent", 0) >= 1,
+                         "shadow: a capability bound to another agent is counted cap_wrong_agent")
+
+    # No capability at all, in a declared room: counted cap_missing, and the join still succeeds.
+    c = await ctx.join("C", r, vis_authority=True)
+    await ctx.ready(c)
+    info = await ctx.until_info(c, lambda i: (_cap_state(i).get("refused") or {}).get("cap_missing", 0) >= 1,
+                                "shadow: a join with no capability to a declared room is counted cap_missing")
+    if _cap_state(info).get("enforced_refusals", 0) != 0:
+        raise Fail("shadow mode refuses nothing", _cap_state(info))
+
+    # An undeclared room is never gated, so a capability-less join there counts nothing.
+    before = (_cap_state(info).get("refused") or {}).get("cap_missing", 0)
+    r2 = ctx.new_room()
+    d = await ctx.join("D", r2)
+    await ctx.ready(d)
+    after = (_cap_state(await ctx.info(d)).get("refused") or {}).get("cap_missing", 0)
+    if after != before:
+        raise Fail("an undeclared room counts no missing capability", {"before": before, "after": after})
+
+
+async def s23_join_capability_required(ctx: Ctx) -> None:
+    """Requirement ON: a valid capability joins a declared room, and every refusal names its own reason."""
+    r = ctx.new_room()
+    secret = ctx.cfg.join_cap_secret
+    da, session_a = new_display(), new_display()
+    good = _mint_cap(secret, da, session_a, r)
+    a = await ctx.join_without_media("A", r, da, vis_authority=True, join_cap=good, session_id=session_a)
+    await _cap_mode(ctx, a, want_required=True)
+    if (a.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("a valid capability is admitted", a.join_reply)
+
+    await _refused(ctx, "REPLAY", r, new_display(), "cap_replayed", join_cap=good, session_id=session_a)
+    await _refused(ctx, "MISSING", r, new_display(), "cap_missing")
+    await _refused(ctx, "MALFORMED", r, new_display(), "cap_malformed",
+                   join_cap="v1.not-a-payload.not-a-signature", session_id=new_display())
+
+    db, session_b = new_display(), new_display()
+    await _refused(ctx, "BADSIG", r, db, "cap_bad_signature",
+                   join_cap=_mint_cap("not-the-mixers-secret", db, session_b, r), session_id=session_b)
+    await _refused(ctx, "EXPIRED", r, db, "cap_expired",
+                   join_cap=_mint_cap(secret, db, session_b, r, iat=int(time.time()) - 3600), session_id=session_b)
+    await _refused(ctx, "WRONGAGENT", r, db, "cap_wrong_agent",
+                   join_cap=_mint_cap(secret, new_display(), session_b, r), session_id=session_b)
+    await _refused(ctx, "WRONGSESSION", r, db, "cap_wrong_session",
+                   join_cap=_mint_cap(secret, db, new_display(), r), session_id=session_b)
+    await _refused(ctx, "WRONGROOM", r, db, "cap_wrong_room",
+                   join_cap=_mint_cap(secret, db, session_b, r + 7), session_id=session_b)
+    await _refused(ctx, "STALEGEN", r, db, "cap_stale_generation",
+                   join_cap=_mint_cap(secret, db, session_b, r, epoch="0000018f00000001", generation=3),
+                   session_id=session_b)
+
+    # Not gated anywhere else: an undeclared room admits a join with no capability, with the knob on.
+    r2 = ctx.new_room()
+    plain = await ctx.join_without_media("PLAIN", r2)
+    if (plain.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("an undeclared room is never gated by the capability", plain.join_reply)
+    info = await ctx.info(a)
+    if _cap_state(info).get("enforced_refusals", 0) < 9:
+        raise Fail("every refusal above was enforced and counted", _cap_state(info))
+
+
+async def s24_old_mixer_ignores_capability(ctx: Ctx) -> None:
+    """A pre-0.4 image ignores join_cap and session_id, so a minting sim's joins land exactly as before."""
+    r = ctx.new_room()
+    da, session_a = new_display(), new_display()
+    a = await ctx.join("A", r, da, vis_authority=True,
+                       join_cap=_mint_cap(ctx.cfg.join_cap_secret or "any-secret", da, session_a, r),
+                       session_id=session_a)
+    await ctx.ready(a)
+    if "required" in _cap_state(await ctx.info(a)):
+        raise Skip("this mixer understands join capabilities: S24 runs against a pre-0.4 image")
+    b = await ctx.join("B", r)
+    await ctx.ready(b)
+    await ctx.until_info(a, _audible, "the old mixer admitted a stamped join and mixes it exactly as before")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -794,4 +944,10 @@ SCENARIOS = [
              "0.3 fail-closed on, §9 21", s20_fail_closed_mixer_restart),
     Scenario("S21", "a pre-0.3 image applies stamped batches as unstamped and never advertises vis_protocol",
              "0.3 new sim / old mixer, §9 26", s21_old_image_ignores_stamp),
+    Scenario("S22", "join capability shadow: verified and counted, and no join refused",
+             "0.4 requirement off, §11.4", s22_join_capability_shadow),
+    Scenario("S23", "join capability required: a valid one joins; every refusal names its reason",
+             "0.4 requirement on, §11.4, O-46", s23_join_capability_required),
+    Scenario("S24", "a pre-0.4 image ignores join_cap and session_id",
+             "0.4 new sim / old mixer, §11.8", s24_old_mixer_ignores_capability),
 ]

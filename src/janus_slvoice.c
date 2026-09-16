@@ -53,6 +53,7 @@
 
 #include <inttypes.h>
 #include <string.h>
+#include <time.h>      /* slice 0.4: wall-clock seconds for the join capability window */
 #include <arpa/inet.h>   /* htons/htonl for the outgoing RTP header */
 
 #include <jansson.h>
@@ -74,6 +75,7 @@
 #include "deferred.h"    /* join-window fix: per-room store of columns deferred for a not-yet-joined listener */
 #include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "visauth.h"     /* Phase 0: epochs, the listener rule rows and the knobs (unit-tested) */
+#include "joincap.h"     /* Phase 0 slice 0.4: the sim-issued join capability (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
 #include "mixer/azimuth.h" /* Phase 3b item 4: horizontal azimuth of a source (pan input) */
@@ -108,6 +110,8 @@
  * 409 Conflict, which the viewer maps to ERROR_CHANNEL_FULL. Distinct from every other
  * join failure so an unrelated error never reads as "room full". */
 #define JANUS_SLVOICE_ERROR_ROOM_FULL       495
+/* Slice 0.4: every join-capability refusal. The machine-readable `reason` beside it says which one. */
+#define JANUS_SLVOICE_ERROR_JOIN_CAP        496
 #define JANUS_SLVOICE_ERROR_UNKNOWN         499
 
 /* Mixer->client SLData power/VAD batch cadence (spec §9: ~100ms). */
@@ -344,6 +348,24 @@ static guint slv_vis_stale_ms = SLV_VIS_STALE_MS_DEFAULT;
 static char slv_mixer_instance[17] = "";
 /* Listener records per room; past it an arming replace arms no one new (counted in records_full, WARNed once). */
 #define SLV_VIS_MAX_RECORDS 1024
+
+/* Phase 0 slice 0.4 (design §11, ledger O-46): the sim-issued join capability. JS_JOIN_CAP_REQUIRED enforces it
+ * in rooms created with vis_authority; with it off every capability that arrives is still verified and counted,
+ * and no join is ever refused for it. JS_JOIN_CAP_SECRET is the HMAC key and is deliberately NOT JS_API_SECRET:
+ * a leak of one must not forge the other. The key, the capability, its payload and its nonce are never logged at
+ * any level — only the verdict's reason, the agent and the room. */
+static gboolean slv_join_cap_required = FALSE;
+static char *slv_join_cap_key = NULL;          /* g_strdup of JS_JOIN_CAP_SECRET; NULL = no key configured */
+static size_t slv_join_cap_key_len = 0;
+static janus_mutex slv_join_cap_mutex;         /* guards the replay store below */
+static slv_joincap_nonce_store slv_join_cap_nonces;
+/* Process-wide outcome counters (query_session): the gate belongs to the mixer, not to one room. Refusals are
+ * counted whether or not they were enforced, which is what the 0.6 soak reads. */
+static volatile gint slv_join_cap_seen;        /* joins that carried a capability */
+static volatile gint slv_join_cap_accepted;    /* verified, in context, fresh, unspent, current generation */
+static volatile gint slv_join_cap_enforced;    /* joins actually refused (knob on, declared room) */
+static volatile gint slv_join_cap_skewed;      /* accepted only because of the skew tolerance */
+static volatile gint slv_join_cap_refused[SLV_JOINCAP_STALE_GENERATION + 1];   /* by verdict */
 
 /* Phase 0 (§1.3): one avatar's standing as a listener in one room. KEYED PER ROOM BY DISPLAY (agent UUID), not per
  * session: every session with that display in the room follows the one record, and it survives a leave and rejoin
@@ -1280,6 +1302,93 @@ static void janus_slvoice_vis_load_knobs(void) {
 			"epochs and staleness are tracked and counted (would_silence_*); audio is unaffected\n", JANUS_SLVOICE_PACKAGE);
 }
 
+/* Phase 0 slice 0.4: the join-capability knobs from the process env (the entrypoint exports both and refuses to
+ * start when the requirement is on with no key). The secret is read into memory and never logged. */
+static void janus_slvoice_joincap_load_knobs(void) {
+	janus_mutex_init(&slv_join_cap_mutex);
+	memset(&slv_join_cap_nonces, 0, sizeof(slv_join_cap_nonces));
+	const char *req_env = getenv("JS_JOIN_CAP_REQUIRED");
+	int required = 0;
+	if(slv_vis_fail_closed_from_env(req_env, &required) == SLV_VIS_KNOB_INVALID)
+		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_JOIN_CAP_REQUIRED='%s' (want 0 or 1); the join capability is "
+			"NOT required\n", JANUS_SLVOICE_PACKAGE, req_env);
+	const char *key_env = getenv("JS_JOIN_CAP_SECRET");
+	if(key_env != NULL && *key_env != '\0') {
+		slv_join_cap_key_len = strlen(key_env);
+		slv_join_cap_key = g_strdup(key_env);
+	}
+	if(required && slv_join_cap_key == NULL) {
+		/* The entrypoint refuses to start in this state; a hand-started Janus can still reach it. Never enforce a
+		 * control with no key: that would refuse every join in a declared room for no security gain. */
+		JANUS_LOG(LOG_ERR, "[%s] JS_JOIN_CAP_REQUIRED=1 with an empty JS_JOIN_CAP_SECRET: nothing can be verified, so "
+			"the requirement is NOT enforced\n", JANUS_SLVOICE_PACKAGE);
+		required = 0;
+	}
+	slv_join_cap_required = required ? TRUE : FALSE;
+	if(slv_join_cap_required)
+		JANUS_LOG(LOG_INFO, "[%s] Join capability: REQUIRED in rooms created with vis_authority "
+			"(JS_JOIN_CAP_REQUIRED=1); key set, clock skew +/-%d s, replay store %d nonces\n",
+			JANUS_SLVOICE_PACKAGE, SLV_JOINCAP_SKEW_S, SLV_JOINCAP_NONCE_MAX);
+	else if(slv_join_cap_key != NULL)
+		JANUS_LOG(LOG_INFO, "[%s] Join capability: shadow (JS_JOIN_CAP_REQUIRED=0); key set, so capabilities are "
+			"verified and counted, and no join is refused\n", JANUS_SLVOICE_PACKAGE);
+	else
+		JANUS_LOG(LOG_INFO, "[%s] Join capability: OFF (JS_JOIN_CAP_REQUIRED=0, no JS_JOIN_CAP_SECRET); joins are "
+			"exactly as before\n", JANUS_SLVOICE_PACKAGE);
+}
+
+/* Verify one join's capability and count the outcome (design §11.4, in that order). Returns the verdict; the
+ * caller decides whether to enforce it. NEVER logs the capability, its payload or its nonce. */
+static slv_joincap_verdict janus_slvoice_joincap_verify(const char *cap, const char *display, const char *session_id,
+		int64_t room, guint64 auth_epoch, guint32 policy_gen, gboolean declared) {
+	static gint64 skew_warned_us = 0;   /* one skew WARN a minute (benign race: a log line) */
+	if(cap == NULL || *cap == '\0') {
+		/* Only a declared room counts a missing capability: A2A, static, harness and connector rooms are never
+		 * gated, so "no capability" is their normal state, not a finding. */
+		if(declared)
+			g_atomic_int_inc(&slv_join_cap_refused[SLV_JOINCAP_MISSING]);
+		return SLV_JOINCAP_MISSING;
+	}
+	g_atomic_int_inc(&slv_join_cap_seen);
+	if(slv_join_cap_key == NULL)
+		return SLV_JOINCAP_OK;   /* no key: nothing to verify against, and the join proceeds exactly as before */
+
+	slv_joincap parsed;
+	slv_joincap_verdict v = slv_joincap_parse(cap, slv_join_cap_key, slv_join_cap_key_len, &parsed);
+	if(v == SLV_JOINCAP_OK) {
+		int64_t now_s = (int64_t)time(NULL);
+		v = slv_joincap_check(&parsed, display, session_id, room, now_s, SLV_JOINCAP_SKEW_S);
+		if(v == SLV_JOINCAP_OK) {
+			int64_t offset = 0;
+			if(slv_joincap_used_skew(&parsed, now_s, &offset)) {
+				g_atomic_int_inc(&slv_join_cap_skewed);
+				gint64 mono = janus_get_monotonic_time();
+				if(skew_warned_us == 0 || mono - skew_warned_us > 60 * G_USEC_PER_SEC) {
+					skew_warned_us = mono;
+					JANUS_LOG(LOG_WARN, "[%s] join capability for %s in room %"PRId64" accepted only within the "
+						"clock-skew tolerance: %"PRId64" s off (tolerance +/-%d s); check NTP on both hosts\n",
+						JANUS_SLVOICE_PACKAGE, display ? display : "(no display)", room, offset, SLV_JOINCAP_SKEW_S);
+				}
+			}
+			janus_mutex_lock(&slv_join_cap_mutex);
+			v = slv_joincap_nonce_take(&slv_join_cap_nonces, parsed.nonce,
+				parsed.exp + SLV_JOINCAP_SKEW_S, now_s);
+			janus_mutex_unlock(&slv_join_cap_mutex);
+		}
+		if(v == SLV_JOINCAP_OK)
+			v = slv_joincap_generation(&parsed, auth_epoch, policy_gen);
+	}
+	if(v == SLV_JOINCAP_OK) {
+		g_atomic_int_inc(&slv_join_cap_accepted);
+		return v;
+	}
+	g_atomic_int_inc(&slv_join_cap_refused[v]);
+	JANUS_LOG(LOG_WARN, "[%s] join capability %s for %s in room %"PRId64" (%s)\n", JANUS_SLVOICE_PACKAGE,
+		slv_joincap_reason(v), display ? display : "(no display)", room,
+		(slv_join_cap_required && declared) ? "refused" : "counted only: not enforced here");
+	return v;
+}
+
 int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 	if(g_atomic_int_get(&stopping))
 		return -1;
@@ -1366,6 +1475,8 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 
 	/* Phase 0 slice 0.3: JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS and mixer_instance. */
 	janus_slvoice_vis_load_knobs();
+	/* Phase 0 slice 0.4: JS_JOIN_CAP_REQUIRED and JS_JOIN_CAP_SECRET. */
+	janus_slvoice_joincap_load_knobs();
 
 	/* Amendment 8: runtime spatial DSP overrides from [general]; metres->stored
 	 * converted once here, validated, defaults kept on any bad value. Must run
@@ -1691,6 +1802,28 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(vis, "stale_epoch_rejects", json_integer((json_int_t)qroom->vis_stale_epoch_rejects));
 		json_object_set_new(vis, "stale_generation_rejects", json_integer((json_int_t)qroom->vis_stale_generation_rejects));
 		json_object_set_new(vis, "records_full", json_integer((json_int_t)qroom->vis_records_full));
+		/* Phase 0 slice 0.4 (§11): the join-capability gate. PROCESS-WIDE, not per room: the gate is the mixer's.
+		 * Refusals are counted whether or not they were enforced, and `enforced` counts the joins actually
+		 * refused, so a soak can read "what would have been refused" with the knob still off. */
+		json_t *jcap = json_object();
+		json_object_set_new(jcap, "required", slv_join_cap_required ? json_true() : json_false());
+		json_object_set_new(jcap, "key_set", slv_join_cap_key != NULL ? json_true() : json_false());
+		json_object_set_new(jcap, "skew_s", json_integer(SLV_JOINCAP_SKEW_S));
+		json_object_set_new(jcap, "seen", json_integer(g_atomic_int_get(&slv_join_cap_seen)));
+		json_object_set_new(jcap, "accepted", json_integer(g_atomic_int_get(&slv_join_cap_accepted)));
+		json_object_set_new(jcap, "accepted_with_skew", json_integer(g_atomic_int_get(&slv_join_cap_skewed)));
+		json_object_set_new(jcap, "enforced_refusals", json_integer(g_atomic_int_get(&slv_join_cap_enforced)));
+		json_t *jcap_by_reason = json_object();
+		for(int ci = SLV_JOINCAP_MISSING; ci <= SLV_JOINCAP_STALE_GENERATION; ci++)
+			json_object_set_new(jcap_by_reason, slv_joincap_reason((slv_joincap_verdict)ci),
+				json_integer(g_atomic_int_get(&slv_join_cap_refused[ci])));
+		json_object_set_new(jcap, "refused", jcap_by_reason);
+		janus_mutex_lock(&slv_join_cap_mutex);
+		json_object_set_new(jcap, "nonces_live", json_integer(slv_joincap_nonce_count(&slv_join_cap_nonces)));
+		json_object_set_new(jcap, "nonces_taken", json_integer((json_int_t)slv_join_cap_nonces.taken));
+		json_object_set_new(jcap, "nonces_expired", json_integer((json_int_t)slv_join_cap_nonces.expired));
+		janus_mutex_unlock(&slv_join_cap_mutex);
+		json_object_set_new(vis, "join_cap", jcap);
 		/* This session's own standing: its row (1..4) and, when armed, its record. */
 		json_object_set_new(info, "vis_row", json_integer(janus_slvoice_vis_row_locked(qroom, session->display, vnow)));
 		slv_vis_record *vrec = session->display != NULL ? g_hash_table_lookup(qroom->vis_records, session->display) : NULL;
@@ -2747,6 +2880,9 @@ static void *janus_slvoice_handler(void *data) {
 	janus_slvoice_message *msg = NULL;
 	int error_code = 0;
 	char error_cause[512];
+	/* Slice 0.4: a machine-readable reason beside error_cause, for the refusals a sim branches on. NULL for
+	 * every error that had none, so an old sim sees exactly the reply it saw before. */
+	const char *error_reason = NULL;
 
 	while(g_atomic_int_get(&initialized) && !g_atomic_int_get(&stopping)) {
 		msg = g_async_queue_pop(messages);
@@ -2891,6 +3027,29 @@ static void *janus_slvoice_handler(void *data) {
 				error_code = JANUS_SLVOICE_ERROR_INVALID_SDP;
 				g_snprintf(error_cause, 512, "join requires a JSEP offer");
 				goto respond;
+			}
+			/* Phase 0 slice 0.4 (design §11): the sim-issued join capability, checked before negotiate so a
+			 * refusal costs nothing and leaves nothing to undo. ENFORCED only when JS_JOIN_CAP_REQUIRED is on
+			 * AND the room was created with vis_authority; in every other room, and with the knob off, the
+			 * verdict is counted and the join proceeds exactly as it did before this slice. */
+			{
+				const char *join_cap = json_string_value(json_object_get(root, "join_cap"));
+				const char *cap_session = json_string_value(json_object_get(root, "session_id"));
+				janus_mutex_lock(&room->mutex);
+				gboolean cap_declared = room->vis_declared;
+				guint64 cap_epoch = room->vis_auth_epoch;
+				guint32 cap_gen = room->vis_policy_gen;
+				janus_mutex_unlock(&room->mutex);
+				slv_joincap_verdict cap_v = janus_slvoice_joincap_verify(join_cap, display, cap_session,
+					(int64_t)room_id, cap_epoch, cap_gen, cap_declared);
+				if(cap_v != SLV_JOINCAP_OK && slv_join_cap_required && cap_declared) {
+					g_atomic_int_inc(&slv_join_cap_enforced);
+					janus_refcount_decrease(&room->ref);
+					error_code = JANUS_SLVOICE_ERROR_JOIN_CAP;
+					error_reason = slv_joincap_reason(cap_v);
+					g_snprintf(error_cause, 512, "Join capability refused (%s)", error_reason);
+					goto respond;
+				}
 			}
 			/* Join-time capacity cap (item 1, docs/voice/scaling-assessment.md).
 			 * Reject the (cap+1)th joiner BEFORE negotiate/media_alloc so nothing needs
@@ -3094,6 +3253,8 @@ respond:
 			json_object_set_new(event, "audiobridge", json_string("event"));
 			json_object_set_new(event, "error_code", json_integer(error_code));
 			json_object_set_new(event, "error", json_string(error_cause));
+			if(error_reason != NULL)
+				json_object_set_new(event, "reason", json_string(error_reason));
 			JANUS_LOG(LOG_WARN, "[%s-%p] Request error %d: %s\n",
 				JANUS_SLVOICE_PACKAGE, msg->handle, error_code, error_cause);
 		}

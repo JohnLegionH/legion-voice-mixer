@@ -427,14 +427,19 @@ apply, and an empty set passes.
 - **epoch match:** `record.epoch == room.auth_epoch`, and `auth_epoch` was not rejected or superseded.
 - **policy fresh:** `now - record.confirmed_us <= JS_VIS_STALE_MS` **and** `record.stale == false`.
 
-**Listener rule** (L's own standing):
+**Listener rule** (L's own standing). **Three rows are reachable in the mixer as built; row 2 collapses into row 1**
+(amended 2026-09-15, slice 0.4, after the 0.3 finding):
 
 | # | armed? | epoch match? | policy fresh? | L's mix |
 |---|---|---|---|---|
 | 1 | no | — | — | **silence** |
-| 2 | yes | no | — (not evaluated) | **silence**; a current-epoch heartbeat does not change this |
+| 2 | yes | no | — (not evaluated) | **unreachable as built; the listener is row 1 instead.** Adopting a new epoch, or a takeover, removes every record, so no record from another epoch survives to be evaluated. Same outcome: **silence**, and a current-epoch heartbeat does not change it |
 | 3 | yes | yes | no | **silence** |
 | 4 | yes | yes | yes | **pass**, subject to L's `excluded` and `mod_muted` sets and the viewer's own mutes |
+
+Row 2 keeps its unit tests (`src/visauth.h` `slv_vis_row`, `tests/test_visauth.c`) as a **guard**: they fail if a
+future change ever leaves a foreign-epoch record in place, which is the condition row 2 describes. Only the live
+evidence split changes — rows 1, 3 and 4 have harness evidence, row 2 has unit tests only, by construction.
 
 **Pair rule.** S is audible and visible to L only if **L satisfies row 4 and S also satisfies row 4** in the
 same room.
@@ -762,3 +767,157 @@ oracle (`last_mix_rms`), with a test tone as the source.
    `JS_VIS_FAIL_CLOSED` stays off until this is designed and built, and the 0.6 soak checks it (§6.4 step 3).
 4. **A2A rooms.** They stay undeclared. Fail-closed for A2A needs the invitation registry to become an
    authority, which is a later phase.
+
+---
+
+## 11. The sim-issued join capability (slice 0.4)
+
+**Added 2026-09-15.** This section did not exist when 0.4 was briefed: the feature was specified only by one line
+in ledger O-46 ("a join secret, sim-minted, carried through provision") and one in the 2026-09-09 audit
+("sim-issued join capability (avatar, room, generation, expiry)"). It is written here before being built.
+
+**Correction to the 0.4 brief's field list.** The brief bound agent + session + room + expiry + nonce. That
+omitted **generation**, and the audit's list is right to include it: the session id ties a capability to one
+viewer session, but only the arming state ties it to the authority that was current when it was minted, so a
+capability minted before an epoch change does not survive one.
+
+### 11.1 What it is for
+
+O-46: the plugin's join is ungated. Anything holding `JS_API_SECRET` with network reach to the Janus client API
+can attach and join any room claiming any avatar's UUID as `display`, inheriting that avatar's exclusion column
+and roster identity. Janus itself checks `apisecret` on session create (`janus.c:1129`) and on every
+session-scoped request (`:1195`), so the secret plus network reach is the whole of today's gate.
+
+The capability is **defence in depth against a leaked `JS_API_SECRET`**, not a replacement for it. A holder of
+the secret can still create sessions and attach; it can no longer join a declared room as an avatar the sim did
+not just admit.
+
+### 11.2 Shape
+
+Minted by the sim, verified by the mixer, **never seen by the viewer**: the viewer talks to a region capability
+URL, and the sim's own Janus session performs the join (`JanusRoom.JoinRoom`). Nothing about this reaches the
+client, so it cannot be captured from a viewer.
+
+```
+join_cap = "v1." + b64url(payload) + "." + b64url(HMAC-SHA256(key, "v1." + b64url(payload)))
+payload  = "<agent>|<session>|<room>|<epoch>|<generation>|<iat>|<exp>|<nonce>"
+```
+
+| Field | Meaning |
+|---|---|
+| `agent` | the avatar UUID the join will claim as `display` |
+| `session` | the sim's viewer-session id (`JanusViewerSession.ViewerSessionID`), sent alongside as `session_id` |
+| `room` | the mixer room number the join names |
+| `epoch` | the sim authority's `room_epoch` at issue, 16 hex digits; `0000000000000000` when arming is off |
+| `generation` | that room's `policy_generation` at issue; `0` when arming is off |
+| `iat`, `exp` | issue and expiry, unix seconds; lifetime **60 s** |
+| `nonce` | 128 random bits, hex; one join per nonce |
+
+Base64url without padding, HMAC compared in constant time, key = a shared secret that is **not**
+`JS_API_SECRET` (a leak of one must not forge the other).
+
+### 11.3 Knobs, and what is required where
+
+| Knob | Side | Default | Meaning |
+|---|---|---|---|
+| `[WebRtcVoice] JoinCapabilityEnabled` | sim | **false** | mint and send `join_cap` + `session_id` |
+| `[JanusWebRtcVoice] JoinCapabilitySecret` | sim | *(unset)* | the HMAC key; unset means it cannot mint |
+| `JS_JOIN_CAP_REQUIRED` | mixer | **0** | `1` refuses a join to a **declared** room without a valid capability |
+| `JS_JOIN_CAP_SECRET` | mixer | *(unset)* | the same key. `JS_JOIN_CAP_REQUIRED=1` with this unset **refuses to start** (the O-65 discipline: never enforce a security control with no key) |
+
+**Scope: declared rooms only** (rooms created with `vis_authority`, §6.2), exactly as fail-closed is scoped. A2A
+rooms, static jcfg rooms, harness rooms and connector-only rooms are never gated, whatever the knob says.
+
+### 11.4 Validation, in order, with a distinguishable reason for each refusal
+
+Every refusal answers `error_code` 496 with a `reason` a sim can branch on; none echoes the capability.
+
+| Reason | Condition |
+|---|---|
+| `cap_missing` | the knob is on, the room is declared, and the join carried no capability |
+| `cap_malformed` | not three dot-separated parts, bad base64url, wrong field count, unparsable numbers |
+| `cap_bad_signature` | HMAC mismatch (constant-time) |
+| `cap_wrong_agent` | payload `agent` is not the join's `display` |
+| `cap_wrong_session` | payload `session` is not the join's `session_id` |
+| `cap_wrong_room` | payload `room` is not the join's `room` |
+| `cap_expired` | `exp` is in the past, or `iat` in the future, beyond the skew tolerance |
+| `cap_replayed` | this nonce has been seen |
+| `cap_replay_store_full` | the nonce store is full, so replay cannot be ruled out (§11.6) |
+| `cap_stale_generation` | the epoch or generation is not the room's current arming state (§11.5) |
+
+### 11.5 Generation, and why it is not the session id again
+
+The capability carries the room's `(epoch, generation)` as the sim believed them at issue. The mixer refuses when
+the epoch differs from its adopted `auth_epoch`, or when the generation is above the room's `policy_generation`
+(a generation the mixer has not seen). A capability minted under an older authority therefore dies with that
+authority instead of outliving it for its remaining lifetime.
+
+The audit's field list says "generation" alone. **Generation alone cannot express "did not survive an epoch
+change"**: generations restart at 1 in a new epoch, so an old capability can coincidentally match a new one. The
+epoch is bound with it for that reason; the refusal reason stays `cap_stale_generation` for both.
+
+**While `JS_JOIN_CAP_REQUIRED=0`, a generation mismatch is counted and logged, never refused.** That is what
+0.6's soak measures: a mismatch rate above zero in steady state means minting and arming disagree, and the knob
+must not be turned on until it is zero.
+
+**A capability admits; it does not arm.** It is not arming, grants no audibility, and does not touch a listener
+record; arming does not admit a join either. The two are independent controls that happen to read the same
+`(epoch, generation)`.
+
+### 11.6 The nonce store, bounded, and what happens when it fails
+
+One store per mixer process: nonce → expiry, capped at **4096** live entries, entries dropped once
+`exp + skew` has passed.
+
+- **Full:** the mixer refuses with `cap_replay_store_full` while enforcing, rather than admitting a join whose
+  replay status it cannot determine. Failing closed on the security control while the feature is off means: with
+  the knob off the join is admitted as today and the event is counted.
+- **After a mixer restart:** the store is empty, so **a capability replayed inside its remaining lifetime would
+  be accepted**. The window is at most the 60 s lifetime and only follows a restart. This is a real hole, small
+  and time-boxed, and is written down rather than implied. Closing it needs persistence or a
+  restart-crossing epoch in the capability, and neither is in Phase 0.
+- **Sizing:** 4096 nonces covers 4096 joins inside one 60 s lifetime, far above any real join rate on one mixer;
+  the cap exists so a flood cannot grow memory without bound.
+
+### 11.7 Clock skew
+
+Tolerance **±120 s**: an `exp` up to 120 s in the past and an `iat` up to 120 s in the future are accepted, and a
+join that is admitted only because of the tolerance logs a rate-limited WARN naming the observed offset. Beyond
+it, `cap_expired`.
+
+The number is chosen for **two hosts in different datacentres**, not for a single box: it is far above the drift
+an NTP-managed host shows (seconds at worst), and far below the value of a stolen capability, whose usefulness
+is measured in its 60 s lifetime. A tighter tolerance would refuse valid joins on ordinary clock wobble; a wider
+one would extend the life of a capability someone captured.
+
+### 11.8 Mixed versions
+
+| Sim | Mixer | Result |
+|---|---|---|
+| Old (no capability) | New, knob off | Today's behaviour. The join carries no `join_cap`; nothing is validated, counted or refused. |
+| Old (no capability) | New, knob **on** | Joins to **declared** rooms are refused `cap_missing`. This is the operator's explicit choice and the reason the knob exists; the deploy order is sim first, then the mixer knob (§11.9). Undeclared rooms are unaffected. |
+| New (minting) | Old | The old join branch reads `room`, `display`, `recorder` and the offer, and ignores every other key, so `join_cap` and `session_id` are ignored and the join succeeds exactly as today. |
+| New | New, knob off | Validated and counted, never refused. |
+| New | New, knob on | Enforced in declared rooms. |
+
+Neither direction degrades to a refused join while the knob is off, which is the default on both sides.
+
+### 11.9 Deploy order
+
+1. Mixer with `JS_JOIN_CAP_REQUIRED=0` (shadow): it validates what arrives and counts.
+2. Sim with `JoinCapabilityEnabled=true` and the shared secret set.
+3. Soak: every join to a declared room carries a capability that validates, and `cap_stale_generation` is 0.
+4. `JS_JOIN_CAP_REQUIRED=1`. Rollback is `0` and a container recreate; no sim change.
+
+### 11.10 What this does not close
+
+- **O-46 is NARROWED, not closed.** The capability attests what the sim decided; it does not make the sim's
+  decision safer. For a child agent the sim still picks the room from the viewer's own `parcel_local_id`
+  (**O-77**, `ProvisionParcelResolver`), so a capability can be minted for a room the viewer nominated. Closing
+  O-46 needs that proximity test too, and 0.4 does not attempt it.
+- **Connector peers and recorder taps** join from their own environment with `api_secret` and no sim-issued
+  capability, so a declared room with the knob on would refuse them. That is the **sibling of ledger O-88**
+  (connector and recorder arming): the same peers, the same undesigned question. **Whoever designs connector
+  arming must design connector capabilities in the same pass** — two parked rows on one underlying question is
+  how one of them gets forgotten. Until then, `JS_JOIN_CAP_REQUIRED` stays off for the same reason
+  `JS_VIS_FAIL_CLOSED` does.

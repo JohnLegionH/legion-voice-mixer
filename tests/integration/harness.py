@@ -85,6 +85,9 @@ class Config:
     #: a mixer started with `docker run` rather than compose (the 0.3 scratch mixer): S17 and S20 read its logs and
     #: restart it by this container name; empty = the compose service `janus`
     container: str = ""
+    #: slice 0.4: the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
+    #: Empty = S22-S24 skip (they cannot mint what the mixer would accept).
+    join_cap_secret: str = ""
 
 
 def read_env(path: Path) -> dict:
@@ -189,13 +192,17 @@ class TestPeer(ConnectorPeer):
     tone, viewer SLData, and crash() -- the PeerConnection dies and the peer tells Janus nothing more
     (no leave, no detach), as a crashed or unplugged viewer would."""
 
-    def __init__(self, cfg: Config, name: str, room: int, display: str):
+    def __init__(self, cfg: Config, name: str, room: int, display: str,
+                 join_cap: str | None = None, session_id: str | None = None):
         super().__init__({"janus_url": cfg.janus_url, "api_secret": cfg.api_secret,
                           "room": room, "display": display},
                          logging.getLogger(f"integration.peer.{name}"))
         self.name = name
         self.room = room
         self.display = display
+        #: Phase 0 slice 0.4: what the sim would send on the join; None sends neither key, as a pre-0.4 sim does.
+        self.join_cap = join_cap
+        self.session_id = session_id
         self.crashed = False
         #: SC-87: every {p, v} this peer received for each source display, in arrival order.
         self.dots: dict[str, list] = {}
@@ -207,6 +214,15 @@ class TestPeer(ConnectorPeer):
     def __repr__(self) -> str:
         sid, hid = self.ids
         return f"{self.name}(display={self.display[:8]}, room={self.room}, session={sid}, handle={hid})"
+
+    def join_extra(self) -> dict:
+        """Slice 0.4: the join capability and the viewer-session id the sim sends, when this peer has them."""
+        extra = {}
+        if self.join_cap is not None:
+            extra["join_cap"] = self.join_cap
+        if self.session_id is not None:
+            extra["session_id"] = self.session_id
+        return extra
 
     def local_track(self):
         return ToneTrack()
@@ -660,11 +676,15 @@ class NoMediaPeer(Control):
     keeps the Janus session alive, as the sim's long-poll does for a viewer). Janus never gets a
     connectivity check, so setup_media never fires and there is no PeerConnection to hang up."""
 
-    def __init__(self, cfg: Config, http: aiohttp.ClientSession, name: str, room: int, display: str):
+    def __init__(self, cfg: Config, http: aiohttp.ClientSession, name: str, room: int, display: str,
+                 join_cap: str | None = None, session_id: str | None = None):
         super().__init__(cfg, http)
         self.name = name
         self.room = room
         self.display = display
+        #: Phase 0 slice 0.4: what the sim would send on the join; both None is a pre-0.4 join.
+        self.join_cap = join_cap
+        self.session_id = session_id
         self.crashed = False
 
     @property
@@ -672,6 +692,8 @@ class NoMediaPeer(Control):
         return (self._janus.session_id, self._janus.handle_id)
 
     async def join(self) -> dict:
+        """The join reply, whatever it says: this peer is how a scenario reads a REFUSAL (error_code and the
+        slice 0.4 `reason`), where TestPeer.start would raise."""
         pc = RTCPeerConnection()
         try:
             pc.addTransceiver("audio", direction="sendrecv")
@@ -681,8 +703,12 @@ class NoMediaPeer(Control):
                               if not line.startswith(("a=candidate:", "a=end-of-candidates"))) + "\r\n"
         finally:
             await pc.close()
-        return await self.request({"request": "join", "room": self.room, "display": self.display},
-                                  jsep={"type": "offer", "sdp": sdp})
+        body = {"request": "join", "room": self.room, "display": self.display}
+        if self.join_cap is not None:
+            body["join_cap"] = self.join_cap
+        if self.session_id is not None:
+            body["session_id"] = self.session_id
+        return await self.request(body, jsep={"type": "offer", "sdp": sdp})
 
     async def stop(self) -> None:
         await self.close()
@@ -718,10 +744,12 @@ class Ctx:
         self.rooms.add(room)
         return room
 
-    async def join(self, name: str, room: int, display: str | None = None) -> TestPeer:
-        """create (486 = already there) then join, the sim's order."""
-        await self.control.create_room(room, f"integration {self.name}")
-        peer = TestPeer(self.cfg, name, room, display or new_display())
+    async def join(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
+                   join_cap: str | None = None, session_id: str | None = None) -> TestPeer:
+        """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
+        sim would send; both None is a pre-0.4 join."""
+        await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
+        peer = TestPeer(self.cfg, name, room, display or new_display(), join_cap=join_cap, session_id=session_id)
         self.peers.append(peer)
         return await peer.start()
 
@@ -732,13 +760,19 @@ class Ctx:
         self.peers.append(peer)
         return await peer.start(timeout=20.0)
 
-    async def join_without_media(self, name: str, room: int, display: str | None = None) -> NoMediaPeer:
-        """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer)."""
-        await self.control.create_room(room, f"integration {self.name}")
-        peer = await NoMediaPeer(self.cfg, self.http, name, room, display or new_display()).open()
+    async def join_without_media(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
+                                 join_cap: str | None = None, session_id: str | None = None,
+                                 expect_join: bool = True) -> NoMediaPeer:
+        """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer). Slice 0.4:
+        with expect_join False the reply is kept on the peer as `.join_reply` instead of raising, which is how a
+        scenario reads a refusal's reason."""
+        await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
+        peer = await NoMediaPeer(self.cfg, self.http, name, room, display or new_display(),
+                                 join_cap=join_cap, session_id=session_id).open()
         self.background.append(peer)   # teardown stops it: detach + destroy its Janus session
         data = await peer.join()
-        if data.get("audiobridge") != "joined":
+        peer.join_reply = data
+        if expect_join and data.get("audiobridge") != "joined":
             raise Fail(f"{name} join (no media) into room {room}", data)
         return peer
 

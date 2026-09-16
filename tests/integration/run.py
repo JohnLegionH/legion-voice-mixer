@@ -50,6 +50,9 @@ def parse_args(argv):
                    help="S13: coturn shared secret; credentials are derived as a TURN REST API would")
     p.add_argument("--turn-user", default="", help="S13: static TURN username (instead of --turn-secret)")
     p.add_argument("--turn-pwd", default="", help="S13: static TURN password")
+    p.add_argument("--join-cap-secret", default="",
+                   help="S22-S24 (slice 0.4): the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join "
+                        "capabilities as the sim does; without it those scenarios are skipped")
     p.add_argument("--container", default="",
                    help="S17/S20: a mixer started with `docker run` (the 0.3 fail-closed scratch mixer): read its logs "
                         "and restart it by this container name instead of the compose service")
@@ -84,6 +87,7 @@ async def main_async(args) -> int:
         turn_user=turn_user,
         turn_pwd=turn_pwd,
         container=args.container,
+        join_cap_secret=args.join_cap_secret,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}

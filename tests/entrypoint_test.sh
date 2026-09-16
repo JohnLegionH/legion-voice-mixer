@@ -327,6 +327,34 @@ fi
 run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=True
 check "0.3 JS_VIS_FAIL_CLOSED=True -> the banner agrees with the plugin (case-insensitive): ENABLED" 'has "fail-closed ENABLED"'
 
+# ---- 0.4: join capability knobs. Environment only, and the secret is never printed. ----
+CAPSTUB="$WORK/janus-stub-cap"
+# The stub reports only whether the secret is set: ${VAR:-unset} would print the VALUE, which is exactly what the
+# "never printed" check below must not see from the harness itself.
+printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\nif [ -n "${JS_JOIN_CAP_SECRET:-}" ]; then cap_s=set; else cap_s=unset; fi\necho "STUB-ENV JS_JOIN_CAP_REQUIRED=${JS_JOIN_CAP_REQUIRED-<unset>} JS_JOIN_CAP_SECRET=$cap_s"\n' > "$CAPSTUB"
+chmod +x "$CAPSTUB"
+CAP_SECRET_V="join-cap-SECRET-c1"
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$CAPSTUB"
+check "0.4 knobs unset -> Janus runs with JS_JOIN_CAP_REQUIRED=0 and no secret" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_JOIN_CAP_REQUIRED=0 JS_JOIN_CAP_SECRET=unset"'
+check "0.4 knobs unset -> the banner says shadow" 'has "INFO: join_cap_required=0 join_cap_secret=EMPTY: join capability shadow"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "0.4 knobs unset -> the generated config is still the pre-0.3 golden" 'golden0'
+fi
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$CAPSTUB" JS_JOIN_CAP_REQUIRED=1 JS_JOIN_CAP_SECRET="$CAP_SECRET_V"
+check "0.4 required with a secret -> starts, banner REQUIRED, secret reaches Janus" '[ "$RC" -eq 0 ] && has "INFO: join_cap_required=1 join_cap_secret=set: join capability REQUIRED in rooms with vis_authority" && has "STUB-ENV JS_JOIN_CAP_REQUIRED=1 JS_JOIN_CAP_SECRET=set"'
+check "0.4 required with a secret -> the secret value is never printed" '! has "$CAP_SECRET_V"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "0.4 required -> the generated config is still the golden (the knobs are environment only)" 'golden0'
+fi
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$CAPSTUB" JS_JOIN_CAP_REQUIRED=1
+check "0.4 required with an empty secret -> FATAL exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_JOIN_CAP_REQUIRED=1 with an empty JS_JOIN_CAP_SECRET" && ! has STUB-JANUS-RAN'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$CAPSTUB" JS_JOIN_CAP_SECRET="$CAP_SECRET_V"
+check "0.4 a secret with the requirement off -> shadow, still no secret in the output" '[ "$RC" -eq 0 ] && has "join_cap_required=0 join_cap_secret=set: join capability shadow" && ! has "$CAP_SECRET_V"'
+
 run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER=turn.example.test JS_TURN_PORT=5349 JS_TURN_TYPE=TLS JS_TURN_USER="$TURN_USER_V" JS_TURN_PWD="$TURN_PWD_V"
 check "A.3 static TURN -> starts" '[ "$RC" -eq 0 ] && has STUB-JANUS-RAN'
 check "A.3 static TURN -> each key written in the nat section" 'natkey turn_server "\"turn.example.test\"" && natkey turn_port 5349 && natkey turn_type "\"tls\"" && natkey turn_user "\"$TURN_USER_V\"" && natkey turn_pwd "\"$TURN_PWD_V\"" && ! section janus.jcfg nat | grep -Eq "^[[:space:]]*turn_rest_api"'

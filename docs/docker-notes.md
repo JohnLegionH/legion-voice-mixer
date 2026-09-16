@@ -456,6 +456,45 @@ before, and joins, the mix, presence, the roster and dots are unchanged. What do
 
 Rollback is `JS_VIS_FAIL_CLOSED=0` and a container recreate. The sim needs no change.
 
+### Join capability (Phase 0, 0.4)
+
+The plugin's join was ungated: Janus checks `api_secret` to reach the API at all, but the join itself accepted any
+`room` and any `display` (ledger O-46). The sim can now mint a short-lived capability for each join, bound to the
+agent, its viewer session, the room, the arming generation, an expiry and a one-shot nonce, and the mixer verifies
+it (`docs/voice/nonspatial-phase0-design.md` §11).
+
+| Knob | Default | Effect |
+|---|---|---|
+| `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join a room created with `vis_authority`, and never gates any other room |
+| `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key, shared with the sim. Not `JS_API_SECRET`. With `JS_JOIN_CAP_REQUIRED=1` and no key the container refuses to start |
+
+**The viewer never holds one.** The viewer talks to the region's capability URL; the sim's own Janus session
+performs the join, so the capability travels sim → mixer only.
+
+**Reading the counters** in `handle_info` → `plugin_specific.visibility.join_cap` (process-wide, because the gate
+is the mixer's, not a room's):
+- `seen`, `accepted`, `accepted_with_skew`;
+- `refused` — a count per reason: `cap_missing`, `cap_malformed`, `cap_bad_signature`, `cap_wrong_agent`,
+  `cap_wrong_session`, `cap_wrong_room`, `cap_expired`, `cap_replayed`, `cap_replay_store_full`,
+  `cap_stale_generation`. **Counted whether or not they were enforced**, so a soak reads what would be refused
+  while the knob is still off;
+- `enforced_refusals` — joins actually refused;
+- `nonces_live`, `nonces_taken`, `nonces_expired` — the bounded replay store (4096 live nonces).
+
+**Refusals on the wire:** `error_code` 496 with a `reason` naming which check failed. Nothing ever logs or echoes
+a capability, its payload or its nonce.
+
+**Clock skew:** ±120 s, far above NTP-managed drift between two hosts in different datacentres and far below the
+value of a stolen capability. A join admitted only inside that tolerance logs a rate-limited WARN naming the
+offset: fix NTP when you see it.
+
+**After a mixer restart** the replay store is empty, so a capability replayed inside its remaining lifetime (at
+most 60 s) would be accepted. Small, time-boxed, and written down in §11.6 rather than implied.
+
+**Before setting `1`.** The sim must be minting (`[WebRtcVoice] JoinCapabilityEnabled` with the shared secret),
+and connector peers and recorder taps must mint capabilities too — they do not yet, and a declared room would
+refuse them (ledger O-46's sibling, O-88). Rollback is `0` and a container recreate.
+
 ## Configuration compatibility rule
 
 Rebuilding or pulling a new image onto an existing `.env` must not silently change
@@ -521,6 +560,8 @@ its knobs have no "before".
 | `JS_ICE_DIAG_HISTORY` | `200` | no session diagnostics, and Janus's event broadcast off. The default adds diagnostics only: Janus events to a loopback collector, and a `handle_info` poll every 2 s per live session. Nothing about media is configured or blocked. `0` restores the old behaviour, with `janus.jcfg` byte-identical | slice A.5 |
 | `JS_VIS_FAIL_CLOSED` | `0` (shadow mode) | no visibility authority: an empty exclusion set meant "hear everyone" whether or not the sim had spoken. `0` keeps that exactly: the plugin tracks arming, epochs and staleness in rooms created with `vis_authority`, counts `would_silence_*`, and changes nothing audible. `1` silences unarmed or stale listeners and sources in those rooms only. **Do not set `1` while ledger O-88 is open.** Environment only: every generated config file is byte-identical either way | slice 0.3 (`4492dbc`) |
 | `JS_VIS_STALE_MS` | `8000` | n/a (no staleness window). Values below 7250 (2 × the sim's 1000 ms heartbeat + 5000 ms admin timeout + 250 ms) are raised to 7250 with a WARN | slice 0.3 (`4492dbc`) |
+| `JS_JOIN_CAP_REQUIRED` | `0` (shadow) | the plugin join was ungated: anything holding `JS_API_SECRET` could join any room as any avatar (ledger O-46). `0` keeps that exactly, and verifies and counts any capability that arrives. `1` requires a valid sim-issued capability to join a room created with `vis_authority`, and changes nothing in any other room. Environment only: no generated config changes either way | slice 0.4 |
+| `JS_JOIN_CAP_SECRET` | *(unset)* | n/a (no capability). The HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, deliberately **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start | slice 0.4 |
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 

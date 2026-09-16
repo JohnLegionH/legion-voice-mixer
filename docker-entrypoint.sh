@@ -65,6 +65,15 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 export JS_VIS_FAIL_CLOSED
 : "${JS_VIS_STALE_MS:=8000}"
 export JS_VIS_STALE_MS
+# Phase 0 slice 0.4 (docs/voice/nonspatial-phase0-design.md §11): the sim-issued join capability. 0 is shadow: a
+# capability that arrives is verified and counted, and no join is ever refused for it. 1 requires a valid one to
+# join a room the sim created with vis_authority, and nowhere else. JS_JOIN_CAP_SECRET is the HMAC key shared with
+# the sim's [JanusWebRtcVoice] JoinCapabilitySecret, deliberately NOT JS_API_SECRET. Neither changes any generated
+# config file. Do not set JS_JOIN_CAP_REQUIRED=1 while ledger O-88/O-46's connector question is open.
+: "${JS_JOIN_CAP_REQUIRED:=0}"
+export JS_JOIN_CAP_REQUIRED
+: "${JS_JOIN_CAP_SECRET:=}"
+export JS_JOIN_CAP_SECRET
 # Slice A.1: public address discovery and its periodic re-check (docs/docker-notes.md, "External access").
 : "${JS_PUBLIC_IP_DISCOVERY:=auto}"
 : "${JS_STUN_SERVER:=stun.l.google.com:19302}"
@@ -194,6 +203,21 @@ case "$(printf '%s' "$JS_VIS_FAIL_CLOSED" | tr '[:upper:]' '[:lower:]')" in
 	*)             vis_mode="fail-closed DISABLED (shadow mode)" ;;
 esac
 echo "[entrypoint] INFO: vis_fail_closed=${JS_VIS_FAIL_CLOSED} vis_stale_ms=${JS_VIS_STALE_MS}: ${vis_mode} (JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS; the plugin logs the effective values)"
+case "$(printf '%s' "$JS_JOIN_CAP_REQUIRED" | tr '[:upper:]' '[:lower:]')" in
+	1|true|yes|on) cap_mode="join capability REQUIRED in rooms with vis_authority" ;;
+	*)             cap_mode="join capability shadow (verified and counted, never refused)" ;;
+esac
+echo "[entrypoint] INFO: join_cap_required=${JS_JOIN_CAP_REQUIRED} join_cap_secret=$(secret_state "$JS_JOIN_CAP_SECRET"): ${cap_mode} (JS_JOIN_CAP_REQUIRED, JS_JOIN_CAP_SECRET)"
+# Never enforce a security control with no key: with the requirement on and no secret the plugin could verify
+# nothing, so every join to a declared room would be refused for no security gain. Fail closed on the config
+# instead, the way O-65 does for the API secrets.
+case "$(printf '%s' "$JS_JOIN_CAP_REQUIRED" | tr '[:upper:]' '[:lower:]')" in
+	1|true|yes|on)
+		if [ "$(secret_state "$JS_JOIN_CAP_SECRET")" = EMPTY ]; then
+			echo "[entrypoint] FATAL: JS_JOIN_CAP_REQUIRED=1 with an empty JS_JOIN_CAP_SECRET; refusing to start. Set JS_JOIN_CAP_SECRET=<the sim's [JanusWebRtcVoice] JoinCapabilitySecret> in .env, or set JS_JOIN_CAP_REQUIRED=0. See docs/docker-notes.md, \"Join capability\"." >&2
+			exit 1
+		fi ;;
+esac
 
 # ---- O-65: fail closed on empty secrets -----------------------------------
 # A blank secret was always an open API: an empty JS_API_SECRET leaves the Janus
