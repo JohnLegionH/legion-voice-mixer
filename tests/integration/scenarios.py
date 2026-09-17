@@ -18,8 +18,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, TestPeer, compose, displays,
-                                       fields, mixer_logs, mixer_restart, new_display, pick, until, wait_mixer_up)
+from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, TestPeer, displays,
+                                       fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
+                                       wait_mixer_up)
 from tests.integration.source_probe import own_candidates, parse_pair, verdict
 
 
@@ -114,9 +115,9 @@ async def s4_mixer_restart(ctx: Ctx) -> None:
     b = await ctx.join("B", r)
     await ctx.ready(a, b)
 
-    res = await compose(ctx.cfg, "restart", "janus")
+    res = await mixer_restart(ctx.cfg)
     if res.returncode != 0:
-        raise Fail("docker compose restart janus", (res.stderr or res.stdout)[-400:])
+        raise Fail(f"restart the mixer ({mixer_target(ctx.cfg)})", (res.stderr or res.stdout)[-400:])
     await wait_mixer_up(ctx.cfg, ctx.http)
 
     # The restart killed both Janus sessions; close what is left of them and start over.
@@ -163,12 +164,12 @@ async def s5_room_switch_grace(ctx: Ctx) -> None:
     if waited < grace - 1:
         raise Fail("R1 destroyed before its grace expired", {"waited_s": round(waited, 1), "grace_s": grace})
 
-    res = await compose(ctx.cfg, "logs", "--no-log-prefix", "--since", since, "janus")
-    m = re.search(rf"\[slvoice\] room {r1} destroyed after (\d+)s empty", res.stdout or "")
+    logs = await mixer_logs(ctx.cfg, since)
+    m = re.search(rf"\[slvoice\] room {r1} destroyed after (\d+)s empty", logs)
     if m is None:
         raise Fail(f"log line '[slvoice] room {r1} destroyed after <n>s empty'",
-                   {"compose_rc": res.returncode, "matches_for_other_rooms":
-                    re.findall(r"\[slvoice\] room \d+ destroyed after \d+s empty", res.stdout or "")[-3:]})
+                   {"read_from": mixer_target(ctx.cfg), "matches_for_other_rooms":
+                    re.findall(r"\[slvoice\] room \d+ destroyed after \d+s empty", logs)[-3:]})
     if int(m.group(1)) < grace:
         raise Fail("logged empty time shorter than the grace", {"logged_s": int(m.group(1)), "grace_s": grace})
 
@@ -257,13 +258,13 @@ async def s10_no_media_reap(ctx: Ctx) -> None:
     if after is not None and after.get("room") == r:
         raise Fail("G's handle still reports the room after the reap", pick(after))
 
-    res = await compose(ctx.cfg, "logs", "--no-log-prefix", "--since", since, "janus")
-    m = re.search(rf"\[slvoice\] {re.escape(dg)} reaped from room {r}: no media (\d+)s after join", res.stdout or "")
+    logs = await mixer_logs(ctx.cfg, since)
+    m = re.search(rf"\[slvoice\] {re.escape(dg)} reaped from room {r}: no media (\d+)s after join", logs)
     if m is None:
         raise Fail(f"log line '[slvoice] {dg} reaped from room {r}: no media <n>s after join'",
-                   {"compose_rc": res.returncode,
+                   {"read_from": mixer_target(ctx.cfg),
                     "reap_lines": re.findall(r"\[slvoice\] \S+ reaped from room \d+: no media \d+s after join",
-                                             res.stdout or "")[-3:]})
+                                             logs)[-3:]})
     if int(m.group(1)) < limit:
         raise Fail("logged no-media time shorter than the join timeout", {"logged_s": int(m.group(1)), "join_timeout_s": limit})
 
@@ -391,8 +392,7 @@ async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
     await a.close()
 
     async def record():
-        res = await compose(ctx.cfg, "exec", "-T", "janus", "legion-voice-selfcheck", "--session", str(hid), "--json",
-                            timeout=30.0)
+        res = await mixer_exec(ctx.cfg, "legion-voice-selfcheck", "--session", str(hid), "--json", timeout=30.0)
         try:
             data = json.loads(res.stdout or "{}")
         except ValueError:
@@ -1028,11 +1028,45 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
     if m.display in (room.get("stale_listeners") or []):
         raise Fail("§9 14: and does NOT list M", reply)
 
-    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: []}, mute={l.display: []},
-                                                epoch=e1, generation=100),
-                 "re-arming L", slvoice="applied", status="ok")
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    t_send = time.monotonic()
+    rearm = await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: []}, mute={l.display: []},
+                                           epoch=e1, generation=100)
+    t_reply = time.monotonic()
+    _check_reply(rearm, "re-arming L", slvoice="applied", status="ok")
     hb.listeners = {l.display: 100, m.display: 3, src.display: 3}
-    await ctx.until_info(l, _audible, "§9 14: a replace for L restores it")
+    t_listeners = time.monotonic()
+    try:
+        await ctx.until_info(l, _audible, "§9 14: a replace for L restores it")
+    except Fail as failure:
+        await _capture_o95(ctx, r, l, m, hb, rearm, since, t_send, t_reply, t_listeners, failure)
+        raise
+
+
+async def _capture_o95(ctx, r, l, m, hb, rearm, since, t_send, t_reply, t_listeners, failure) -> None:
+    """O-95: everything needed to classify a failed restore, taken at the moment of failure. Written to
+    $O95_CAPTURE_DIR (default: the current directory) as o95-<room>.json, and summarised on stdout."""
+    import os
+    t_fail = time.monotonic()
+    rel = lambda t: round(t - t_send, 3)
+    info_l = await ctx.info(l)
+    info_m = await ctx.info(m)
+    logs = await mixer_logs(ctx.cfg, since)
+    capture = {
+        "room": r, "L": l.display, "M": m.display,
+        "timing_s_from_replace_send": {"replace_reply": rel(t_reply), "heartbeat_listeners_updated": rel(t_listeners),
+                                       "assertion_failed": rel(t_fail)},
+        "replace_reply": rearm,
+        "L_handle_info": info_l, "M_vis_row": (info_m or {}).get("vis_row"),
+        "heartbeats_near_replace": [{"sent": rel(s), "replied": rel(rp), "L_generation_sent": ls.get(l.display),
+                                     "room_reply": rr} for s, rp, ls, rr in hb.history if s >= t_send - 2.0],
+        "mixer_log_for_room": [ln for ln in logs.splitlines() if str(r) in ln or l.display in ln],
+        "failure": str(failure),
+    }
+    path = os.path.join(os.environ.get("O95_CAPTURE_DIR", "."), f"o95-{r}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(capture, f, indent=2, default=str)
+    print(f"      S26 O-95 capture written: {path}", flush=True)
 
 
 async def s27_out_of_order_generation(ctx: Ctx) -> None:

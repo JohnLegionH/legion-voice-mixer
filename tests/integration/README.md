@@ -37,7 +37,7 @@ self-heals; pass `--no-restart` when people are talking.
 | `--grace N` | `60` | the mixer's `JS_EMPTY_ROOM_GRACE_S`; S5 waits it out, so a short grace (set it in `.env`, `docker compose up -d janus`) makes a full run fast |
 | `--join-timeout N` | `30` | the mixer's `JS_JOIN_MEDIA_TIMEOUT_S`; S10 waits it out (a short value in `.env` makes a full run faster) |
 | `--no-restart` | off | skip S4 and S20 |
-| `--container NAME` | none | a mixer started with `docker run` (the 0.3/0.4 scratch mixers): S17 reads `docker logs NAME`, S20 runs `docker restart NAME` |
+| `--container NAME` | none | a mixer started with `docker run` (a scratch mixer): EVERY log read, exec and restart addresses it (S4 and S20 `docker restart NAME`; S5, S10, S17, S26 (its O-95 capture), S27, S29, S31, S32 `docker logs NAME`; S14 `docker exec NAME`). Without it they address the compose service `janus`, the live mixer (O-94) |
 | `--join-cap-secret S` | none | slice 0.4: the mixer's `JS_JOIN_CAP_SECRET`, so the harness can mint join capabilities as the sim does. Without it S22 and S23 skip |
 | `--stale-ms-started-with N` | none | slice 0.5: the `JS_VIS_STALE_MS` this mixer was **started** with, when that is below the §5 minimum (`scratch.sh up-clamp` uses 1000). Without it S31 skips, because a correctly configured mixer cannot show the clamp |
 | `--prove-fail` | off | slice 0.5: report a `SKIP` as a `FAIL`. Only for the "behaviour absent" proof runs against an older image, where a scenario that merely skips proves nothing. **Never for a reporting run** |
@@ -113,7 +113,9 @@ shown wrong; report it, do not bend the scenario to pass.
 **Phase 0 runs (0.3).** S15 runs against the deployed mixer (fail-closed off). S16-S20 need a mixer with
 `JS_VIS_FAIL_CLOSED=1`, which must never be the live grid's: start a scratch container on other ports and pass
 `--janus-url`, `--admin-url`, its throwaway secrets and `--container <name>`. S21 needs the pre-0.3 image, also as
-a scratch container. `--container NAME` makes S17 read `docker logs NAME` and S20 run `docker restart NAME`.
+a scratch container. `--container NAME` makes every scenario read that container's logs, exec into it and restart it (O-94).
+
+**O-95 capture.** If S26's `a replace for L restores it` fails, it writes `o95-<room>.json` to `$O95_CAPTURE_DIR` (default: the current directory) with L's admin state, the replace and heartbeat timings, and the room's mixer log. Keep that file: it is what classifies O-95.
 
 **Phase 0 runs (0.5).** S25-S30, S32 and S33 need `JS_VIS_FAIL_CLOSED=1` and a normal window; S31 needs a mixer
 **started** below the §5 minimum. Both are scratch containers, never the live grid's — `scratch.sh up-fc`

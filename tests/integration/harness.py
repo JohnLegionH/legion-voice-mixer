@@ -82,8 +82,8 @@ class Config:
     turn_uri: str = ""
     turn_user: str = ""
     turn_pwd: str = ""
-    #: a mixer started with `docker run` rather than compose (the 0.3 scratch mixer): S17 and S20 read its logs and
-    #: restart it by this container name; empty = the compose service `janus`
+    #: a mixer started with `docker run` rather than compose (a scratch mixer): EVERY log read, exec and restart (S4, S5,
+    #: S10, S14, S17, S20, S26, S27, S29, S31, S32) addresses this container name (O-94); empty = the compose service `janus`
     container: str = ""
     #: slice 0.4: the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
     #: Empty = S22-S24 skip (they cannot mint what the mixer would accept).
@@ -584,6 +584,8 @@ class Heartbeater:
         self.last_sent = 0.0
         self.last_reply: dict | None = None
         self.last_error: str | None = None
+        #: O-95 capture: one entry per heartbeat, (monotonic sent, monotonic replied, listeners sent, this room's reply).
+        self.history: list = []
 
     def start(self) -> "Heartbeater":
         self._running.set()
@@ -596,9 +598,13 @@ class Heartbeater:
             async with self._lock:
                 try:
                     body = {"policy_generation": self.generation, "listeners": dict(self.listeners)}
+                    sent_at = time.monotonic()
                     self.last_reply = await self._admin.heartbeat(self.epoch, {self._room: body})
                     self.last_sent = time.monotonic()
                     self.sent += 1
+                    self.history.append((sent_at, self.last_sent, body["listeners"],
+                                         ((self.last_reply or {}).get("rooms") or {}).get(str(self._room))))
+                    del self.history[:-60]
                 except Exception as e:
                     self.last_error = repr(e)
             await asyncio.sleep(self._period)
@@ -886,6 +892,13 @@ async def mixer_restart(cfg: Config) -> subprocess.CompletedProcess:
     return await compose(cfg, "restart", "janus")
 
 
+def mixer_target(cfg: Config) -> str:
+    """What the harness's docker reads and writes address, for Fail details: the named container, or the compose service.
+    O-94: every log read, exec and restart goes through mixer_logs / mixer_exec / mixer_restart, never compose directly,
+    so a run against a scratch container (--container) never reads the live grid mixer."""
+    return f"container {cfg.container}" if cfg.container else "compose service janus"
+
+
 async def mixer_logs(cfg: Config, since: str) -> str:
     """The mixer's log since an RFC 3339 time, stdout and stderr together."""
     if cfg.container:
@@ -894,3 +907,11 @@ async def mixer_logs(cfg: Config, since: str) -> str:
     else:
         res = await compose(cfg, "logs", "--no-log-prefix", "--since", since, "janus")
     return (res.stdout or "") + (res.stderr or "")
+
+
+async def mixer_exec(cfg: Config, *args: str, timeout: float = 60.0) -> subprocess.CompletedProcess:
+    """Run a command inside the mixer under test: `docker exec <container>` or `docker compose exec -T janus`."""
+    if cfg.container:
+        return await asyncio.to_thread(subprocess.run, ["docker", "exec", cfg.container, *args], capture_output=True,
+                                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    return await compose(cfg, "exec", "-T", "janus", *args, timeout=timeout)

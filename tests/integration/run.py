@@ -61,8 +61,8 @@ def parse_args(argv):
                         "an older image, where a scenario that merely skips proves nothing. Never for a "
                         "reporting run")
     p.add_argument("--container", default="",
-                   help="S17/S20: a mixer started with `docker run` (the 0.3 fail-closed scratch mixer): read its logs "
-                        "and restart it by this container name instead of the compose service")
+                   help="a mixer started with `docker run` (a scratch mixer): every scenario reads its logs, execs into it "
+                        "and restarts it by this container name instead of the compose service (O-94)")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
 
