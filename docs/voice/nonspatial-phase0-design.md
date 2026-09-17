@@ -412,6 +412,29 @@ named in the batch gets `listener_gen = batch.policy_generation`.
 | Heartbeat names L with `g` | `g != L.listener_gen`, or L unarmed / from an older epoch | Mark `stale` (or leave unarmed); list L in `stale_listeners` / `unarmed_listeners`. |
 | Heartbeat omits an armed L | — | Disarm L (the authority no longer addresses it). |
 
+**Amendment 2026-09-17 (slice 0.7d, ledger O-95): a heartbeat can predate a batch it arrives after.** Heartbeats and
+batches are separate flights (§3: the heartbeat has its own in-flight flag), so a heartbeat built before a batch was
+answered can reach the mixer after that batch applied. Two orderings were constructed in 0.7d and both caused an
+audible dropout under fail-closed on the pre-0.7d mixer:
+- **A:** a `replace` for L applied at N+1, then a heartbeat built at N named L at N. The fourth row above marked L
+  stale, and a stale record stays stale until the next `replace` (`test_visauth` "ordering A"; harness S35 leg A).
+- **B:** an arming `replace` for a new listener L2 applied, then a heartbeat built before L2 existed omitted it. The
+  last row disarmed L2 (`test_visauth` "ordering B"; S35 leg B). This one happens at every join.
+
+The heartbeat existing `policy_generation` key could not order it: the sim fills it from the highest generation
+ALLOCATED (`VisAuthority.NextGeneration`, advanced when a batch is stamped, before it is sent), and the mixer never
+read it. The fix adds a key rather than redefining that one:
+- the sim sends `"as_of"` in each heartbeat room entry: the highest `policy_generation` the mixer has APPLIED in that
+  room for this authority when the heartbeat was built. It is read under the same lock as the listener generations the
+  entry reports;
+- the mixer compares it with the room's `vis_policy_gen` (highest accepted in the adopted epoch). **Below it, the entry
+  is OUTDATED:** it still counts for room liveness (epoch adoption, `vis_heartbeats`), but its `listeners` map is not
+  evaluated. There is no confirm, no stale and no disarm. It is counted in `heartbeats_outdated` (`handle_info`
+  visibility block);
+- an entry with no `as_of` (a pre-0.7d sim) is evaluated exactly as the table above says;
+- epoch adoption, takeover and the graceful stop are unchanged. The key exists only when
+  `VisibilityArmingEnabled` is true, because only then are heartbeats sent, so the knob-off payloads are unchanged.
+
 ---
 
 ## 2. Arming
@@ -483,6 +506,13 @@ at which generation. **It is not a policy.**
    - if `L.epoch == auth_epoch` and the generation matches, confirm L;
    - otherwise mark L stale or unarmed and report it.
 3. Disarm any armed listener the entry omits.
+
+**Amendment 2026-09-17 (slice 0.7d):** each room entry also carries `"as_of"`, the highest `policy_generation` the mixer
+had applied in that room when the sim built the heartbeat, for example
+`"226001844":{ "policy_generation":42, "as_of":42, "listeners":{...} }`. Steps 2 and 3 are skipped for an entry whose
+`as_of` is below the room's applied `policy_generation`: the entry is outdated, it keeps the room live, and it is counted
+in `heartbeats_outdated`. The ordering it closes is in the §1.3 amendment. An entry without `as_of` follows steps 1-3
+as written.
 
 **Normative:** a heartbeat **MUST NOT** confirm, arm or revalidate a listener record whose `epoch` differs
 from the heartbeat's `room_epoch`.

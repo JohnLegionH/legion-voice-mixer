@@ -570,12 +570,16 @@ class Heartbeater:
     naming `listeners` ({display: generation}, mutable while running). `last_sent` is the monotonic time the latest
     heartbeat's reply arrived, the mixer's latest confirmation."""
 
-    def __init__(self, admin: Admin, epoch: str, room: int, listeners: dict, generation: int = 1, period: float = 1.0):
+    def __init__(self, admin: Admin, epoch: str, room: int, listeners: dict, generation: int = 1, period: float = 1.0,
+                 as_of: int | None = None):
         self._admin = admin
         self.epoch = epoch
         self._room = room
         self.listeners = dict(listeners)
         self.generation = generation
+        #: Slice 0.7d: the highest policy_generation this sender has had applied to the room, sent as "as_of" (the 0.7d
+        #: sim sends it). None omits the key, as a pre-0.7d sim does.
+        self.as_of = as_of
         self._period = period
         self._running = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -598,6 +602,8 @@ class Heartbeater:
             async with self._lock:
                 try:
                     body = {"policy_generation": self.generation, "listeners": dict(self.listeners)}
+                    if self.as_of is not None:
+                        body["as_of"] = self.as_of
                     sent_at = time.monotonic()
                     self.last_reply = await self._admin.heartbeat(self.epoch, {self._room: body})
                     self.last_sent = time.monotonic()

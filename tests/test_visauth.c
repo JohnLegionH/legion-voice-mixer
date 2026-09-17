@@ -910,6 +910,72 @@ static void test_replies(void) {
 	free_session(l);
 }
 
+/* Slice 0.7d (ledger O-95): a heartbeat and a batch are separate flights, so a heartbeat the sim BUILT before a batch
+ * succeeded can ARRIVE after it. Two orderings, constructed rather than raced:
+ *   A  a replace for L is applied at N+1, then a heartbeat built at N arrives naming L at N;
+ *   B  an arming replace for a new listener L2 is applied, then a heartbeat built before L2 existed arrives omitting it.
+ * The heartbeat carries "as_of", the highest policy_generation its sender had successfully sent to the room when it
+ * built it. One below the room's applied generation is OUTDATED: it keeps the room live and its listeners map is not
+ * evaluated. A heartbeat with no as_of (an older sim) keeps today's behaviour. */
+static json_t *heartbeat_as_of(const char *epoch, guint64 room, int as_of, const char *listeners) {
+	return admin("{\"request\":\"peer_ctl_heartbeat\",\"room_epoch\":\"%s\",\"interval_ms\":1000,\"rooms\":{\"%" G_GUINT64_FORMAT
+		"\":{\"policy_generation\":%d,\"as_of\":%d,\"listeners\":%s}}}", epoch, room, as_of, as_of, listeners);
+}
+
+static void test_heartbeat_ordering(void) {
+	slv_vis_fail_closed = TRUE;
+	slv_vis_stale_ms = 8000;
+	janus_slvoice_room *room = new_room(3401, TRUE);
+	janus_slvoice_session *l = new_session("L"), *s = new_session("S"), *l2 = new_session("L2");
+	join(room, s, NULL);
+	join(room, l, NULL);
+	tone_src src = { s, 0 };
+	tone_prime(&src);
+	drop(arm(3401, E1, 1, "L", "S"));
+	drop(heartbeat_as_of(E1, 3401, 1, "{\"L\":1,\"S\":1}"));
+	run_ticks(room, &src, 1, 5);
+	CHECK(row_of(room, "L") == 4 && l->last_mix_rms > 0.05, "ordering: L armed at generation 1 hears S");
+
+	/* A: the replace for L applies at 2; the heartbeat that arrives next was built at 1 and names L at 1. */
+	drop(arm(3401, E1, 2, "L", NULL));
+	guint64 beats = room->vis_heartbeats;
+	json_t *r = heartbeat_as_of(E1, 3401, 1, "{\"L\":1,\"S\":1}");
+	CHECK(!list_has(room_reply(r, 3401), "stale_listeners", "L"),
+		"ordering A: a heartbeat built before L's replace (as_of 1 < applied 2) does not list L stale");
+	drop(r);
+	run_ticks(room, &src, 1, 5);
+	CHECK(record_of(room, "L") != NULL && !record_of(room, "L")->stale && row_of(room, "L") == 4 && l->last_mix_rms > 0.05,
+		"ordering A: L stays armed at row 4 and keeps hearing S");
+	CHECK(room->vis_heartbeats == beats + 1 && room->vis_heartbeats_outdated == 1,
+		"ordering A: the outdated heartbeat still counts for liveness, and heartbeats_outdated counts it");
+
+	/* B: L2 joins and is armed at 3; the heartbeat that arrives next was built at 2, before L2 existed. */
+	join(room, l2, NULL);
+	drop(arm(3401, E1, 3, "L2", NULL));
+	drop(heartbeat_as_of(E1, 3401, 2, "{\"L\":2,\"S\":1}"));
+	run_ticks(room, &src, 1, 5);
+	CHECK(record_of(room, "L2") != NULL && row_of(room, "L2") == 4 && l2->last_mix_rms > 0.05,
+		"ordering B: a heartbeat built before L2's arming (as_of 2 < applied 3) does not disarm L2, which keeps hearing S");
+	CHECK(room->vis_heartbeats_outdated == 2, "ordering B: counted as outdated");
+
+	/* A current heartbeat is evaluated exactly as before: omission still disarms. */
+	drop(heartbeat_as_of(E1, 3401, 3, "{\"L\":2,\"S\":1}"));
+	run_ticks(room, &src, 1, 3);
+	CHECK(row_of(room, "L2") == 1 && l2->last_mix_rms == 0.0 && room->vis_heartbeats_outdated == 2,
+		"ordering: a heartbeat at the applied generation (as_of 3) is evaluated, and its omission disarms L2");
+
+	/* An older sim sends no as_of: today's behaviour, a mismatched generation marks L stale. */
+	drop(arm(3401, E1, 4, "L", NULL));
+	r = heartbeat(E1, 3401, "{\"L\":3,\"S\":1}", FALSE);
+	CHECK(list_has(room_reply(r, 3401), "stale_listeners", "L") && record_of(room, "L")->stale,
+		"ordering: with no as_of the heartbeat is evaluated as before (older sim), so L at a lower generation goes stale");
+	drop(r);
+
+	free_session(l);
+	free_session(l2);
+	free_session(s);
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -925,6 +991,7 @@ int main(void) {
 	test_decision_table();
 	test_batch_rules();
 	test_heartbeat();
+	test_heartbeat_ordering();
 	test_undeclared_room_unaffected();
 	test_shadow_mode();
 	test_prejoin_and_rejoin();

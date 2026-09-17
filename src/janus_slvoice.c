@@ -453,6 +453,7 @@ typedef struct janus_slvoice_room {
 	guint64 vis_ws_pairs;           /* declared rooms, last tick: ordered pairs with a side not in row 4 */
 	guint64 vis_ws_listener_ticks;  /* declared rooms: vis_ws_listeners summed over every tick (catches brief windows) */
 	guint64 vis_heartbeats;         /* heartbeat room entries accepted */
+	guint64 vis_heartbeats_outdated;  /* slice 0.7d: accepted entries whose as_of was below vis_policy_gen (listeners not evaluated) */
 	guint64 vis_stale_epoch_rejects;       /* batches and heartbeat entries answered stale_epoch */
 	guint64 vis_stale_generation_rejects;  /* batches whose policy_generation was not above vis_policy_gen */
 	guint64 vis_records_full;       /* arming refused because vis_records held SLV_VIS_MAX_RECORDS */
@@ -1816,6 +1817,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(vis, "would_silence_pairs", json_integer((json_int_t)qroom->vis_ws_pairs));
 		json_object_set_new(vis, "would_silence_listener_ticks", json_integer((json_int_t)qroom->vis_ws_listener_ticks));
 		json_object_set_new(vis, "heartbeats", json_integer((json_int_t)qroom->vis_heartbeats));
+		json_object_set_new(vis, "heartbeats_outdated", json_integer((json_int_t)qroom->vis_heartbeats_outdated));
 		json_object_set_new(vis, "stale_epoch_rejects", json_integer((json_int_t)qroom->vis_stale_epoch_rejects));
 		json_object_set_new(vis, "stale_generation_rejects", json_integer((json_int_t)qroom->vis_stale_generation_rejects));
 		json_object_set_new(vis, "records_full", json_integer((json_int_t)qroom->vis_records_full));
@@ -2566,8 +2568,24 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 					JANUS_SLVOICE_PACKAGE, room->room_id, epoch, n);
 			} else {
 				room->vis_heartbeats++;
-				janus_slvoice_vis_heartbeat_listeners_locked(room, json_is_object(rval) ? json_object_get(rval, "listeners") : NULL,
-					now, stale, unarmed);
+				/* Slice 0.7d (ledger O-95): a heartbeat and a batch are separate flights, so a heartbeat the sim built
+				 * before a batch succeeded can arrive after it. Evaluated, it would mark a just-replaced listener stale
+				 * (it names the old generation) or disarm a just-armed one (it predates it). "as_of" is the highest
+				 * policy_generation the sender had successfully sent to this room when it built the heartbeat; below
+				 * the generation this room has applied in this epoch, the entry is OUTDATED. The adoption above has
+				 * already counted it for liveness; its listeners map is not evaluated: no confirm, no stale, no
+				 * disarm. An entry with no as_of (a pre-0.7d sim) is evaluated exactly as before. */
+				json_t *jas_of = json_is_object(rval) ? json_object_get(rval, "as_of") : NULL;
+				if(json_is_integer(jas_of) && json_integer_value(jas_of) >= 0
+						&& (guint64)json_integer_value(jas_of) < (guint64)room->vis_policy_gen) {
+					room->vis_heartbeats_outdated++;
+					JANUS_LOG(LOG_VERB, "[%s] room %"PRIu64": peer_ctl_heartbeat as_of %"JSON_INTEGER_FORMAT" is below the "
+						"applied policy_generation %u: outdated, listeners not evaluated\n", JANUS_SLVOICE_PACKAGE,
+						room->room_id, json_integer_value(jas_of), room->vis_policy_gen);
+				} else {
+					janus_slvoice_vis_heartbeat_listeners_locked(room, json_is_object(rval) ? json_object_get(rval, "listeners") : NULL,
+						now, stale, unarmed);
+				}
 			}
 			janus_slvoice_vis_reply_room_locked(rout, room, status, stale, unarmed);
 			janus_mutex_unlock(&room->mutex);

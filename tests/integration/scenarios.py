@@ -995,13 +995,16 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
     await _mode(ctx, l, want_fail_closed=True)
 
     e1 = _epoch(1)
-    hb = Heartbeater(ctx.admin, e1, r, {l.display: 1, m.display: 1, src.display: 1}).start()
+    # Slice 0.7d: as_of rides along as the 0.7d sim sends it, updated in the same step as the listener map, so a heartbeat
+    # built before a batch applied is outdated at the mixer instead of racing it (O-95).
+    hb = Heartbeater(ctx.admin, e1, r, {l.display: 1, m.display: 1, src.display: 1}, as_of=0).start()
     ctx.background.append(hb)
     armed = await ctx.admin.peer_ctl_batch(r, "replace",
                                            excl={l.display: [], m.display: [], src.display: []},
                                            mute={l.display: [], m.display: [], src.display: []},
                                            epoch=e1, generation=1)
     _check_reply(armed, "arming L, M and SRC", slvoice="applied", status="ok", policy_generation=1)
+    hb.as_of = 1
     await ctx.until_info(l, _audible, "L hears SRC")
     await ctx.until_info(m, _audible, "M hears SRC")
 
@@ -1014,6 +1017,7 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
         _check_reply(reply, f"§9 25: the reply echoes the highest applied generation ({gen})",
                      slvoice="applied", status="ok", policy_generation=gen)
     hb.listeners = {l.display: 3, m.display: 3, src.display: 3}
+    hb.as_of = 3
     await ctx.until_info(l, _audible, "still audible at generation 3")
 
     # L alone is named at a generation ABOVE what the mixer stored: L goes stale, M is untouched.
@@ -1035,6 +1039,7 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
     t_reply = time.monotonic()
     _check_reply(rearm, "re-arming L", slvoice="applied", status="ok")
     hb.listeners = {l.display: 100, m.display: 3, src.display: 3}
+    hb.as_of = 100
     t_listeners = time.monotonic()
     try:
         await ctx.until_info(l, _audible, "§9 14: a replace for L restores it")
@@ -1466,6 +1471,66 @@ async def s34_connector_join_capability(ctx: Ctx) -> None:
         raise Fail("S34: and it is still running, not given up", repr(retrying._task.exception()))
 
 
+# ---- Phase 0 slice 0.7d: heartbeat ordering against batches (ledger O-95) --------------------------------------------
+# A heartbeat and a batch are separate flights, so a heartbeat the sim built before a batch succeeded can arrive after it.
+# S35 CONSTRUCTS both orderings instead of racing them: the background heartbeater is paused, the batch is applied, and a
+# heartbeat built "before" it (as_of one below) is sent by hand.
+
+
+async def s35_heartbeat_ordering(ctx: Ctx) -> None:
+    """O-95 / slice 0.7d. Fail-closed on, declared room, SRC talking throughout.
+    Leg A: L armed and hearing; a replace for L at N+1; then a heartbeat built at N naming L at N. L is not stale, stays
+    at row 4 and keeps hearing for 2 s. Leg B: L2 armed by a replace; then a heartbeat built before that replace, which
+    omits L2. L2 stays armed and hears."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    src = await ctx.join("SRC", r)
+    l = await ctx.join("L", r)
+    await ctx.ready(src, l)
+    await _mode(ctx, src, want_fail_closed=True)
+
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {src.display: 1, l.display: 1}, as_of=1).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={src.display: [], l.display: []},
+                                                mute={src.display: [], l.display: []}, epoch=e1, generation=1),
+                 "arming SRC and L", slvoice="applied", status="ok")
+    await ctx.until_info(l, lambda i: _audible(i) and i.get("vis_row") == 4, "S35: L armed and hearing SRC")
+
+    # ---- leg A ----
+    await hb.pause()
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: []}, mute={l.display: []},
+                                                epoch=e1, generation=2),
+                 "leg A: the replace for L at generation 2", slvoice="applied", status="ok")
+    late = await ctx.admin.heartbeat(e1, {r: {"policy_generation": 1, "as_of": 1,
+                                              "listeners": {src.display: 1, l.display: 1}}})
+    room = (late.get("rooms") or {}).get(str(r)) or {}
+    if l.display in (room.get("stale_listeners") or []):
+        raise Fail("S35 leg A: a heartbeat built before L's replace does not list L in stale_listeners", late)
+    hb.listeners = {src.display: 1, l.display: 2}
+    hb.as_of = 2
+    hb.resume()
+    await _hold(ctx, l, lambda i: _audible(i) and i.get("vis_row") == 4,
+                "S35 leg A: L stays at row 4 and its audio does not drop for 2 s after the late heartbeat", 2.0)
+
+    # ---- leg B ----
+    l2 = await ctx.join("L2", r)
+    await ctx.ready(l2)
+    await hb.pause()
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l2.display: []}, mute={l2.display: []},
+                                                epoch=e1, generation=3),
+                 "leg B: the arming replace for L2 at generation 3", slvoice="applied", status="ok")
+    await ctx.admin.heartbeat(e1, {r: {"policy_generation": 2, "as_of": 2,
+                                       "listeners": {src.display: 1, l.display: 2}}})
+    hb.listeners = {src.display: 1, l.display: 2, l2.display: 3}
+    hb.as_of = 3
+    hb.resume()
+    await ctx.until_info(l2, lambda i: i.get("vis_row") == 4 and _audible(i),
+                         "S35 leg B: a heartbeat built before L2's arming leaves L2 armed, and L2 hears SRC")
+    await _hold(ctx, l2, lambda i: _audible(i) and i.get("vis_row") == 4,
+                "S35 leg B: and L2 keeps hearing for 2 s", 2.0)
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1523,4 +1588,6 @@ SCENARIOS = [
              "0.7a fail-closed on, O-88", s33_connector_arming_and_omission),
     Scenario("S34", "connector join capability: bare refused, configured joins, replay refused, 404 retries without joining",
              "0.7b join capability required, O-88, §11.10", s34_connector_join_capability),
+    Scenario("S35", "heartbeat ordering: a heartbeat built before a replace neither stales nor disarms what it applied",
+             "0.7d fail-closed on, O-95", s35_heartbeat_ordering),
 ]
