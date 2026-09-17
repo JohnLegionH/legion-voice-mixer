@@ -43,6 +43,13 @@ A running recorder declares itself at join (`"recorder": true`), and the mixer m
 The in-world disclosure that participants see comes from the sim registering the connector NPC
 (the `[CONNECTOR]` record), so still join under the registered `DISPLAY`.
 
+## Join capability (slice 0.7b)
+
+Against a mixer with `JS_JOIN_CAP_REQUIRED=1`, set `CONNECTOR_CAP_URL` (the region's
+`/voice/connector/<name>/join-cap`) and `CONNECTOR_CAP_SECRET` (the record's `CapabilitySecret`) in `recorder.env`,
+both or neither; see [../README.md](../README.md#join-capability-slice-07b). The recorder then fetches a capability
+before every join and never joins without one. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
+
 ## Running
 
     cp connectors/recorder/recorder.env.example connectors/recorder/recorder.env

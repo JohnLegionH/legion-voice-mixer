@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, compose, displays,
+from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, TestPeer, compose, displays,
                                        fields, mixer_logs, mixer_restart, new_display, pick, until, wait_mixer_up)
 from tests.integration.source_probe import own_candidates, parse_pair, verdict
 
@@ -1306,6 +1306,132 @@ async def s33_connector_arming_and_omission(ctx: Ctx) -> None:
         raise Fail("S33: L itself stays armed through the connector's omission", pick(info))
 
 
+# ---- Phase 0 slice 0.7b: the connector join capability (ledger O-88, design §11.10) ----------------------------
+# A connector peer is not exempted from JS_JOIN_CAP_REQUIRED: it fetches a sim-minted capability before every join.
+# S34 drives the REAL connector join code (common/peer.py + common/joincap.py, through TestPeer) against a stub of the
+# sim's endpoint that mints with the harness's own minter (_mint_cap, the sim's JoinCapability.Mint in Python).
+
+
+class CapStub:
+    """The sim's POST /voice/connector/<name>/join-cap, on loopback. mode: "ok" mints a fresh capability per request,
+    "replay" answers with the last one it granted, "404" answers 404 with an empty body (the sim's pre-auth answer)."""
+
+    BEARER = "s34-connector-bearer-secret-0123456789"
+
+    def __init__(self, key: str, display: str, room: int, session: str):
+        self._key, self.display, self.room, self.session = key, display, room, session
+        self.mode = "ok"
+        self.hits = {"ok": 0, "replay": 0, "404": 0, "unauthorised": 0}
+        self._last = None
+        self._runner = None
+        self.url = ""
+
+    async def start(self) -> "CapStub":
+        from aiohttp import web
+
+        async def handle(request):
+            if request.headers.get("Authorization") != "Bearer " + self.BEARER:
+                self.hits["unauthorised"] += 1
+                return web.Response(status=404)
+            self.hits[self.mode] += 1
+            if self.mode == "404":
+                return web.Response(status=404)
+            if self.mode == "replay" and self._last is not None:
+                return web.json_response(self._last)
+            now = int(time.time())
+            self._last = {"display": self.display, "room": self.room, "session_id": self.session,
+                          "join_cap": _mint_cap(self._key, self.display, self.session, self.room, iat=now),
+                          "expires": now + 60}
+            return web.json_response(self._last)
+
+        app = web.Application()
+        app.router.add_post("/voice/connector/S34/join-cap", handle)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}/voice/connector/S34/join-cap"
+        return self
+
+    async def stop(self) -> None:
+        if self._runner is not None:
+            await self._runner.cleanup()
+
+    def config(self, backoff=(0.2, 0.5)) -> dict:
+        return {"cap_url": self.url, "cap_secret": self.BEARER, "cap_backoff": backoff}
+
+
+async def _connector(ctx: Ctx, name: str, room: int, display: str, connector_cap) -> TestPeer:
+    """A connector peer started without Ctx.join's refusal check, so a scenario can read what the join got."""
+    peer = TestPeer(ctx.cfg, name, room, display, connector_cap=connector_cap)
+    ctx.peers.append(peer)
+    peer._task = asyncio.create_task(peer.run(), name=f"peer-{name}")
+    return peer
+
+
+async def _join_answer(peer: TestPeer, what: str, timeout: float = 20.0) -> dict:
+    done, _ = await asyncio.wait({peer._task, peer._join_result}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    if peer._join_result.done():
+        return peer._join_result.result()
+    if peer._task in done:
+        raise Fail(f"{what}: the peer died first", repr(peer._task.exception()))
+    raise Fail(f"{what}: no join answer within {timeout:.0f} s", None)
+
+
+async def s34_connector_join_capability(ctx: Ctx) -> None:
+    """O-88 / slice 0.7b, JS_JOIN_CAP_REQUIRED=1, declared room. A connector peer with no CONNECTOR_CAP_* is refused
+    cap_missing; configured against a healthy endpoint it joins; a capability replayed on a second join is refused
+    cap_replayed; and with the endpoint answering 404 the peer keeps retrying and sends no join at all."""
+    if not ctx.cfg.join_cap_secret:
+        raise Skip("--join-cap-secret not given: the harness cannot mint what this mixer would accept")
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    da, sa = new_display(), new_display()
+    anchor = await ctx.join("A", r, da, vis_authority=True, join_cap=_mint_cap(ctx.cfg.join_cap_secret, da, sa, r),
+                            session_id=sa)
+    await ctx.ready(anchor)
+    await _cap_mode(ctx, anchor, want_required=True)
+
+    npc, session = new_display(), new_display()     # what the sim's record would hold: the NPC id, its ViewerSessionId
+    stub = await CapStub(ctx.cfg.join_cap_secret, npc, r, session).start()
+    ctx.background.append(stub)
+
+    bare = await _connector(ctx, "BARE", r, npc, None)
+    answer = await _join_answer(bare, "S34: an unconfigured connector's join")
+    if answer.get("audiobridge") == "joined" or answer.get("error_code") != 496 or answer.get("reason") != "cap_missing":
+        raise Fail("S34: a connector with no CONNECTOR_CAP_* is refused with error_code 496 cap_missing", answer)
+    if sum(stub.hits.values()) != 0:
+        raise Fail("S34: an unconfigured connector never calls the capability endpoint", stub.hits)
+
+    good = await _connector(ctx, "CON", r, npc, stub.config())
+    answer = await _join_answer(good, "S34: a configured connector's join")
+    if answer.get("audiobridge") != "joined":
+        raise Fail("S34: configured, with the endpoint healthy, the connector joins", answer)
+    if stub.hits["ok"] != 1:
+        raise Fail("S34: exactly one capability was fetched for that one join", stub.hits)
+    await ctx.until_info(good, lambda i: i.get("join_cap_present") is True and i.get("join_cap_verdict") == "ok",
+                         "S34: the connector's session records a present capability verified ok")
+
+    stub.mode = "replay"
+    again = await _connector(ctx, "REPLAY", r, npc, stub.config())
+    answer = await _join_answer(again, "S34: a second join handed the same capability")
+    if answer.get("audiobridge") == "joined" or answer.get("error_code") != 496 or answer.get("reason") != "cap_replayed":
+        raise Fail("S34: a capability replayed on a second join is refused with error_code 496 cap_replayed", answer)
+
+    stub.mode = "404"
+    retrying = await _connector(ctx, "RETRY", r, npc, stub.config(backoff=(0.2, 0.4)))
+    await asyncio.sleep(3.0)
+    if retrying._join_result.done() or retrying.janus is not None:
+        raise Fail("S34: with the capability endpoint answering 404 the peer sends no join at all, never a bare one",
+                   {"join_answer": retrying._join_result.result() if retrying._join_result.done() else None,
+                    "janus_session": retrying.janus.session_id if retrying.janus else None})
+    if stub.hits["404"] < 4:
+        raise Fail("S34: with the capability endpoint answering 404 the peer keeps retrying", stub.hits)
+    if retrying._task.done():
+        raise Fail("S34: and it is still running, not given up", repr(retrying._task.exception()))
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1361,4 +1487,6 @@ SCENARIOS = [
              "0.5 fail-closed on, §9 13", s32_takeover_after_the_window),
     Scenario("S33", "connector arming: a recorder tap and a connector source are silent unarmed, heard armed, silent on omission",
              "0.7a fail-closed on, O-88", s33_connector_arming_and_omission),
+    Scenario("S34", "connector join capability: bare refused, configured joins, replay refused, 404 retries without joining",
+             "0.7b join capability required, O-88, §11.10", s34_connector_join_capability),
 ]

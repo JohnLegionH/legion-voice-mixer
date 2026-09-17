@@ -17,6 +17,7 @@ tests/test_sdp_redact
 
 # --- Secrets / local config (NEVER commit; use env.sample as the template) ---
 .env
+.env.bak-*
 secrets
 
 # --- Editor / OS cruft ---

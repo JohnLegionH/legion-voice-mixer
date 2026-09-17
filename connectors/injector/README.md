@@ -31,6 +31,13 @@ do not hear it.
 
 DISPLAY is stable across regionserver restarts from build 1.1.392-alpha+d347102272; set it once.
 
+## Join capability (slice 0.7b)
+
+Against a mixer with `JS_JOIN_CAP_REQUIRED=1`, set `CONNECTOR_CAP_URL` (the region's
+`/voice/connector/<name>/join-cap`) and `CONNECTOR_CAP_SECRET` (the record's `CapabilitySecret`) in `injector.env`,
+both or neither; see [../README.md](../README.md#join-capability-slice-07b). The injector then fetches a capability
+before every join and never joins without one. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
+
 ## Running
 
     cp connectors/injector/injector.env.example connectors/injector/injector.env

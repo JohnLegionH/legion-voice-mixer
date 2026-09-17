@@ -35,6 +35,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.sdp import candidate_from_sdp
 
 from common.janus import KEEPALIVE_SECONDS, JanusHttp
+from common.joincap import DEFAULT_BACKOFF, fetch_until_granted
 
 
 class ConnectorPeer:
@@ -61,6 +62,10 @@ class ConnectorPeer:
         """Extra members merged into the join request (SC-96: a recording peer adds "recorder": true)."""
         return {}
 
+    def on_identity(self, display: str, room: int) -> None:
+        """Slice 0.7b: the display and room this join uses, once a capability grant has supplied them."""
+        pass
+
     def on_audio_track(self, track) -> None:
         pass
 
@@ -78,6 +83,15 @@ class ConnectorPeer:
     async def run(self) -> None:
         cfg = self._cfg
         async with aiohttp.ClientSession() as http:
+            # Slice 0.7b: a peer configured for capabilities fetches one before EVERY join (this run is one join; a
+            # reconnect is a new run) and never joins without it.
+            grant = None
+            if cfg.get("cap_url"):
+                grant = await fetch_until_granted(http, cfg["cap_url"], cfg["cap_secret"], self._log, self._stopping,
+                                                  cfg.get("cap_backoff", DEFAULT_BACKOFF))
+                if grant is None:
+                    return   # stopped while waiting for a capability: nothing was created, nothing to tear down
+                self._adopt_grant(grant)
             janus = JanusHttp(cfg["janus_url"], cfg["api_secret"], http)
             await janus.create()
             await janus.attach()
@@ -104,8 +118,12 @@ class ConnectorPeer:
             offer = await self._pc.createOffer()
             await self._pc.setLocalDescription(offer)
 
+            join = {"request": "join", "room": cfg["room"], "display": cfg["display"], **self.join_extra()}
+            if grant is not None:
+                join["join_cap"] = grant["join_cap"]
+                join["session_id"] = grant["session_id"]
             await janus.message(
-                {"request": "join", "room": cfg["room"], "display": cfg["display"], **self.join_extra()},
+                join,
                 jsep={"type": self._pc.localDescription.type,
                       "sdp": self._pc.localDescription.sdp})
             await janus.trickle_completed()
@@ -119,6 +137,16 @@ class ConnectorPeer:
 
     def stop(self) -> None:
         self._stopping.set()
+
+    def _adopt_grant(self, grant: dict) -> None:
+        """The sim's grant is authoritative for display and room; an env value that disagrees loses, loudly."""
+        cfg = self._cfg
+        for key in ("display", "room"):
+            if cfg.get(key) not in (None, "") and cfg[key] != grant[key]:
+                self._log.warning("%s from the environment (%s) differs from the sim's capability grant (%s); "
+                                  "using the grant", key.upper(), cfg[key], grant[key])
+            cfg[key] = grant[key]
+        self.on_identity(cfg["display"], cfg["room"])
 
     # ---- event plumbing
 

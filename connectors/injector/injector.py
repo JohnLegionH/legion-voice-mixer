@@ -204,8 +204,15 @@ class Injector(ConnectorPeer):
         self._writer = (WavSegmentWriter(cfg["out_dir"], cfg["display"],
                                          cfg["segment_seconds"])
                         if cfg["record"] else None)
+        self._writer_display = cfg["display"]
         self._rx_task: asyncio.Task | None = None
         self.shutdown_note = ", close wav" if cfg["record"] else ""
+
+    def on_identity(self, display: str, room: int) -> None:
+        # Slice 0.7b: RECORD=1 segments are named for the display actually joined with (a capability grant may change it).
+        if self._writer is not None and display != self._writer_display:
+            self._writer = WavSegmentWriter(self._cfg["out_dir"], display, self._cfg["segment_seconds"])
+            self._writer_display = display
 
     def join_extra(self) -> dict:
         # SC-96: with RECORD=1 this peer is a recording tap; the mixer marks and logs it.

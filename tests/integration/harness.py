@@ -200,9 +200,12 @@ class TestPeer(ConnectorPeer):
     (no leave, no detach), as a crashed or unplugged viewer would."""
 
     def __init__(self, cfg: Config, name: str, room: int, display: str,
-                 join_cap: str | None = None, session_id: str | None = None, recorder: bool = False):
+                 join_cap: str | None = None, session_id: str | None = None, recorder: bool = False,
+                 connector_cap: dict | None = None):
+        # Slice 0.7b: connector_cap = {"cap_url", "cap_secret", "cap_backoff"} runs ConnectorPeer's own capability
+        # fetch (connectors/common/joincap.py) before the join, exactly as a configured recorder or injector does.
         super().__init__({"janus_url": cfg.janus_url, "api_secret": cfg.api_secret,
-                          "room": room, "display": display},
+                          "room": room, "display": display, **(connector_cap or {})},
                          logging.getLogger(f"integration.peer.{name}"))
         self.name = name
         self.room = room

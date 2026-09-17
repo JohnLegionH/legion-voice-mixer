@@ -27,9 +27,23 @@ def require_recording_opt_in(prog: str, environ=os.environ) -> None:
                  f"(spec section 3.5); refusing to start")
 
 
+def capability_env(prog: str, environ=os.environ) -> tuple:
+    """Slice 0.7b: CONNECTOR_CAP_URL and CONNECTOR_CAP_SECRET, both or neither. Neither returns (None, None) and the
+    join is exactly today's. One without the other is FATAL: a half-configured peer would otherwise join bare against a
+    mixer that requires a capability, and an operator should learn that at start, not from a refusal log."""
+    url = (environ.get("CONNECTOR_CAP_URL") or "").strip()
+    secret = environ.get("CONNECTOR_CAP_SECRET") or ""
+    if bool(url) != bool(secret):
+        have, missing = ("CONNECTOR_CAP_URL", "CONNECTOR_CAP_SECRET") if url else ("CONNECTOR_CAP_SECRET", "CONNECTOR_CAP_URL")
+        sys.exit(f"{prog}: FATAL: {have} is set but {missing} is not; set both (fetch a join capability from the sim "
+                 f"before every join) or neither")
+    return (url, secret) if url else (None, None)
+
+
 def base_env(prog: str) -> dict:
     """The env keys every peer needs. ROOM and DISPLAY come from the sim's
     registration line; JANUS_URL is compose-derived (see docker-compose.yml)."""
+    cap_url, cap_secret = capability_env(prog)
     cfg = {
         "janus_url": os.environ.get("JANUS_URL", "http://janus:14223/voice").rstrip("/"),
         "api_secret": os.environ.get("JANUS_API_SECRET", ""),
@@ -45,4 +59,9 @@ def base_env(prog: str) -> dict:
         cfg["room"] = int(cfg["room"])
     except ValueError:
         sys.exit(f"{prog}: ROOM must be an integer room number, got {cfg['room']!r}")
+    if cap_url:
+        # Slice 0.7b: the sim's grant supplies display and room at every join; the env values are the expectation
+        # it is compared against (common/peer.py warns when they disagree).
+        cfg["cap_url"] = cap_url
+        cfg["cap_secret"] = cap_secret
     return cfg

@@ -11,6 +11,22 @@ room under a sim-registered connector NPC identity:
 
     [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...> identity=derived
 
+## Join capability (slice 0.7b)
+
+A mixer with `JS_JOIN_CAP_REQUIRED=1` refuses a join into a declared room that carries no sim-minted capability, and
+connector peers are not exempted. To join such a room, give the record a secret on the sim side and the peer the
+matching pair:
+
+- sim: `[VoiceConnector.<name>] CapabilitySecret = <at least 32 characters>` (shorter is refused with a WARN), plus
+  `[WebRtcVoice] JoinCapabilityEnabled = true` and `[JanusWebRtcVoice] JoinCapabilitySecret` (= the mixer's
+  `JS_JOIN_CAP_SECRET`);
+- peer: `CONNECTOR_CAP_URL=http://<region host>:<region http port>/voice/connector/<name>/join-cap` and
+  `CONNECTOR_CAP_SECRET=<the same CapabilitySecret>`. Set both or neither; one alone is FATAL at start.
+
+With both set the peer fetches a capability before every join, joins with the display and room the sim returns (an
+env `DISPLAY`/`ROOM` that disagrees loses, with a WARN), and on any failure retries with backoff and never joins
+without one. With neither set the join is exactly as before. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
+
 ## Receiving SLData from the mixer
 
 The mixer's SLData (presence, power batches) does **not** come back on the `SLData` data channel a

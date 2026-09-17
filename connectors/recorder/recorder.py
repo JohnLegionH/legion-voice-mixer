@@ -42,6 +42,7 @@ class Recorder(ConnectorPeer):
     def __init__(self, cfg: dict):
         super().__init__(cfg, log)
         self._writer = WavSegmentWriter(cfg["out_dir"], cfg["display"], cfg["segment_seconds"])
+        self._writer_display = cfg["display"]
         self._track_task: asyncio.Task | None = None
 
     # local_track() stays None: the base peer negotiates the sendrecv m-line
@@ -50,6 +51,12 @@ class Recorder(ConnectorPeer):
     def join_extra(self) -> dict:
         # SC-96: declare the tap at join so the mixer marks and logs it as a recorder.
         return {"recorder": True}
+
+    def on_identity(self, display: str, room: int) -> None:
+        # Slice 0.7b: segments are named for the display actually joined with, which a capability grant may change.
+        if display != self._writer_display:
+            self._writer = WavSegmentWriter(self._cfg["out_dir"], display, self._cfg["segment_seconds"])
+            self._writer_display = display
 
     def on_audio_track(self, track) -> None:
         log.info("audio track received; writing segments to %s", self._cfg["out_dir"])

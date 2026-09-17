@@ -1059,3 +1059,82 @@ Neither direction degrades to a refused join while the knob is off, which is the
   arming must design connector capabilities in the same pass** — two parked rows on one underlying question is
   how one of them gets forgotten. Until then, `JS_JOIN_CAP_REQUIRED` stays off for the same reason
   `JS_VIS_FAIL_CLOSED` does.
+
+#### Amendment 2026-09-16 (slice 0.7b): the connector join capability
+
+Read at tranq-ais `feature/ais-v3` `9096a4f441` and legion-voice-mixer `main` `be9093e`. Ledger O-88; the arming
+half is the slice 0.7a amendment at the top of this document.
+
+1. **Ruling: connector peers are NOT exempted from `JS_JOIN_CAP_REQUIRED`.** The viewer never reaches the Janus
+   API, so connector peers are the mixer's only non-sim clients, which is exactly the party the capability checks.
+   An exemption would cover everyone the control applies to. The peer fetches a sim-minted capability before every
+   join.
+2. **Sim.**
+   - New key `[VoiceConnector.<name>] CapabilitySecret`. **Unset is the default and reproduces today exactly:** no
+     handler is registered (`VoiceConnectorModule.AttachJoinCapEndpoint`), and payloads and logs are unchanged.
+   - Set but shorter than 32 characters: a WARN at load, and the record gets no endpoint (never a weak key, the
+     O-65 discipline).
+   - Set: the region HTTP server (`MainServer.Instance.DefaultServer`, as `WorldMapModule` registers its per-region
+     handlers; no new bind knob) serves `POST /voice/connector/<name>/join-cap`. It checks
+     `Authorization: Bearer <secret>` with `CryptographicOperations.FixedTimeEquals` over SHA-256 digests, so the
+     comparison takes the same time whatever the length.
+   - The handler is registered for the whole `/voice` prefix, as a var-path handler. The server matches var paths on
+     the first segment only. An exact per-record path would leave an unknown name to the server's own HTML 404, and
+     that would be an oracle.
+   - **200** returns `{display, room, session_id, join_cap, expires}`, minted by the same `JoinCapability.Mint` as
+     0.4. The agent is the NPC id, the session is the record's `ViewerSessionId`, and the room is the record's
+     recorded room (the new `VoiceConnectorRecord.Room`, set by `Register`, cleared by `Unregister`). Epoch and
+     generation come from `JoinCapabilityAuthority.Resolve(room)`, the source `JanusRoom.JoinRoom` uses for an avatar.
+   - **404 with an empty body** for every failure before authentication succeeds: unknown name, inactive record,
+     no secret, wrong or missing bearer, wrong method.
+   - A record active in more than one region (no `Region=` pin) cannot be resolved. It is a 404 like any other, and
+     the operator is told once, in the log.
+   - **503** (empty) only after authentication, when the sim cannot mint: `JoinCapabilityEnabled` false, or no
+     `JoinCapabilitySecret`.
+   - The bearer, the secrets and the capability are never logged. There is one INFO line per mint, naming the
+     record, the room and the expiry.
+3. **Peers** (`connectors/common/config.py`, `joincap.py`, `peer.py`; the recorder and the injector share the path).
+   - `CONNECTOR_CAP_URL` and `CONNECTOR_CAP_SECRET`: both or neither, and one without the other is FATAL at start.
+     Neither is today's join, with the same body.
+   - When both are set, the peer fetches before every join (each `run()` is one join, so a reconnect fetches
+     again), sends `join_cap` and `session_id`, and uses the returned display and room.
+   - An env `DISPLAY` or `ROOM` that disagrees with the grant loses, with a WARN.
+   - A failed fetch retries with backoff (1 s doubling to 30 s) for as long as the peer runs. **A configured peer
+     never joins bare.**
+4. **Findings before code.**
+   - **F1:** the minter is `JoinCapability.Mint` (`WebRtcVoice/JoinCapability.cs:60`). Generation is **per room,
+     not per session**: `JoinCapabilityAuthority.Resolve(RoomId)` (`JoinCapabilityAuthority.cs:33`, called at
+     `JanusRoom.cs:80`), published by `VisAuthority.NextGeneration` (`VisAuthority.cs:136`). It maps onto a connector
+     unchanged.
+   - **F2:** the mixer's validation binds only the join body's `join_cap`, `display`, `session_id` and `room`, plus
+     the room's own epoch and generation (`janus_slvoice.c:3053-3061`, `joincap.c:200-213`). Nothing assumes the
+     sim's Janus session. Only a comment says so (`joincap.h:12`).
+   - **F3:** handlers are added with `IHttpServer.AddSimpleStreamHandler`, and var-path handlers match on the first
+     segment (`BaseHttpServer.cs:1109-1123`). The connector module is non-shared, and every region's instance loads
+     the same records, so one process-wide endpoint resolves a name across every attached region to the one active
+     record.
+   - **F4:** the connector records the estate room (`VoiceConnectorModule.cs:316`). An avatar standing on a parcel
+     with its own voice channel is provisioned into that parcel's room (`WebRtcVoiceRegionModule.cs:751` ->
+     `WebRtcJanusService.cs:424`). They differ; filed as **O-93**, not fixed here.
+5. **Proof.**
+   - **Sim tests** (`ConnectorJoinCapEndpointTests`), each through a real `BaseHttpServer`'s own handler lookup:
+     - U1: secret unset, no handler.
+     - U2: a 31-character secret, a WARN and no handler.
+     - U3: six pre-authentication failures give one identical answer (404, empty body, no content type), and an
+       unknown name never reaches the server's HTML 404.
+     - U4: 200, and the capability verifies under a transcription of the mixer's validator with the NPC id, the
+       recorded room and the `ViewerSessionId`.
+     - U5: 503.
+     - U6: no bearer, secret or capability in any log line.
+     - U7: 404 after `Unregister`.
+     - Mutations: registering the exact path fails U3, and logging the `Authorization` header fails U6.
+   - **Harness S34** (`JS_JOIN_CAP_REQUIRED=1`, declared room, the real connector join code against a stub endpoint
+     minting with the harness's minter):
+     - a peer with no `CONNECTOR_CAP_*` is refused `496 cap_missing`;
+     - configured, it joins, and its session records `join_cap_verdict` ok;
+     - a replayed capability is refused `cap_replayed`;
+     - with the stub answering 404, the peer creates no Janus session and keeps retrying.
+     - Mutation: a peer that joins bare on a failed fetch fails S34 on `S34: with the capability endpoint answering
+       404 the peer sends no join at all, never a bare one`.
+6. **Not closed.** O-88 closes when the 0.9 gate step passes live. Both knobs stay off. S34 proves the peer
+   against a stub, not against a live sim endpoint.
