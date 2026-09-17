@@ -1235,6 +1235,77 @@ async def s32_takeover_after_the_window(ctx: Ctx) -> None:
     await ctx.until_info(a, _audible, "§9 13b: the takeover's own arming makes A audible again")
 
 
+# ---- Phase 0 slice 0.7a: connector / recorder arming (ledger O-88) ----------------------------------------------
+# The sim arms a voice connector exactly as it arms an avatar: its NPC id is the peer's display, the room is the
+# estate room, and unregistering it drops it from the population, so the next heartbeat OMITS it. S33 checks the
+# mixer end of that ruling, for a recorder tap as a listener and for a non-recorder connector as a source. Every
+# disarm is asserted inside OMIT_DISARM_S, far below the §5 window (7250 ms minimum), so a mixer that let omission
+# fall through to staleness fails here rather than passing late.
+
+OMIT_DISARM_S = 3.0
+
+
+async def s33_connector_arming_and_omission(ctx: Ctx) -> None:
+    """O-88 / slice 0.7a. In a declared room under fail-closed, with SRC talking: a recorder tap is silent unarmed,
+    hears the room once an arming replace names its display, and is silent again after a heartbeat that omits it. A
+    non-recorder connector-style peer as a SOURCE is inaudible to an armed listener while unarmed, audible armed, and
+    inaudible again after omission. Both disarms are the omission itself, not the staleness window."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    src = await ctx.join("SRC", r)                       # an avatar, talking
+    rec = await ctx.join("REC", r, recorder=True)        # a recording connector: display = its NPC id at the sim
+    lis = await ctx.join("L", r)                         # an avatar listening to the connector
+    con = await ctx.join("CON", r)                       # an injecting connector, talking
+    await ctx.ready(src, rec, lis, con)
+    await _mode(ctx, src, want_fail_closed=True)
+
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {src.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={src.display: []}, mute={src.display: []},
+                                                epoch=e1, generation=1),
+                 "arming the talking avatar SRC", slvoice="applied", status="ok")
+
+    # -- the recorder tap as a listener --
+    info = await ctx.info(rec)
+    if info.get("recorder") is not True:
+        raise Fail("S33: REC is recorded as a recorder tap", pick(info))
+    await ctx.until_info(rec, lambda i: _silent(i) and i.get("vis_row") == 1, "S33: the unarmed recorder tap is silent (row 1)")
+    await _hold(ctx, rec, _silent, "S33: and stays silent while unarmed", 1.5)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={rec.display: []}, mute={rec.display: []},
+                                                epoch=e1, generation=2),
+                 "an arming replace naming the recorder's display", slvoice="applied", status="ok")
+    hb.listeners = {src.display: 1, rec.display: 2}
+    await ctx.until_info(rec, lambda i: _audible(i) and i.get("vis_row") == 4, "S33: armed, the recorder tap hears the room")
+    hb.listeners = {src.display: 1}                      # the connector was unregistered: the sim omits it
+    await ctx.until_info(rec, lambda i: _silent(i) and i.get("vis_row") == 1,
+                         "S33: a heartbeat omitting the recorder disarms it at once (row 1, not the staleness window)",
+                         timeout=OMIT_DISARM_S)
+
+    # -- a non-recorder connector as a source --
+    # L excludes SRC and REC, so the only thing L can hear is CON.
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={lis.display: [src.display, rec.display]},
+                                                mute={lis.display: []}, epoch=e1, generation=3),
+                 "arming L with SRC and REC excluded", slvoice="applied", status="ok")
+    hb.listeners = {src.display: 1, lis.display: 3}
+    await ctx.until_info(lis, lambda i: i.get("vis_row") == 4 and i.get("excluded_entries") == 2, "S33: L armed (row 4)")
+    await ctx.until_info(lis, _silent, "S33: the unarmed connector source is inaudible to armed L")
+    await _hold(ctx, lis, _silent, "S33: and stays inaudible while unarmed", 1.5)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={con.display: []}, mute={con.display: []},
+                                                epoch=e1, generation=4),
+                 "an arming replace naming the connector's display", slvoice="applied", status="ok")
+    hb.listeners = {src.display: 1, lis.display: 3, con.display: 4}
+    await ctx.until_info(lis, _audible, "S33: armed, the connector source is audible to L")
+    hb.listeners = {src.display: 1, lis.display: 3}      # the connector was unregistered: the sim omits it
+    await ctx.until_info(con, lambda i: i.get("vis_row") == 1,
+                         "S33: a heartbeat omitting the connector disarms it at once (row 1, not the staleness window)",
+                         timeout=OMIT_DISARM_S)
+    await ctx.until_info(lis, _silent, "S33: omitted, the connector source is inaudible to L again", timeout=OMIT_DISARM_S)
+    info = await ctx.info(lis)
+    if info.get("vis_row") != 4:
+        raise Fail("S33: L itself stays armed through the connector's omission", pick(info))
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1288,4 +1359,6 @@ SCENARIOS = [
              "0.5 §9 27", s31_stale_ms_clamp),
     Scenario("S32", "a lower epoch takes over once the fresh one has been stale for the window",
              "0.5 fail-closed on, §9 13", s32_takeover_after_the_window),
+    Scenario("S33", "connector arming: a recorder tap and a connector source are silent unarmed, heard armed, silent on omission",
+             "0.7a fail-closed on, O-88", s33_connector_arming_and_omission),
 ]

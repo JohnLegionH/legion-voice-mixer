@@ -107,13 +107,14 @@ shown wrong; report it, do not bend the scenario to pass.
 | S30 | **Fail-closed on only.** SRC joins R (`vis_authority`); REC joins with `"recorder": true`, then is armed | `handle_info` reports `recorder` true; REC is silent at `vis_row` 1 and stays silent for 2 s unarmed; armed, it hears the room | **§9 24** a recording tap is gated like any participant (open question 3, ledger **O-88**) |
 | S31 | **A mixer started below the §5 minimum only** (`scratch.sh up-clamp`, `JS_VIS_STALE_MS=1000`); needs `--stale-ms-started-with` | the reported `stale_ms` is **7250**, the §5 constraint, not the 1000 it was given, and the startup log holds `JS_VIS_STALE_MS=1000 is below the minimum 7250 ms` | **§9 27** the window clamp is enforced and visible, not just computed (`test_visauth` covers the arithmetic) |
 | S32 | **Fail-closed on only.** Armed in E2 with heartbeats; a lower E1 while E2 is fresh; then heartbeats stop, the window passes, and the same E1 is sent again | while E2 is fresh E1 is `stale_epoch`; once the window passes A goes silent and E1 is **adopted** (`authority_epoch` E1) with the takeover logged and records disarmed; re-arming in E1 restores audio | **§9 13**'s second half — the takeover path the design specifies, which S18 reaches only through a graceful stop |
+| S33 | **Fail-closed on only.** In a declared room with SRC talking: REC joins with `"recorder": true`; L and CON join normally. REC is armed by a replace naming its display, then a heartbeat omits it. L is armed with SRC and REC excluded, CON (a connector as a source) is armed, then a heartbeat omits CON | REC silent at row 1 unarmed, hears the room at row 4 armed, back to silent row 1 **within 3 s** of the omitting heartbeat; L hears nothing from unarmed CON, hears it armed, and after CON's omission CON is at row 1 within 3 s, L is silent again and still row 4 | **O-88 / slice 0.7a**: a connector or recorder is armed like an avatar and disarmed by omission itself, not by the staleness window. Mutation proof: against an image whose heartbeat keeps omitted records it fails on `S33: a heartbeat omitting the recorder disarms it at once` |
 
 **Phase 0 runs (0.3).** S15 runs against the deployed mixer (fail-closed off). S16-S20 need a mixer with
 `JS_VIS_FAIL_CLOSED=1`, which must never be the live grid's: start a scratch container on other ports and pass
 `--janus-url`, `--admin-url`, its throwaway secrets and `--container <name>`. S21 needs the pre-0.3 image, also as
 a scratch container. `--container NAME` makes S17 read `docker logs NAME` and S20 run `docker restart NAME`.
 
-**Phase 0 runs (0.5).** S25-S30 and S32 need `JS_VIS_FAIL_CLOSED=1` and a normal window; S31 needs a mixer
+**Phase 0 runs (0.5).** S25-S30, S32 and S33 need `JS_VIS_FAIL_CLOSED=1` and a normal window; S31 needs a mixer
 **started** below the §5 minimum. Both are scratch containers, never the live grid's — `scratch.sh up-fc`
 (ports 47223/47225, `JS_EMPTY_ROOM_GRACE_S=15`, so pass `--grace 15` for S29) and `scratch.sh up-clamp`
 (ports 46223/46225, `JS_VIS_STALE_MS=1000`, so pass `--stale-ms-started-with 1000`). When overriding a knob

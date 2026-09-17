@@ -12,16 +12,17 @@ Every `path:line` below was read at those commits.
 **Goal:** the mixer must be able to fail closed. It has to tell "this listener may hear everyone" from
 "the sim never said anything about this listener", and act on the difference.
 
-**Open question 3 (§10) is DEFERRED, not decided (amended 2026-09-15, slice 0.2).** Whether an avatar's
-sessions share one arming record is settled here (§1, §7.4). Open question 3 is how connector peers and
-recorder taps get armed; see the amendment below. §8 flags the other things that make the design harder
-than the brief assumed.
+**Open question 3 (§10): arming is DESIGNED and PROVEN; the capability half is still open (amended 2026-09-16,
+slice 0.7a).** Whether an avatar's sessions share one arming record is settled here (§1, §7.4). How connector
+peers and recorder taps get armed is answered by the slice 0.7a amendment below; the 2026-09-15 deferral is kept
+for the record. §8 flags the other things that make the design harder than the brief assumed.
 
 ### Amendment 2026-09-15 (slice 0.2, sim half)
 
 1. **Connector peers and recorder taps: DEFERRED, not decided.** *(Ledger O-88.)*
    - **What 0.2 does:** Phase 0 arms avatars only (the scene presences holding a voice session, §0.1
-     "Population").
+     "Population"). *Superseded 2026-09-16 (slice 0.7a amendment): this sentence was never checked against
+     the code. 0.2 excludes nothing on presence type, and a registered connector NPC is armed as built.*
    - **The settled position:** connector peers and recorder taps ARE armed, not exempted. The recorder is the
      most privacy-sensitive participant in the system, and the one peer writing audio to disk must not be the one
      with no authority behind it.
@@ -138,6 +139,78 @@ The §9 coverage map is at the end of that section.
 4. **Recorder taps are gated, and now proven so (ledger O-88).** S30 shows a tap joined with `"recorder": true`
    in a declared room is silent at row 1 until armed. That is the safe outcome for a recorder and the wrong one
    for a connector NPC, which is exactly why §6.4 blocks `JS_VIS_FAIL_CLOSED` while O-88 is open.
+
+### Amendment 2026-09-16 (slice 0.7a, connector and recorder arming)
+
+Read at tranq-ais `feature/ais-v3` `bfccf0946a` and legion-voice-mixer `main` `d03ab9b`. The 0.7a commits change
+tests and docs only: **no production line changed in either repo.** Ledger O-88.
+
+1. **The design: a connector needs no arming mechanism of its own.** The answers O-88 called undesigned were
+   already in the connector module:
+   - **Display:** the connector's derived NPC id (O-63, `VoiceConnectorModule.cs:288`), the id the operator
+     copies into the peer's config.
+   - **Room:** the estate room (`VoiceConnectorModule.cs:281`), derived exactly as the sink's fallback room
+     (`JanusPeerCtlBatchSink.cs:124`). The arming resolver maps an unrecorded agent to that same room
+     (`VoiceVisibilityService.cs:137`), so the room agrees even without a record.
+   - **Arming, trigger 2 (§2):** `VoiceConnectorRegistrar.Register` adds a `VoiceViewerSession` for the NPC
+     (`VoiceConnectorRegistrar.cs:85`), then calls `pRecordRoom` (`:91`), which the module binds to
+     `svc.OnListenerProvisioned(npcId, estateRoom)` (`VoiceConnectorModule.cs:299`). In arming mode that is
+     `RequestArm` (`VisibilityBatchSender.cs:137`).
+   - **Triggers 1, 3, 4 and the heartbeat:** the session puts the NPC through `FeederWorldFromScene`'s only gate,
+     `IsAgentInRegion` (`FeederWorldFromScene.cs:63`), into the matrix population (`VisibilityMatrix.cs:80`). The
+     arming pass walks that population (`VisibilityBatchSender.cs:250`), and the heartbeat is built from it
+     (`VisibilityBatchSender.cs:347`, `VisAuthority.cs:393`).
+   - **Disarm:** `Unregister` removes the session (`VoiceConnectorRegistrar.cs:127`). The NPC leaves the
+     population, `PruneTo` forgets its record (`VisAuthority.cs:196`), and the next heartbeat omits it. §1.3's
+     omission rule then disarms the peer, which is still connected at the mixer (`janus_slvoice.c:2472-2480`).
+   - **A recorder tap is the same record with `MayInject=false`:** the same arming, plus the existing moderation
+     mute (`VoiceConnectorRegistrar.cs:100`). There is no separate mechanism.
+2. **Finding: (a), armed as built.** Nothing on 0.2's arming, heartbeat or partitioner path excludes a connector
+   NPC. The only presence filter is the voice-session gate above. `SceneGraph.ForEachScenePresence` skips only
+   deleted presences (`SceneGraph.cs:1469`), so NPC-typed presences are enumerated. There is no presence-type,
+   session-type or viewer check in the matrix, the sender, `VisAuthority` or the sink's partitioner. The one NPC
+   check in the voice addon, `IsNpcProvisionRefused` (`WebRtcVoiceServiceModule.cs:448`, used at `:533`), is on
+   the viewer **provision** path. It exempts connector identities and does not touch arming. "Phase 0 arms
+   avatars only" (the 0.2 amendment above) was a sentence in this document, never a property of the code. During
+   the 0.6 soak it was quoted as fact without being checked.
+3. **Sim proof** (`Tests/WebRtcVoiceRegionModule.Tests/ConnectorArmingTests.cs`). The rig is a real Scene with
+   a parcel, a real `VoiceVisibilityService` with arming on and its own tick thread, and a real
+   `JanusPeerCtlBatchSink` whose transport captures every body and answers as a vis_protocol 2 mixer. The
+   registrar is driven with `StartRecord`'s own delegate bodies, and the NPC presence is added as
+   `NPCModule.CreateNPC` adds it, with `PresenceType.Npc`.
+   - T1: a `MayInject=true` record gets an arming replace naming the NPC at the estate room, with empty columns.
+   - T2: the same for `MayInject=false`. The store's mute key is (parcel, NPC id), and the avatar's mute column
+     names the NPC.
+   - T3: a changed `mixer_instance` gets one replace re-arming the NPC with the avatar, and a new epoch's first
+     snapshot does the same.
+   - T4: the heartbeat lists the NPC as armed while it is registered.
+   - T5: after `Unregister`, a heartbeat that lists the avatar omits the NPC, and no later batch or heartbeat
+     names it (checked across a forced re-arm-all).
+   - T6: with the knob off, the golden scenario with a `MayInject=true` connector registered and unregistered in
+     it is byte-identical to the knob-off golden (`VisibilityKnobOffGoldenTests`). The real knob-off service
+     sends no heartbeat, no authority stamp and no body naming the NPC. A `MayInject=false` connector is outside
+     the byte comparison on purpose: its mute is enforced with the knob off too (S-CON-2), so it adds mute
+     entries the pre-0.2 golden never had.
+   - All six passed without a production change. **Mutation proofs:** skipping `sp.IsNPC` presences in
+     `FeederWorldFromScene` fails T1 to T5 with their own timeouts, and T6 still passes. Leaving the session in
+     place on `Unregister` fails T5 at `membership off`.
+4. **Mixer proof: harness S33** (fail-closed scratch mixer, test rooms, `--no-restart`). In a declared room with
+   SRC talking:
+   - A `"recorder": true` tap is silent at row 1 while unarmed. An arming replace naming its display makes it
+     hear the room at row 4. A heartbeat that omits it returns it to row 1 within 3 s, well inside the 7250 ms
+     minimum window, so the disarm itself is asserted, not staleness.
+   - A non-recorder connector as a source is inaudible to an armed listener while unarmed and audible once armed.
+     After a heartbeat omits it, it is back at row 1 and inaudible to that listener, and the listener stays armed.
+   - **Mutation proof:** against an image whose heartbeat keeps omitted records (the
+     `g_hash_table_iter_remove` in the disarm loop replaced by a no-op), S33 fails on its own text, `S33: a
+     heartbeat omitting the recorder disarms it at once (row 1, not the staleness window)`, observed at
+     `vis_row` 4 and `last_mix_rms` 0.15.
+5. **What this does not close.** The connector **capability** half (§11.10) is untouched. A connector peer
+   still joins with `api_secret` and mints no join capability, so `JS_JOIN_CAP_REQUIRED=1` would refuse it.
+   That is slice 0.7b. `JS_VIS_FAIL_CLOSED` also stays off: the §6.4 soak steps still gate it, and step 3 must
+   now show connector peers **armed** rather than unarmed. S33 proves the mixer end with a peer whose display
+   is the NPC id. It does not prove that an operator's peer config carries that id; the registration log line
+   (`VoiceConnectorModule.cs`, `registered ... npc= room=`) is still what they copy.
 
 ## 0. The mechanism today
 
@@ -822,11 +895,14 @@ fail-closed scratch mixer, S31 a mixer started below the §5 minimum, S21 a pre-
    region moved between two sim processes, or does a move need an explicit release?
 2. **Move the sets?** Should the per-session `excluded`/`mod_muted` sets move onto the room-level record
    (one copy per display)? Recommended, since fan-out already treats them as one.
-3. **Connector peers and recorder taps. DEFERRED 2026-09-15 (ledger O-88).** Settled in principle: they are
-   ARMED, not exempted (an exemption is a fail-open hole, and the recorder is the most privacy-sensitive
-   participant). UNDESIGNED: which display a connector uses, which room, how recorder taps differ. The connector
-   module already reaches the service (`WebRtcVoiceRegionModule.cs:262-266`). Phase 0 arms avatars only.
-   `JS_VIS_FAIL_CLOSED` stays off until this is designed and built, and the 0.6 soak checks it (§6.4 step 3).
+3. **Connector peers and recorder taps. ARMING DONE 2026-09-16 (slice 0.7a); capability half open (§11.10,
+   slice 0.7b). Ledger O-88.** They are ARMED, not exempted (an exemption is a fail-open hole, and the recorder
+   is the most privacy-sensitive participant). *Deferred 2026-09-15 as undesigned; answered 2026-09-16:* the
+   display is the derived NPC id, the room is the estate room, and a recorder tap is the same record with
+   `MayInject=false` plus the existing mute. Registration arms through trigger 2, and unregistration disarms
+   through heartbeat omission. 0.2's code arms a registered connector as built, with no production change. See
+   the slice 0.7a amendment for the evidence (sim T1 to T6, harness S33). `JS_VIS_FAIL_CLOSED` still stays off
+   behind §6.4, and `JS_JOIN_CAP_REQUIRED` stays off until connector capabilities exist.
 4. **A2A rooms.** They stay undeclared. Fail-closed for A2A needs the invitation registry to become an
    authority, which is a later phase.
 
