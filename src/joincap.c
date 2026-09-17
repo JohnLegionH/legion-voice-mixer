@@ -227,14 +227,41 @@ int slv_joincap_used_skew(const slv_joincap *c, int64_t now_s, int64_t *out_offs
 }
 
 slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen) {
+	(void)policy_gen;
 	if(c == NULL)
 		return SLV_JOINCAP_MALFORMED;
-	/* §11.5: the epoch is what makes a capability die with its authority; the generation orders within it. */
-	if(c->epoch != auth_epoch)
-		return SLV_JOINCAP_STALE_GENERATION;
-	if(c->generation > policy_gen)
+	/* §11.5 as the 0.8b amendment restates it (O-96): the epoch is what makes a capability die with its
+	 * authority, and ONLY an epoch below the adopted one proves the authority that minted it is gone. An epoch
+	 * above it, or a room that has adopted none (auth_epoch 0, which nothing is below), means the mixer has not
+	 * caught up — a capability admits a join, it does not adopt an epoch. The generation is not a bound in
+	 * either direction: the sim publishes it when ALLOCATED and the mixer holds what it has APPLIED, so ahead
+	 * and behind are both ordinary races between minting, sending and joining. */
+	if(c->epoch < auth_epoch)
 		return SLV_JOINCAP_STALE_GENERATION;
 	return SLV_JOINCAP_OK;
+}
+
+const char *slv_joincap_gen_note_str(slv_joincap_gen_note n) {
+	switch(n) {
+		case SLV_JOINCAP_GEN_EPOCH_AHEAD: return "cap_epoch_ahead";
+		case SLV_JOINCAP_GEN_AHEAD:       return "cap_generation_ahead";
+		case SLV_JOINCAP_GEN_BEHIND:      return "cap_generation_behind";
+		case SLV_JOINCAP_GEN_MATCH:       break;
+	}
+	return "match";
+}
+
+slv_joincap_gen_note slv_joincap_generation_note(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen) {
+	/* A refused capability says nothing here; the refusal is what gets counted. */
+	if(c == NULL || c->epoch < auth_epoch)
+		return SLV_JOINCAP_GEN_MATCH;
+	if(c->epoch > auth_epoch)
+		return SLV_JOINCAP_GEN_EPOCH_AHEAD;
+	if(c->generation > policy_gen)
+		return SLV_JOINCAP_GEN_AHEAD;
+	if(c->generation < policy_gen)
+		return SLV_JOINCAP_GEN_BEHIND;
+	return SLV_JOINCAP_GEN_MATCH;
 }
 
 /* Drop every entry whose window has passed. Order is irrelevant, so the last entry fills the hole. */

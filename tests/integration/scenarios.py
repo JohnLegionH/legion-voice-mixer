@@ -900,8 +900,16 @@ async def s23_join_capability_required(ctx: Ctx) -> None:
                    join_cap=_mint_cap(secret, db, new_display(), r), session_id=session_b)
     await _refused(ctx, "WRONGROOM", r, db, "cap_wrong_room",
                    join_cap=_mint_cap(secret, db, session_b, r + 7), session_id=session_b)
+    # Slice 0.8b (O-96): cap_stale_generation now means ONE thing -- an epoch BELOW the room's adopted one. The
+    # room must therefore have adopted one before this leg: before 0.8b any epoch at all was refused here,
+    # because the room had adopted none, which is exactly the false refusal O-96 removes.
+    e_hi, e_lo = _epoch(2), _epoch(1)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={db: []}, mute={db: []},
+                                                epoch=e_hi, generation=1),
+                 "S23: the room adopts a high epoch, so a lower one is provably an older authority",
+                 slvoice="applied", status="ok")
     await _refused(ctx, "STALEGEN", r, db, "cap_stale_generation",
-                   join_cap=_mint_cap(secret, db, session_b, r, epoch="0000018f00000001", generation=3),
+                   join_cap=_mint_cap(secret, db, session_b, r, epoch=e_lo, generation=3),
                    session_id=session_b)
 
     # Not gated anywhere else: an undeclared room admits a join with no capability, with the knob on.
@@ -1531,6 +1539,99 @@ async def s35_heartbeat_ordering(ctx: Ctx) -> None:
                 "S35 leg B: and L2 keeps hearing for 2 s", 2.0)
 
 
+# ---- Phase 0 slice 0.8b: the join capability's staleness rule (O-96) ------------------------------------------
+# The sim publishes a room's (epoch, generation) when the generation is ALLOCATED (VisAuthority.NextGeneration ->
+# JoinCapabilityAuthority.Publish, read at JanusRoom.JoinRoom); the mixer holds what it has APPLIED. A capability is
+# therefore normally AHEAD of the mixer -- always for a fresh room, a room whose batch was dropped or is in flight,
+# and a room re-created after a grace destroy. The 0.8 soak lost two of five joins to exactly that. After 0.8b the
+# generation refuses nothing and only an epoch BELOW the room's adopted one does.
+
+
+async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
+    """O-96. A capability ahead of the mixer joins; only an older authority's epoch is refused."""
+    secret = ctx.cfg.join_cap_secret
+    # The mode probe joins an UNDECLARED room, which the capability never gates: on a mixer that still refuses a
+    # capability ahead of it, leg a's own join is refused and would leave nothing to read the mode from.
+    probe = await ctx.join_without_media("PROBE", ctx.new_room())
+    await _cap_mode(ctx, probe, want_required=True)
+
+    # (a) A FRESH room the mixer has adopted no epoch for, and a capability minted at generation 5 under an
+    # authority the mixer has never heard from. This is the first join into any room the sim has already armed
+    # elsewhere -- the commonest shape there is, and the one the soak lost.
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    da, sa = new_display(), new_display()
+    a = await ctx.join_without_media("A", r, da, vis_authority=True, expect_join=False,
+                                     join_cap=_mint_cap(secret, da, sa, r, epoch=_epoch(5), generation=5),
+                                     session_id=sa)
+    if (a.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("S36 leg a: a capability at generation 5 joins a fresh room the mixer holds no epoch for",
+                   a.join_reply)
+    info = await ctx.info(a)
+    if info.get("join_cap_verdict") != "ok":
+        raise Fail("S36 leg a: the O-91 verdict for that join is ok", pick(info))
+    if _cap_state(info).get("cap_epoch_ahead", 0) < 1:
+        raise Fail("S36 leg a: a capability ahead of the mixer is counted cap_epoch_ahead", _cap_state(info))
+
+    # (b) A room armed, emptied, grace-destroyed and re-created: the re-created room has adopted nothing again,
+    # while the sim's generation for it has only gone up. A join with a generation ahead must still land. The
+    # occupant that holds the room open carries a capability with NO epoch, which every mixer since 0.4 admits,
+    # so the grace clock here is honest whatever the mixer does with leg a.
+    since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    grace = ctx.cfg.grace
+    rb = ctx.new_room()
+    await ctx.control.create_room(rb, f"integration {ctx.name}", vis_authority=True)
+    do, so = new_display(), new_display()
+    occupant = await ctx.join_without_media("O", rb, do, vis_authority=True,
+                                            join_cap=_mint_cap(secret, do, so, rb), session_id=so)
+    _check_reply(await ctx.admin.peer_ctl_batch(rb, "replace", excl={do: []}, mute={do: []},
+                                                epoch=_epoch(5), generation=6),
+                 "S36 leg b: the room adopts an epoch before it is emptied", slvoice="applied", status="ok")
+    await occupant.close()
+    emptied = time.monotonic()
+    await until(ctx.control.room_ids, lambda ids: rb not in ids,
+                f"S36 leg b: the declared room is grace-destroyed after {grace} s empty",
+                timeout=grace + 20, step=1.0)
+    if time.monotonic() - emptied < grace - 1:
+        raise Fail("S36 leg b: destroyed no earlier than its grace", {"grace_s": grace})
+    logs = await mixer_logs(ctx.cfg, since)
+    if f"room {rb} destroyed after" not in logs:
+        raise Fail("S36 leg b: the mixer logs the grace destroy for this room",
+                   {"searched_for": f"[slvoice] room {rb} destroyed after <n>s empty"})
+    await ctx.reopen_control()
+    await ctx.control.create_room(rb, f"integration {ctx.name}", vis_authority=True)
+    db, sb = new_display(), new_display()
+    b = await ctx.join_without_media("B", rb, db, vis_authority=True, expect_join=False,
+                                     join_cap=_mint_cap(secret, db, sb, rb, epoch=_epoch(5), generation=7),
+                                     session_id=sb)
+    if (b.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("S36 leg b: a capability with a generation ahead joins the re-created room", b.join_reply)
+
+    # (c) The one refusal left. A room that HAS adopted E2, and a capability minted under E1 < E2: an authority
+    # that is provably gone. Nothing else in this scenario may be refused, and this must be.
+    r2 = ctx.new_room()
+    await ctx.control.create_room(r2, f"integration {ctx.name}", vis_authority=True)
+    e2, e1 = _epoch(9), _epoch(8)
+    dc, sc = new_display(), new_display()
+    _check_reply(await ctx.admin.peer_ctl_batch(r2, "replace", excl={dc: []}, mute={dc: []},
+                                                epoch=e2, generation=1),
+                 "S36 leg c: the room adopts E2", slvoice="applied", status="ok")
+    await _refused(ctx, "OLDEPOCH", r2, dc, "cap_stale_generation",
+                   join_cap=_mint_cap(secret, dc, sc, r2, epoch=e1, generation=99), session_id=sc)
+
+    # A capability under E2 itself, with a generation far ahead of the single batch applied, still joins: the
+    # refusal above was about the epoch, and nothing about the generation.
+    dd, sd = new_display(), new_display()
+    d = await ctx.join_without_media("D", r2, dd, vis_authority=True, expect_join=False,
+                                     join_cap=_mint_cap(secret, dd, sd, r2, epoch=e2, generation=99),
+                                     session_id=sd)
+    if (d.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("S36 leg c: under the adopted epoch a generation far ahead still joins", d.join_reply)
+    state = _cap_state(await ctx.info(d))
+    if state.get("cap_generation_ahead", 0) < 1:
+        raise Fail("S36 leg c: that join is counted cap_generation_ahead", state)
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1590,4 +1691,6 @@ SCENARIOS = [
              "0.7b join capability required, O-88, §11.10", s34_connector_join_capability),
     Scenario("S35", "heartbeat ordering: a heartbeat built before a replace neither stales nor disarms what it applied",
              "0.7d fail-closed on, O-95", s35_heartbeat_ordering),
+    Scenario("S36", "join capability staleness: a capability ahead of the mixer joins; only an older epoch is refused",
+             "0.8b join capability required, O-96, §11.5", s36_join_cap_generation_staleness),
 ]

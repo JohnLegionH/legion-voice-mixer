@@ -366,6 +366,12 @@ static volatile gint slv_join_cap_accepted;    /* verified, in context, fresh, u
 static volatile gint slv_join_cap_enforced;    /* joins actually refused (knob on, declared room) */
 static volatile gint slv_join_cap_skewed;      /* accepted only because of the skew tolerance */
 static volatile gint slv_join_cap_refused[SLV_JOINCAP_STALE_GENERATION + 1];   /* by verdict */
+/* Slice 0.8b (O-96): accepted capabilities whose (epoch, generation) differed from the room's. None of these is
+ * a refusal — they are the ordinary races between the sim ALLOCATING a generation and the mixer APPLYING one,
+ * reported so a soak can see how often the two are apart without a join ever being lost to it. */
+static volatile gint slv_join_cap_epoch_ahead;    /* a higher epoch than adopted, or the room has adopted none */
+static volatile gint slv_join_cap_gen_ahead;      /* same epoch, a generation the mixer has not applied yet */
+static volatile gint slv_join_cap_gen_behind;     /* same epoch, a batch landed between minting and joining */
 
 /* Phase 0 (§1.3): one avatar's standing as a listener in one room. KEYED PER ROOM BY DISPLAY (agent UUID), not per
  * session: every session with that display in the room follows the one record, and it survives a leave and rejoin
@@ -1387,8 +1393,29 @@ static slv_joincap_verdict janus_slvoice_joincap_verify(const char *cap, const c
 				parsed.exp + SLV_JOINCAP_SKEW_S, now_s);
 			janus_mutex_unlock(&slv_join_cap_mutex);
 		}
-		if(v == SLV_JOINCAP_OK)
+		if(v == SLV_JOINCAP_OK) {
 			v = slv_joincap_generation(&parsed, auth_epoch, policy_gen);
+			/* O-96: an accepted capability may still name a different (epoch, generation) from the room's.
+			 * That is a race, not a fault, so it is counted and said once — never turned into a refusal.
+			 * The epoch and the generation are already in the Admin API's visibility block, so naming them
+			 * here leaks nothing the capability itself would; the capability is still never logged. */
+			if(v == SLV_JOINCAP_OK) {
+				slv_joincap_gen_note note = slv_joincap_generation_note(&parsed, auth_epoch, policy_gen);
+				if(note != SLV_JOINCAP_GEN_MATCH) {
+					if(note == SLV_JOINCAP_GEN_EPOCH_AHEAD)
+						g_atomic_int_inc(&slv_join_cap_epoch_ahead);
+					else if(note == SLV_JOINCAP_GEN_AHEAD)
+						g_atomic_int_inc(&slv_join_cap_gen_ahead);
+					else
+						g_atomic_int_inc(&slv_join_cap_gen_behind);
+					JANUS_LOG(LOG_INFO, "[%s] join capability %s for %s in room %"PRId64": minted under epoch "
+						"%016"PRIx64" generation %u, the room has adopted epoch %016"PRIx64" generation %u; "
+						"admitted (the generation does not refuse: O-96)\n", JANUS_SLVOICE_PACKAGE,
+						slv_joincap_gen_note_str(note), display ? display : "(no display)", room,
+						parsed.epoch, parsed.generation, auth_epoch, policy_gen);
+				}
+			}
+		}
 	}
 	if(v == SLV_JOINCAP_OK) {
 		g_atomic_int_inc(&slv_join_cap_accepted);
@@ -1837,6 +1864,11 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 			json_object_set_new(jcap_by_reason, slv_joincap_reason((slv_joincap_verdict)ci),
 				json_integer(g_atomic_int_get(&slv_join_cap_refused[ci])));
 		json_object_set_new(jcap, "refused", jcap_by_reason);
+		/* O-96: accepted, and counted only so the difference is visible. A soak reads these beside
+		 * refused.cap_stale_generation, which after 0.8b can only mean an epoch below the room's adopted one. */
+		json_object_set_new(jcap, "cap_epoch_ahead", json_integer(g_atomic_int_get(&slv_join_cap_epoch_ahead)));
+		json_object_set_new(jcap, "cap_generation_ahead", json_integer(g_atomic_int_get(&slv_join_cap_gen_ahead)));
+		json_object_set_new(jcap, "cap_generation_behind", json_integer(g_atomic_int_get(&slv_join_cap_gen_behind)));
 		janus_mutex_lock(&slv_join_cap_mutex);
 		json_object_set_new(jcap, "nonces_live", json_integer(slv_joincap_nonce_count(&slv_join_cap_nonces)));
 		json_object_set_new(jcap, "nonces_taken", json_integer((json_int_t)slv_join_cap_nonces.taken));

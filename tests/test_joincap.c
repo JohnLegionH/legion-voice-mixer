@@ -10,8 +10,8 @@
  *
  * Covers: the golden vector verifies and parses; every malformed shape; a tampered payload and a tampered
  * signature; the wrong key; wrong agent, wrong session, wrong room; the expiry window and both skew edges;
- * replay; the bounded store's eviction and its full refusal; and the generation rule including an epoch
- * change. Non-zero exit on failure.
+ * replay; the bounded store's eviction and its full refusal; and the O-96 epoch rule with the three
+ * accepted-difference counters. Non-zero exit on failure.
  */
 
 #include "../src/joincap.h"
@@ -147,21 +147,56 @@ static void test_window_and_skew(void) {
 static void test_generation(void) {
 	slv_joincap c;
 	parse(GOLDEN, &c);
+
+	/* Slice 0.8b (O-96): the generation is NOT a refusal criterion in either direction. The sim publishes a
+	 * room's (epoch, generation) when the generation is ALLOCATED, while the mixer holds what it has APPLIED,
+	 * so a capability minted between the two is normally AHEAD; a batch that lands between minting and joining
+	 * normally leaves it BEHIND. Both are races, not evidence. Only an epoch strictly BELOW the room's adopted
+	 * one is provably an older authority, and only that refuses. */
 	CHECK(slv_joincap_generation(&c, EPOCH, GEN) == SLV_JOINCAP_OK, "same epoch, same generation: accepted");
+	CHECK(slv_joincap_generation(&c, EPOCH, GEN - 1) == SLV_JOINCAP_OK,
+		"same epoch, the capability's generation is AHEAD of what the mixer applied: accepted (O-96)");
 	CHECK(slv_joincap_generation(&c, EPOCH, GEN + 3) == SLV_JOINCAP_OK,
-		"same epoch, the room has moved on: still accepted (the capability is older, not newer)");
-	CHECK(slv_joincap_generation(&c, EPOCH, GEN - 1) == SLV_JOINCAP_STALE_GENERATION,
-		"a generation the mixer has not seen: cap_stale_generation");
+		"same epoch, the capability's generation is BEHIND what the mixer applied: accepted (O-96)");
 	CHECK(slv_joincap_generation(&c, EPOCH + 1, GEN) == SLV_JOINCAP_STALE_GENERATION,
-		"an epoch change kills the capability even at a matching generation (§11.5)");
-	CHECK(slv_joincap_generation(&c, 0, 0) == SLV_JOINCAP_STALE_GENERATION,
-		"a mixer that holds no epoch does not accept one minted under an authority");
+		"an epoch BELOW the room's adopted one is provably an older authority: cap_stale_generation (O-96)");
+	CHECK(slv_joincap_generation(&c, EPOCH - 1, GEN) == SLV_JOINCAP_OK,
+		"an epoch ABOVE the room's adopted one: accepted, the mixer is the one that is behind (O-96)");
+	CHECK(slv_joincap_generation(&c, 0, 0) == SLV_JOINCAP_OK,
+		"a room that has adopted no epoch accepts: a capability admits, it does not adopt an epoch (O-96)");
 
 	/* Arming off on both sides: epoch 0 and generation 0 agree. */
 	slv_joincap plain = c;
 	plain.epoch = 0;
 	plain.generation = 0;
 	CHECK(slv_joincap_generation(&plain, 0, 0) == SLV_JOINCAP_OK, "arming off on both sides: accepted");
+	/* The one asymmetry the rule leaves standing, recorded deliberately: a capability carrying NO epoch (the
+	 * sim resolved a room it never armed) is numerically below any adopted epoch, so it is refused. */
+	CHECK(slv_joincap_generation(&plain, EPOCH, GEN) == SLV_JOINCAP_STALE_GENERATION,
+		"a capability with no epoch at all, against a room that has adopted one: cap_stale_generation (O-96)");
+}
+
+/* O-96: what a difference that was ACCEPTED is counted as. The verdict above says nothing about which race
+ * happened; this is what the three INFO counters are driven from, and it never turns into a refusal. */
+static void test_generation_notes(void) {
+	slv_joincap c;
+	parse(GOLDEN, &c);
+	CHECK(slv_joincap_generation_note(&c, EPOCH, GEN) == SLV_JOINCAP_GEN_MATCH,
+		"same epoch, same generation: nothing to count");
+	CHECK(slv_joincap_generation_note(&c, EPOCH, GEN - 1) == SLV_JOINCAP_GEN_AHEAD,
+		"same epoch, a generation the mixer has not applied yet: cap_generation_ahead");
+	CHECK(slv_joincap_generation_note(&c, EPOCH, GEN + 3) == SLV_JOINCAP_GEN_BEHIND,
+		"same epoch, a batch landed between minting and joining: cap_generation_behind");
+	CHECK(slv_joincap_generation_note(&c, EPOCH - 1, GEN) == SLV_JOINCAP_GEN_EPOCH_AHEAD,
+		"an epoch above the adopted one: cap_epoch_ahead");
+	CHECK(slv_joincap_generation_note(&c, 0, 0) == SLV_JOINCAP_GEN_EPOCH_AHEAD,
+		"a room that has adopted no epoch: cap_epoch_ahead");
+	CHECK(slv_joincap_generation_note(&c, EPOCH + 1, GEN) == SLV_JOINCAP_GEN_MATCH,
+		"a refused capability counts nothing here: the refusal is what is counted");
+	CHECK(!strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_EPOCH_AHEAD), "cap_epoch_ahead")
+		&& !strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_AHEAD), "cap_generation_ahead")
+		&& !strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_BEHIND), "cap_generation_behind"),
+		"the three counter names are what the reports carry");
 }
 
 static void test_nonce_store(void) {
@@ -202,6 +237,7 @@ int main(void) {
 	test_context();
 	test_window_and_skew();
 	test_generation();
+	test_generation_notes();
 	test_nonce_store();
 
 	printf("test_joincap: %d checks, %d failures\n", g_checks, g_failures);

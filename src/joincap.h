@@ -54,7 +54,7 @@ typedef enum slv_joincap_verdict {
 	SLV_JOINCAP_EXPIRED,            /*!< outside [iat - skew, exp + skew] */
 	SLV_JOINCAP_REPLAYED,           /*!< this nonce was already spent */
 	SLV_JOINCAP_STORE_FULL,         /*!< replay cannot be ruled out: the nonce store is full */
-	SLV_JOINCAP_STALE_GENERATION,   /*!< another epoch, or a generation the mixer has not seen */
+	SLV_JOINCAP_STALE_GENERATION,   /*!< an epoch BELOW the room's adopted one: provably an older authority */
 } slv_joincap_verdict;
 
 /*! \brief The reason string for a verdict ("ok", "cap_missing", ...). Never NULL. */
@@ -86,9 +86,38 @@ slv_joincap_verdict slv_joincap_check(const slv_joincap *c, const char *display,
  * WARN with the observed offset. \c out_offset_s is signed: positive means the capability's clock ran ahead. */
 int slv_joincap_used_skew(const slv_joincap *c, int64_t now_s, int64_t *out_offset_s);
 
-/*! \brief The generation check (§11.5): the capability's (epoch, generation) against the room's authority.
- * Returns SLV_JOINCAP_OK or SLV_JOINCAP_STALE_GENERATION. Counted, not refused, while the knob is off. */
+/*! \brief The epoch check (§11.5, restated by the 0.8b amendment, ledger O-96): the capability's
+ * (epoch, generation) against the room's adopted authority.
+ *
+ * The GENERATION never refuses. The sim publishes a room's generation when it is ALLOCATED
+ * (`VisAuthority.NextGeneration`), while the mixer holds the highest it has APPLIED, so a capability minted
+ * between those two moments is legitimately AHEAD — as is one for a room whose batch was dropped or is in
+ * flight, for a fresh room, and for a room re-created after a grace destroy. A batch that lands between
+ * minting and joining leaves it legitimately BEHIND. Both directions are ordinary races; neither is evidence,
+ * and an upper bound on the generation stops no attack that the HMAC, the nonce, the expiry and the
+ * agent/session/room/epoch binding do not already stop.
+ *
+ * So: SLV_JOINCAP_STALE_GENERATION ONLY when the capability's epoch is strictly LOWER than \c auth_epoch,
+ * the one case that proves an older authority minted it. A room that has adopted no epoch (\c auth_epoch 0)
+ * accepts: a capability ADMITS a join, it does not adopt an epoch. Counted, not refused, while the knob is off. */
 slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen);
+
+/*! \brief Why an ACCEPTED capability's (epoch, generation) differed from the room's, so the caller can count
+ * and report the race. Never a refusal: these are counter names, not verdicts. */
+typedef enum slv_joincap_gen_note {
+	SLV_JOINCAP_GEN_MATCH = 0,     /*!< the room's own (epoch, generation) — or a capability that was refused */
+	SLV_JOINCAP_GEN_EPOCH_AHEAD,   /*!< a higher epoch than the room has adopted (including: it has adopted none) */
+	SLV_JOINCAP_GEN_AHEAD,         /*!< same epoch, a generation above what the mixer has applied */
+	SLV_JOINCAP_GEN_BEHIND,        /*!< same epoch, a generation below what the mixer has applied */
+} slv_joincap_gen_note;
+
+/*! \brief The counter name for a note ("cap_epoch_ahead", "cap_generation_ahead", "cap_generation_behind").
+ * Never NULL; SLV_JOINCAP_GEN_MATCH is "match". */
+const char *slv_joincap_gen_note_str(slv_joincap_gen_note n);
+
+/*! \brief Classify an accepted capability's difference from the room (O-96). Pure; it changes no verdict. A
+ * capability slv_joincap_generation() refuses classifies as SLV_JOINCAP_GEN_MATCH: its refusal is the count. */
+slv_joincap_gen_note slv_joincap_generation_note(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen);
 
 /*! \brief The bounded replay store (§11.6). Zero-initialised is empty and ready. NOT thread-safe: the
  * plugin calls it under its own lock. */
