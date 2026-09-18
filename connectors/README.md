@@ -11,6 +11,9 @@ room under a sim-registered connector NPC identity:
 
     [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...> identity=derived
 
+Since slice 0.8c a connector no longer needs an avatar present for its room to exist: the sim creates the room it
+records, and re-checks it at every capability fetch.
+
 ## Join capability (slice 0.7b)
 
 A mixer with `JS_JOIN_CAP_REQUIRED=1` refuses a join into a declared room that carries no sim-minted capability, and

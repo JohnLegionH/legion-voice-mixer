@@ -472,6 +472,37 @@ trip.
 
 ---
 
+#### Amendment 2026-09-17 (slice 0.8c): a connector's room, and the unknown_room backoff
+
+Ledger O-93, and the connector half of O-92. Sim-side only; no mixer change.
+
+1. **A connector's room is resolved the way an avatar's is.** `ConnectorRoomResolver.RoomFor(regionId, land)` applies
+   the provisioning path's own rule — the parcel's own channel unless the parcel carries `UseEstateVoiceChan`, then the
+   estate channel — and hashes it with the same `CalcRoomNumber`. It is resolved at registration and **re-resolved at
+   every capability fetch**; if the parcel's channel has changed the record MOVES, with one INFO line, the way an
+   avatar's re-provision moves it. On an estate-channel parcel the number is what 0.8b recorded, so that case is
+   unchanged.
+2. **The sim makes the room exist.** A Janus room is created on one path only, a viewer provisioning voice
+   (`SelectRoom` -> `CreateRoom`), which is why a connector in a region with nobody voiced had nothing to join. The new
+   seam `IWebRtcVoiceService.EnsureSpatialRoom(sceneId, parcelLocalId)` creates it exactly as a viewer's provision
+   would — same flags, declared when this sim arms — through the service session the console already uses, and is
+   idempotent because `SelectRoomCoalesced` reuses a live room. It is called at registration and before minting at
+   every capability fetch. Never for a room holding only avatars, and never from the feeder.
+3. **unknown_room retries back off.** 1 s doubling to a 30 s cap, per listener, reset by an applied batch or a
+   provision; one WARN entering backoff per room episode and one INFO on recovery, instead of a line per attempt. The
+   defect that made this necessary was not the delay but a bypass: the arming pass short-circuited on a standing
+   re-arm request (`VisibilityBatchSender`), and a connector NPC never leaves the population, so its request never
+   expired and it was re-armed on every tick — 8,933 `unknown_room` lines at ~3.8/s in the 0.8 soak, with the
+   authority's own `_retryAt` sitting there unread. `CanArmNow` now gates **every** arming path, including a snapshot.
+   Measured on the real sender: a room that stays unknown for 120 s drew **480** attempts before and draws **8** now.
+
+**Not built here, deferred to 0.8d:** creating the room in response to an `unknown_room` reply for a room that holds an
+active connector record (the ruling's R2b). A connector's room is ensured at registration and at every capability
+fetch, and the backoff bounds the noise in between, but a room destroyed by the empty-room grace mid-life is not
+re-created until the peer's next fetch.
+
+---
+
 ## 3. Heartbeat
 
 **Purpose.** Proves the authority for a room is alive in epoch E, and states which listeners it addresses
