@@ -496,10 +496,15 @@ Ledger O-93, and the connector half of O-92. Sim-side only; no mixer change.
    authority's own `_retryAt` sitting there unread. `CanArmNow` now gates **every** arming path, including a snapshot.
    Measured on the real sender: a room that stays unknown for 120 s drew **480** attempts before and draws **8** now.
 
-**Not built here, deferred to 0.8d:** creating the room in response to an `unknown_room` reply for a room that holds an
-active connector record (the ruling's R2b). A connector's room is ensured at registration and at every capability
-fetch, and the backoff bounds the noise in between, but a room destroyed by the empty-room grace mid-life is not
-re-created until the peer's next fetch.
+**R2b is DROPPED, not deferred** (ruling, slice 0.8c2). The 0.8c brief's R2b would have created a room in response to
+an `unknown_room` reply for a room holding an active connector record — a callback from the visibility authority back
+into the connector registry. It is not being built, in 0.8d or later. It served only connectors with **no**
+`CapabilitySecret`: one that has a secret ensures its room at every capability fetch, which is both the retry and the
+re-creation R2b was for. A connector without a secret cannot fetch a capability, so once join capabilities are
+required it cannot join a declared room at all — a room created for it would be a room nothing can enter. The fix for
+such a connector is to give it a `CapabilitySecret`, not to have the sim create rooms on its behalf. What remains is
+bounded and deliberate: a room destroyed by the empty-room grace mid-life is re-created at the peer's next fetch, and
+the backoff (1 s → 30 s, released the moment anything proves the room exists) keeps the interval cheap.
 
 ---
 
@@ -791,8 +796,22 @@ exclusions do today.
   `:777-800`), and its records go with it.
 - **A later joiner:** provision creates or reuses the room (declared). The joiner is silent until its arming
   `replace` arrives with the current epoch. That fresh message confirms the listener again.
-- **The fallback estate room:** a room addressed only because unrecorded agents resolve to it (§8 item 6)
-  gets heartbeats like any other room with listeners.
+- **A room nobody is placed in is not addressed at all** (slice 0.8c2, ledger O-92 — this replaces the
+  "one policy for a missing room record" this section used to state). An agent is addressed at the room it is
+  in, and the sim never guesses which that is. The order is:
+  1. the agent's room **record**, from the provision that actually happened;
+  2. else the room the agent's own parcel would provision it into — the provisioning rule applied without a
+     viewer request (`ConnectorRoomResolver`: the parcel's own channel unless it carries `UseEstateVoiceChan`);
+  3. else **nothing**: the agent is omitted from every batch, every column and every heartbeat entry, and
+     counted. Omission is not a disarm — it was never armed anywhere — and it costs no generation.
+
+  The estate/local room is never an address merely because it is the default. Where it is the **resolved**
+  number — an estate-channel parcel, the common case — every byte is what it was before 0.8c2, which is why the
+  knob-off goldens are unchanged; such a room gets heartbeats like any other room with listeners. What has gone
+  is the estate number standing in for a room the sim could not name, which on a parcel-channel region was a
+  room that had never been created. An agent that genuinely belongs to a room but lost its record is placed by
+  rule 2 rather than left to a guess, so a feeder restart no longer addresses a whole region at the estate
+  number.
 
 ---
 
@@ -824,11 +843,13 @@ exclusions do today.
    - A recorder tap or connector peer *inside a declared spatial room* is never armed by today's sim, so it
      would record or hear silence. See open question 3.
 6. **Room addressing can be wrong without anyone noticing, and fail-closed makes that audible.**
-   - Unrecorded agents are addressed at the estate fallback room (`PeerCtlBatchPartitioner.cs:166-178`).
-   - A listener actually in a per-parcel room but unrecorded is armed in the wrong room and **silenced** in
-     its real one.
-   - This is loud rather than silently unenforced, which is the point, but it is a new outage surface. The
-     sink's fallback counters (`JanusPeerCtlBatchSink.cs:143-156`) should read 0 before the knob is enabled.
+   - **Slice 0.8c2 (O-92) removed the guess that made this sharp.** An agent with no record is resolved from
+     its parcel and, failing that, omitted — §7.5. It is no longer armed in the estate room and silenced in its
+     real one; it is armed nowhere until the sim can name its room, which under fail-closed is silence rather
+     than policy delivered to the wrong room.
+   - The counters at `JanusPeerCtlBatchSink.cs` and `VisibilityBatchSender.Unplaced` now count **omissions**,
+     not substitutions, and `show voice visibility` names the rooms the last send addressed. They should read 0
+     before the knob is enabled; a standing non-zero is a bug to chase, not a fallback working.
 7. **Abandoned sends can apply late.** The in-flight guard lets a stuck send complete later
    (`VisibilityBatchSender.cs:184-189`), so today a late delta can overwrite a newer `replace`.
    `policy_generation` / `base` fix this only if the mixer enforces them.
