@@ -30,6 +30,12 @@ With both set the peer fetches a capability before every join, joins with the di
 env `DISPLAY`/`ROOM` that disagrees loses, with a WARN), and on any failure retries with backoff and never joins
 without one. With neither set the join is exactly as before. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
 
+A peer never gives up on its room (slice 0.8f): after any failed join (a 485, a capability refusal, a transport
+error) or a later loss of the room or session, it tears the session down, waits 2 s doubling to 60 s (back to 2 s
+after a join that stayed up 60 s), fetches a fresh capability and joins again, logging one INFO line per attempt
+with the reason and the next delay. A room destroyed under a joined peer sends it nothing, so the peer asks the
+mixer for its room's participants every 5 s and treats a 485, or its own absence from the list, as a lost room.
+
 ## Receiving SLData from the mixer
 
 The mixer's SLData (presence, power batches) does **not** come back on the `SLData` data channel a
