@@ -502,9 +502,19 @@ into the connector registry. It is not being built, in 0.8d or later. It served 
 `CapabilitySecret`: one that has a secret ensures its room at every capability fetch, which is both the retry and the
 re-creation R2b was for. A connector without a secret cannot fetch a capability, so once join capabilities are
 required it cannot join a declared room at all — a room created for it would be a room nothing can enter. The fix for
-such a connector is to give it a `CapabilitySecret`, not to have the sim create rooms on its behalf. What remains is
-bounded and deliberate: a room destroyed by the empty-room grace mid-life is re-created at the peer's next fetch, and
-the backoff (1 s → 30 s, released the moment anything proves the room exists) keeps the interval cheap.
+such a connector is to give it a `CapabilitySecret`, not to have the sim create rooms on its behalf.
+
+**Correction (slice 0.8d, live, ledger O-98).** This paragraph used to say that a room destroyed by the empty-room grace
+mid-life "is re-created at the peer's next fetch". **It is not, as built.** The 0.8d live run showed the opposite: both
+connector rooms were created at registration on an empty mixer, destroyed 60 s later by the grace, and the next fetch
+re-created neither — the grant named the room, the peer's join got `485 No such room`. `EnsureSpatialRoom` goes through
+`SelectRoomCoalesced`, which trusts the sim's process-wide `_knownRooms` hint; that hint is cleared by a sim-side destroy,
+by a join that fails *through the sim*, or by a 10-minute idle sweep, and a connector's join is made by the external peer
+directly against Janus, so none of them fires. Every fetch also refreshes the hint's idle clock. Worse, the false
+"ensured" fired `RoomExists` and reset the unknown_room backoff for a room that did not exist. The fix is ruled for
+slice 0.8f (O-98): the ensure always asks the mixer to create and treats already-exists as success, an unknown_room
+reply forgets the hint for that room, and `RoomExists` fires only on a truthful ensure. The peer, for its part, does not
+retry after a 485 (O-99), also 0.8f. Until then the backoff caps the cost at one attempt per room per 30 s.
 
 ---
 
