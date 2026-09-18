@@ -516,6 +516,27 @@ slice 0.8f (O-98): the ensure always asks the mixer to create and treats already
 reply forgets the hint for that room, and `RoomExists` fires only on a truthful ensure. The peer, for its part, does not
 retry after a 485 (O-99), also 0.8f. Until then the backoff caps the cost at one attempt per room per 30 s.
 
+**Amendment, slice 0.8f-sim (2026-09-18, ledger O-98): the room-exists hint never beats the mixer.** The sim keeps a
+process-wide hint of which rooms it has created, and the mixer's 60 s empty-room grace destroys rooms without telling
+it, so the hint is only ever a guess. Four rules, sim-side, no new config:
+
+1. **The ensure asks the mixer, always.** `EnsureSpatialRoom` goes through `JanusAudioBridge.EnsureRoom`, which sends
+   the create every time and treats already-exists (486) as success; it never answers from the hint. `RoomExists`
+   follows only a non-null answer (`ConnectorRoomResolver.EnsureAndProve`), and a create that fails clears the hint.
+2. **A viewer join answered 485 re-creates inline, once.** `WebRtcJanusService.JoinWithOneRecreate` forgets the hint,
+   re-creates and joins again inside the same provision, before failing back to the viewer; a second 485 fails as
+   before. The hint is a version number, so when several joiners find the same room missing, the first re-creates and
+   the rest see its fresh version and just join: one create. The re-create runs after the per-room create gate has
+   been released, so it cannot deadlock on it.
+3. **An unknown_room reply is believed.** A batch or heartbeat answered unknown_room forgets the hint for that room
+   (`VisAuthority`), so the next select or ensure creates.
+4. **The unknown_room backoff caps at 300 s** (it was 30 s): 1 s doubling to 300 s is 20 attempts in an hour, against
+   124 at the old cap and 1,512 WARNs for two rooms overnight in 0.8d. A room that turns up costs no latency, because
+   whatever proves it exists (an ensure, a provision, an applied reply) calls `RoomExists` and releases the backoff at once.
+
+As built from 0.8f, a room destroyed by the grace **is** re-created at the connector's next fetch, because the fetch's
+ensure asks the mixer - unit-proven here, live proof owed in 0.8g. The peer re-fetching after a 485 (O-99) is still what triggers that fetch.
+
 ---
 
 ## 3. Heartbeat
