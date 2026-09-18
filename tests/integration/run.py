@@ -21,7 +21,7 @@ from pathlib import Path
 
 import aiohttp
 
-from tests.integration.harness import REPO, ROOM_BASE, Admin, Config, Ctx, Fail, Skip, read_env
+from tests.integration.harness import REPO, ROOM_BASE, Admin, Config, Ctx, Fail, Skip, read_env, read_secret_file
 from tests.integration.scenarios import SCENARIOS
 
 
@@ -63,6 +63,12 @@ def parse_args(argv):
     p.add_argument("--container", default="",
                    help="a mixer started with `docker run` (a scratch mixer): every scenario reads its logs, execs into it "
                         "and restarts it by this container name instead of the compose service (O-94)")
+    p.add_argument("--join-cap-secret-file", default="",
+                   help="slice 0.8e: read the mixer's JS_JOIN_CAP_SECRET from a FILE (a bare value, or a dotenv file "
+                        "with a JS_JOIN_CAP_SECRET= line) instead of a command line, so it never reaches the shell "
+                        "history, the process list or this run's output. With a key, every ordinary join into a "
+                        "declared room carries a freshly minted capability, which is what a board against a mixer "
+                        "with JS_JOIN_CAP_REQUIRED=1 needs")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
 
@@ -94,7 +100,8 @@ async def main_async(args) -> int:
         turn_user=turn_user,
         turn_pwd=turn_pwd,
         container=args.container,
-        join_cap_secret=args.join_cap_secret,
+        join_cap_secret=(read_secret_file(args.join_cap_secret_file) if args.join_cap_secret_file
+                         else args.join_cap_secret),
         stale_ms_started_with=args.stale_ms_started_with,
         prove_fail=args.prove_fail,
     )

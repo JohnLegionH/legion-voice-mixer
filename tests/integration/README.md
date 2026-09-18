@@ -38,7 +38,8 @@ self-heals; pass `--no-restart` when people are talking.
 | `--join-timeout N` | `30` | the mixer's `JS_JOIN_MEDIA_TIMEOUT_S`; S10 waits it out (a short value in `.env` makes a full run faster) |
 | `--no-restart` | off | skip S4 and S20 |
 | `--container NAME` | none | a mixer started with `docker run` (a scratch mixer): EVERY log read, exec and restart addresses it (S4 and S20 `docker restart NAME`; S5, S10, S17, S26 (its O-95 capture), S27, S29, S31, S32 `docker logs NAME`; S14 `docker exec NAME`). Without it they address the compose service `janus`, the live mixer (O-94) |
-| `--join-cap-secret S` | none | slice 0.4: the mixer's `JS_JOIN_CAP_SECRET`, so the harness can mint join capabilities as the sim does. Without it S22 and S23 skip |
+| `--join-cap-secret S` | none | slice 0.4: the mixer's `JS_JOIN_CAP_SECRET`, so the harness can mint join capabilities as the sim does. Without it S22 and S23 skip. It lands in the shell history and the process list, so prefer the file form below |
+| `--join-cap-secret-file P` | none | slice 0.8e: the same key read from a FILE — either a bare value or a dotenv file with a `JS_JOIN_CAP_SECRET=` line, so the mixer's own `.env` can be passed as it stands. The value is never printed, logged or echoed; an error names the file, never its content. **With a key given, every ordinary join into a DECLARED room carries a freshly minted capability** (right agent, session and room, a fresh nonce, the room's epoch if the scenario has armed it), which is what a board against a mixer with `JS_JOIN_CAP_REQUIRED=1` needs. Scenarios whose point is a bare, replayed or invalid capability keep control of their own joins (`bare=True`) |
 | `--stale-ms-started-with N` | none | slice 0.5: the `JS_VIS_STALE_MS` this mixer was **started** with, when that is below the §5 minimum (`scratch.sh up-clamp` uses 1000). Without it S31 skips, because a correctly configured mixer cannot show the clamp |
 | `--prove-fail` | off | slice 0.5: report a `SKIP` as a `FAIL`. Only for the "behaviour absent" proof runs against an older image, where a scenario that merely skips proves nothing. **Never for a reporting run** |
 | `-v` | off | peer and harness logs, tracebacks |
@@ -117,6 +118,17 @@ shown wrong; report it, do not bend the scenario to pass.
 a scratch container. `--container NAME` makes every scenario read that container's logs, exec into it and restart it (O-94).
 
 **O-95 capture.** If S26's `a replace for L restores it` fails, it writes `o95-<room>.json` to `$O95_CAPTURE_DIR` (default: the current directory) with L's admin state, the replace and heartbeat timings, and the room's mixer log. Keep that file: it is what classifies O-95.
+
+**The production-shaped board (slice 0.8e).** After slice 0.9 the live mixer runs fail-closed AND capability-required,
+so a board that matches production is:
+
+```sh
+python -m tests.integration.run --no-restart --join-cap-secret-file <the mixer's .env>
+```
+
+against a mixer with `JS_VIS_FAIL_CLOSED=1`, `JS_JOIN_CAP_REQUIRED=1` and `JS_JOIN_CAP_SECRET` set. Without the key
+file every ordinary join into a declared room is refused `cap_missing` and about fifteen scenarios fail — that is the
+harness being wrong, not the mixer. With it, S23, S34 and S36 stop skipping and one board covers them too.
 
 **Phase 0 runs (0.5).** S25-S30, S32, S33 and S35 need `JS_VIS_FAIL_CLOSED=1` and a normal window; S31 needs a mixer
 **started** below the §5 minimum. Both are scratch containers, never the live grid's — `scratch.sh up-fc`

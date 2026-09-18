@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import array
 import asyncio
+import base64
+import hashlib
+import hmac
+import secrets
 import fractions
 import json
 import logging
@@ -129,6 +133,44 @@ def pick(info):
     if not isinstance(info, dict):
         return info
     return {k: info[k] for k in ORACLE_KEYS if k in info}
+
+
+#: Slice 0.4: the epoch field of a capability minted for a room the sim never armed.
+NO_EPOCH = "0" * 16
+
+
+def mint_cap(secret: str, agent: str, session: str, room: int, epoch: str = NO_EPOCH, generation: int = 0,
+             iat: int | None = None, lifetime: int = 60, nonce: str | None = None) -> str:
+    """The sim's JoinCapability.Mint, in Python: v1.<b64url payload>.<b64url HMAC-SHA256>. The secret is never
+    logged or echoed; only what it produced travels."""
+    iat = int(time.time()) if iat is None else iat
+    nonce = nonce or secrets.token_hex(16)
+    payload = f"{agent}|{session}|{room}|{epoch}|{generation}|{iat}|{iat + lifetime}|{nonce}"
+    signing = "v1." + base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    mac = hmac.new(secret.encode(), signing.encode(), hashlib.sha256).digest()
+    return signing + "." + base64.urlsafe_b64encode(mac).decode().rstrip("=")
+
+
+def read_secret_file(path: str) -> str:
+    """Slice 0.8e: the capability key, from a file rather than a command line. Either a bare value or a dotenv file
+    carrying JS_JOIN_CAP_SECRET=... . Every error names the FILE, never a byte of its content."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"--join-cap-secret-file {path}: cannot be read ({e.__class__.__name__})")
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("JS_JOIN_CAP_SECRET="):
+            value = line.split("=", 1)[1].strip().strip('"').strip("'")
+            if not value:
+                raise SystemExit(f"--join-cap-secret-file {path}: JS_JOIN_CAP_SECRET is empty")
+            return value
+    value = text.strip()
+    if not value:
+        raise SystemExit(f"--join-cap-secret-file {path}: empty file, and no JS_JOIN_CAP_SECRET line")
+    if "\n" in value:
+        raise SystemExit(f"--join-cap-secret-file {path}: several lines and no JS_JOIN_CAP_SECRET line")
+    return value
 
 
 async def until(probe, pred, what: str, timeout: float = POLL_TIMEOUT, step: float = POLL_STEP,
@@ -481,6 +523,10 @@ class Admin:
             return None
         return ((data.get("info") or {}).get("webrtc") or {}).get("ice") or {}
 
+    #: slice 0.8e: the epoch this harness last addressed a room with, so an auto-minted capability can carry it.
+    #: A room the scenario has not armed keeps NO_EPOCH, which every mixer since 0.4 admits.
+    room_epochs: dict = {}
+
     async def peer_ctl_batch(self, room: int, op: str = "replace", mute: dict | None = None,
                              excl: dict | None = None, epoch: str | None = None, generation: int | None = None,
                              base: dict | None = None) -> dict:
@@ -493,6 +539,7 @@ class Admin:
         if op == "replace" or mute:
             request["mute"] = mute or {}
         if epoch is not None:
+            Admin.room_epochs[room] = epoch   # slice 0.8e: what an auto-minted capability for this room carries
             request["room_epoch"] = epoch
             request["policy_generation"] = generation
             if base is not None:
@@ -641,6 +688,8 @@ class Control:
     def __init__(self, cfg: Config, http: aiohttp.ClientSession):
         self._janus = JanusHttp(cfg.janus_url, cfg.api_secret, http)
         self._events: dict = {}
+        #: slice 0.8e: rooms this handle created WITH vis_authority (the gated ones)
+        self.declared: set = set()
         self._task: asyncio.Task | None = None
 
     async def open(self) -> "Control":
@@ -674,7 +723,12 @@ class Control:
         return data
 
     async def create_room(self, room: int, description: str, vis_authority: bool = False) -> None:
-        """create; 486 (already there) is fine. vis_authority: the 0.2 sim's declaration (AudioBridgeCreateRoomReq)."""
+        """create; 486 (already there) is fine. vis_authority: the 0.2 sim's declaration (AudioBridgeCreateRoomReq).
+
+        Slice 0.8e: a declared room is remembered, because that is exactly where the mixer gates a join once
+        JS_JOIN_CAP_REQUIRED is on, and so exactly where an ordinary join must carry a capability."""
+        if vis_authority:
+            self.declared.add(room)
         body = {"request": "create", "room": room, "description": description}
         if vis_authority:
             body["vis_authority"] = True
@@ -787,13 +841,30 @@ class Ctx:
         self.rooms.add(room)
         return room
 
+    def _auto_cap(self, room: int, display: str, join_cap, session_id, bare: bool):
+        """Slice 0.8e: what an ORDINARY join carries into a declared room. With no key configured, or for a room
+        nobody declared, or when the scenario is driving the capability itself (it passed one, or asked for a bare
+        join), this changes nothing at all - the join goes out exactly as it did before 0.8e."""
+        if bare or join_cap is not None or session_id is not None or not self.cfg.join_cap_secret:
+            return join_cap, session_id
+        if room not in self.control.declared:
+            return join_cap, session_id
+        session = new_display()
+        epoch = Admin.room_epochs.get(room, NO_EPOCH)
+        return mint_cap(self.cfg.join_cap_secret, display, session, room, epoch=epoch), session
+
     async def join(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                    join_cap: str | None = None, session_id: str | None = None,
-                   recorder: bool = False) -> TestPeer:
+                   recorder: bool = False, bare: bool = False) -> TestPeer:
         """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
-        sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24)."""
+        sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24).
+        Slice 0.8e: an ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
+        given, so a board can run against a mixer with JS_JOIN_CAP_REQUIRED on. `bare=True` keeps a join
+        capability-less on purpose, which is what the capability scenarios themselves test."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
-        peer = TestPeer(self.cfg, name, room, display or new_display(), join_cap=join_cap, session_id=session_id,
+        display = display or new_display()
+        join_cap, session_id = self._auto_cap(room, display, join_cap, session_id, bare)
+        peer = TestPeer(self.cfg, name, room, display, join_cap=join_cap, session_id=session_id,
                         recorder=recorder)
         self.peers.append(peer)
         return await peer.start()
@@ -807,12 +878,14 @@ class Ctx:
 
     async def join_without_media(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                                  join_cap: str | None = None, session_id: str | None = None,
-                                 expect_join: bool = True) -> NoMediaPeer:
+                                 expect_join: bool = True, bare: bool = False) -> NoMediaPeer:
         """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer). Slice 0.4:
         with expect_join False the reply is kept on the peer as `.join_reply` instead of raising, which is how a
         scenario reads a refusal's reason."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
-        peer = await NoMediaPeer(self.cfg, self.http, name, room, display or new_display(),
+        display = display or new_display()
+        join_cap, session_id = self._auto_cap(room, display, join_cap, session_id, bare)
+        peer = await NoMediaPeer(self.cfg, self.http, name, room, display,
                                  join_cap=join_cap, session_id=session_id).open()
         self.background.append(peer)   # teardown stops it: detach + destroy its Janus session
         data = await peer.join()

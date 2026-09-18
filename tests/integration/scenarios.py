@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
-                                       wait_mixer_up)
+                                       wait_mixer_up, mint_cap)
 from tests.integration.source_probe import own_candidates, parse_pair, verdict
 
 
@@ -781,12 +781,10 @@ def _b64u(raw: bytes) -> str:
 
 def _mint_cap(secret: str, agent: str, session: str, room: int, epoch: str = _NO_EPOCH, generation: int = 0,
               iat: int | None = None, lifetime: int = 60, nonce: str | None = None) -> str:
-    """The sim's JoinCapability.Mint, in Python: v1.<b64url payload>.<b64url HMAC-SHA256>."""
-    iat = int(time.time()) if iat is None else iat
-    nonce = nonce or secrets.token_hex(16)
-    payload = f"{agent}|{session}|{room}|{epoch}|{generation}|{iat}|{iat + lifetime}|{nonce}"
-    signing = "v1." + _b64u(payload.encode())
-    return signing + "." + _b64u(hmac.new(secret.encode(), signing.encode(), hashlib.sha256).digest())
+    """The sim's JoinCapability.Mint. Slice 0.8e: one implementation, in harness.mint_cap, shared with the ordinary
+    joins the harness now mints for itself."""
+    return mint_cap(secret, agent, session, room, epoch=epoch, generation=generation, iat=iat, lifetime=lifetime,
+                    nonce=nonce)
 
 
 def _cap_state(info) -> dict:
@@ -839,8 +837,9 @@ async def s22_join_capability_shadow(ctx: Ctx) -> None:
     await ctx.until_info(b, lambda i: (_cap_state(i).get("refused") or {}).get("cap_wrong_agent", 0) >= 1,
                          "shadow: a capability bound to another agent is counted cap_wrong_agent")
 
-    # No capability at all, in a declared room: counted cap_missing, and the join still succeeds.
-    c = await ctx.join("C", r, vis_authority=True)
+    # No capability at all, in a declared room: counted cap_missing, and the join still succeeds. bare=True because
+    # 0.8e otherwise mints one for an ordinary join into a declared room, which is exactly what this leg must not have.
+    c = await ctx.join("C", r, vis_authority=True, bare=True)
     await ctx.ready(c)
     info = await ctx.until_info(c, lambda i: (_cap_state(i).get("refused") or {}).get("cap_missing", 0) >= 1,
                                 "shadow: a join with no capability to a declared room is counted cap_missing")
@@ -885,7 +884,7 @@ async def s23_join_capability_required(ctx: Ctx) -> None:
     # The replay must present the SAME agent and session as the capability binds, or the §11.4 order refuses it at
     # cap_wrong_agent before the nonce is ever consulted. Only the Janus session differs, which is what a replay is.
     await _refused(ctx, "REPLAY", r, da, "cap_replayed", join_cap=good, session_id=session_a)
-    await _refused(ctx, "MISSING", r, new_display(), "cap_missing")
+    await _refused(ctx, "MISSING", r, new_display(), "cap_missing", bare=True)
     await _refused(ctx, "MALFORMED", r, new_display(), "cap_malformed",
                    join_cap="v1.not-a-payload.not-a-signature", session_id=new_display())
 
@@ -1553,7 +1552,10 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
     # The mode probe joins an UNDECLARED room, which the capability never gates: on a mixer that still refuses a
     # capability ahead of it, leg a's own join is refused and would leave nothing to read the mode from.
     probe = await ctx.join_without_media("PROBE", ctx.new_room())
-    await _cap_mode(ctx, probe, want_required=True)
+    probe_state = await _cap_mode(ctx, probe, want_required=True)
+    # The capability counters are PROCESS-WIDE, so on a full board other scenarios have already refused things.
+    # Leg d's claim is about what THIS scenario added, so it is measured as a delta from here (slice 0.8e).
+    base_stale = (probe_state.get("refused") or {}).get("cap_stale_generation", 0)
 
     # (a) A FRESH room the mixer has adopted no epoch for, and a capability minted at generation 5 under an
     # authority the mixer has never heard from. This is the first join into any room the sim has already armed
@@ -1647,8 +1649,10 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
     state = _cap_state(info)
     if state.get("cap_no_epoch", 0) <= before:
         raise Fail("S36 leg d: that join is counted cap_no_epoch", state)
-    if state.get("refused", {}).get("cap_stale_generation", 0) != 1:
-        raise Fail("S36 leg d: leg c's refusal is still the only one in the whole scenario", state)
+    added_stale = (state.get("refused") or {}).get("cap_stale_generation", 0) - base_stale
+    if added_stale != 1:
+        raise Fail("S36 leg d: leg c's refusal is the only one this scenario added",
+                   {"added_cap_stale_generation": added_stale, "join_cap": state})
 
 
 SCENARIOS = [
