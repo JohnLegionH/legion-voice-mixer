@@ -200,7 +200,8 @@ class Injector(ConnectorPeer):
     def __init__(self, cfg: dict):
         super().__init__(cfg, log)
         self._reader = SourceReader(cfg["source"], cfg["loop"])
-        self._track = PipeAudioTrack(self._reader)
+        self._reader_started = False
+        self._track: PipeAudioTrack | None = None
         self._writer = (WavSegmentWriter(cfg["out_dir"], cfg["display"],
                                          cfg["segment_seconds"])
                         if cfg["record"] else None)
@@ -219,9 +220,14 @@ class Injector(ConnectorPeer):
         return {"recorder": True} if self._cfg["record"] else {}
 
     def local_track(self):
-        self._reader.start()
-        log.info("sending from %s (LOOP=%d); silence when idle",
-                 self._cfg["source"], int(self._cfg["loop"]))
+        # Slice 0.8f: called once per join attempt. The reader (and its place in the source) lives for the whole
+        # run; each attempt gets a fresh track over it, because a stopped track cannot be sent again.
+        if not self._reader_started:
+            self._reader.start()
+            self._reader_started = True
+            log.info("sending from %s (LOOP=%d); silence when idle",
+                     self._cfg["source"], int(self._cfg["loop"]))
+        self._track = PipeAudioTrack(self._reader)
         return self._track
 
     def on_audio_track(self, track) -> None:
@@ -245,12 +251,16 @@ class Injector(ConnectorPeer):
                 log.warning("audio track ended: %s", e)
 
     def on_teardown(self) -> None:
-        self._reader.stop()
-        self._track.stop()
+        # One attempt ends; the peer may join again (slice 0.8f), so the reader keeps running.
+        if self._track is not None:
+            self._track.stop()
         if self._rx_task:
             self._rx_task.cancel()
+        if self._writer is not None:
+            self._writer.close()   # finalise the current segment; a rejoin opens the next one
 
     def on_closed(self) -> None:
+        self._reader.stop()
         if self._writer is not None:
             self._writer.close()
             log.info("closed; %d segment(s) written", len(self._writer.segments_written))

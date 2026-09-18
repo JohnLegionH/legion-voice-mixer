@@ -239,7 +239,12 @@ class ToneTrack(MediaStreamTrack):
 class TestPeer(ConnectorPeer):
     """A viewer-shaped peer: ConnectorPeer's join / PeerConnection / data channel lifecycle, plus a
     tone, viewer SLData, and crash() -- the PeerConnection dies and the peer tells Janus nothing more
-    (no leave, no detach), as a crashed or unplugged viewer would."""
+    (no leave, no detach), as a crashed or unplugged viewer would.
+
+    Slice 0.8f: rejoin is off. A scenario reads the outcome of ONE join (a refusal, a hangup), so this peer makes one
+    attempt and stops, as every connector peer did before O-99. S37 drives the real injector, with rejoin on."""
+
+    rejoin = False
 
     def __init__(self, cfg: Config, name: str, room: int, display: str,
                  join_cap: str | None = None, session_id: str | None = None, recorder: bool = False,
@@ -368,7 +373,6 @@ class TestPeer(ConnectorPeer):
         if self.crashed:
             # A crashed viewer sends nothing: no leave, detach or destroy (Ctx.teardown reaps the session).
             await self._pc.close()
-            self.on_closed()
             return
         await super()._shutdown(janus)
 

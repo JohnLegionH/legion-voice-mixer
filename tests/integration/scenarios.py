@@ -1364,10 +1364,13 @@ class CapStub:
 
     BEARER = "s34-connector-bearer-secret-0123456789"
 
-    def __init__(self, key: str, display: str, room: int, session: str):
+    def __init__(self, key: str, display: str, room: int, session: str, name: str = "S34"):
         self._key, self.display, self.room, self.session = key, display, room, session
+        self.name = name
         self.mode = "ok"
         self.hits = {"ok": 0, "replay": 0, "404": 0, "unauthorised": 0}
+        #: slice 0.8f: every capability this stub minted, in order (S37 leg c: each is used at most once)
+        self.issued: list = []
         self._last = None
         self._runner = None
         self.url = ""
@@ -1388,16 +1391,17 @@ class CapStub:
             self._last = {"display": self.display, "room": self.room, "session_id": self.session,
                           "join_cap": _mint_cap(self._key, self.display, self.session, self.room, iat=now),
                           "expires": now + 60}
+            self.issued.append(self._last["join_cap"])
             return web.json_response(self._last)
 
         app = web.Application()
-        app.router.add_post("/voice/connector/S34/join-cap", handle)
+        app.router.add_post(f"/voice/connector/{self.name}/join-cap", handle)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        self.url = f"http://127.0.0.1:{port}/voice/connector/S34/join-cap"
+        self.url = f"http://127.0.0.1:{port}/voice/connector/{self.name}/join-cap"
         return self
 
     async def stop(self) -> None:
@@ -1655,6 +1659,152 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
                    {"added_cap_stale_generation": added_stale, "join_cap": state})
 
 
+# ---- Phase 0 slice 0.8f: a connector peer survives a failed join (ledger O-99) ---------------------------------------
+# 0.8d live: both injectors fetched a capability, joined, got "485 No such room", and sat on a room-less Janus session
+# for nine hours. S37 drives the REAL injector (connectors/injector/injector.py over common/peer.py and joincap.py)
+# against a loopback stub of the sim's capability endpoint, on a mixer that requires a capability.
+
+
+def _s37_tone_wav(path: str) -> None:
+    """One second of 440 Hz, 48 kHz mono s16: the injector's SOURCE, looped."""
+    import math
+    import struct
+    import wave
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(b"".join(struct.pack("<h", int(0.3 * 32767 * math.sin(2 * math.pi * 440 * i / 48000)))
+                               for i in range(48000)))
+
+
+class _S37Watch:
+    """What S37 observes of the real injector: every join it put on the wire (through a recording JanusHttp swapped
+    into common.peer for the scenario's duration) and every plugin answer it got."""
+
+    def __init__(self, display: str):
+        self.display = display
+        self.joins: list = []        # the join_cap each join carried (None = a bare join)
+        self.sessions: list = []     # the Janus session id each join went out on
+        self.answers: list = []      # plugin event data, in arrival order
+
+    def refused_485(self) -> int:
+        return sum(1 for a in self.answers if a.get("error_code") == 485)
+
+    def joined(self) -> int:
+        return sum(1 for a in self.answers if a.get("audiobridge") == "joined")
+
+
+async def s37_connector_rejoins_after_failed_join(ctx: Ctx) -> None:
+    """O-99 / slice 0.8f, JS_JOIN_CAP_REQUIRED=1. (a) The injector's room does not exist: every join gets 485, and the
+    peer keeps retrying, fetching a fresh capability each time; once the harness creates the room the peer joins and
+    its audio reaches the mixer. (b) The joined peer's room is destroyed under it: the peer notices, and rejoins once
+    the room exists again. (c) Every capability the stub issued was put on the wire at most once, and no join was
+    bare."""
+    import tempfile
+
+    import common.peer as peer_mod
+    from common.janus import JanusHttp
+    from injector.injector import Injector
+
+    if not ctx.cfg.join_cap_secret:
+        raise Skip("--join-cap-secret not given: the harness cannot mint what this mixer would accept")
+    anchor = await ctx.join("A", ctx.new_room(), vis_authority=True)
+    await ctx.ready(anchor)
+    await _cap_mode(ctx, anchor, want_required=True)
+
+    r = ctx.new_room()                                   # allocated, and deliberately NOT created yet
+    npc, session = new_display(), new_display()
+    stub = await CapStub(ctx.cfg.join_cap_secret, npc, r, session, name="S37").start()
+    ctx.background.append(stub)
+    watch = _S37Watch(npc)
+
+    class RecordingJanus(JanusHttp):
+        async def message(self, body, jsep=None):
+            if body.get("request") == "join" and body.get("display") == watch.display:
+                watch.joins.append(body.get("join_cap"))
+                watch.sessions.append(self.session_id)
+            return await super().message(body, jsep=jsep)
+
+    class WatchedInjector(Injector):
+        name = "INJ"
+
+        @property
+        def ids(self) -> tuple:
+            return (self.janus.session_id, self.janus.handle_id) if self.janus else (None, None)
+
+        def on_plugin_event(self, data: dict) -> None:
+            super().on_plugin_event(data)
+            if data.get("audiobridge") == "joined" or "error_code" in data:
+                watch.answers.append(data)
+
+    tmp = tempfile.mkdtemp(prefix="s37-")
+    wav = f"{tmp}/tone.wav"
+    _s37_tone_wav(wav)
+    cfg = {"janus_url": ctx.cfg.janus_url, "api_secret": ctx.cfg.api_secret, "room": r, "display": npc,
+           "source": wav, "loop": True, "record": False, "out_dir": tmp, "segment_seconds": 600,
+           **stub.config(backoff=(0.2, 0.5)),
+           # 0.8f tuning so the scenario runs in seconds; production keeps 2 s doubling to 60 s and a 5 s room probe
+           "rejoin_backoff": (0.3, 1.0), "room_probe_s": 0.5}
+    real_janus = peer_mod.JanusHttp
+    peer_mod.JanusHttp = RecordingJanus
+    inj = WatchedInjector(cfg)
+    task = asyncio.create_task(inj.run(), name="peer-S37-injector")
+
+    class Running:
+        async def stop(self):
+            inj.stop()
+            try:
+                await asyncio.wait_for(task, 15.0)
+            except BaseException:
+                pass
+            peer_mod.JanusHttp = real_janus
+
+    ctx.background.append(Running())
+
+    async def state():
+        return {"fetched": stub.hits["ok"], "joins_sent": len(watch.joins), "refused_485": watch.refused_485(),
+                "joined": watch.joined(), "janus_sessions": len(set(watch.sessions)), "peer_task_done": task.done()}
+
+    # (a) no room yet: 485, and again, and again -- each attempt its own fetch and its own Janus session.
+    await until(state, lambda s: s["refused_485"] >= 3 and s["fetched"] >= 3 and s["janus_sessions"] >= 3,
+                "S37 leg a: after '485 No such room' the peer tears down, re-fetches a capability and joins again "
+                "(3 refusals, 3 fetches, 3 Janus sessions)", timeout=20.0)
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    await until(state, lambda s: s["joined"] >= 1, "S37 leg a: once the room exists the retrying peer joins it",
+                timeout=20.0)
+    await ctx.until_info(inj, lambda i: i.get("room") == r and (i.get("rtp_in_count") or 0) > 0,
+                         "S37 leg a: and its audio reaches the mixer (room R, rtp_in_count > 0)", timeout=15.0)
+
+    # (b) the room is destroyed under the joined peer. The mixer evicts it silently (no event), so the peer has to
+    # find out for itself, tear down, and come back once the room exists again.
+    lost_ids = inj.ids
+    fetched_before, joins_before, joined_before = stub.hits["ok"], len(watch.joins), watch.joined()
+    await ctx.control.destroy_room(r)
+    await until(state, lambda s: s["fetched"] > fetched_before and s["joins_sent"] > joins_before,
+                "S37 leg b: the peer notices its room was destroyed, re-fetches a capability and joins again",
+                timeout=20.0)
+    lost = await ctx.admin.handle_info(type("Lost", (), {"ids": lost_ids})())
+    if lost is not None:
+        raise Fail("S37 leg b: the session that lost its room was torn down (its handle is gone)", pick(lost))
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    await until(state, lambda s: s["joined"] > joined_before,
+                "S37 leg b: once the room exists again the peer rejoins it", timeout=20.0)
+    await ctx.until_info(inj, lambda i: i.get("room") == r and (i.get("rtp_in_count") or 0) > 0,
+                         "S37 leg b: and its audio reaches the mixer again", timeout=15.0)
+
+    # (c) one capability per join: never twice, never one the stub did not issue, never none.
+    bare = watch.joins.count(None)
+    reused = max((watch.joins.count(c) for c in watch.joins), default=0)
+    foreign = sum(1 for c in watch.joins if c is not None and c not in stub.issued)
+    if bare or reused > 1 or foreign:
+        raise Fail("S37 leg c: every capability the stub issued was used at most once, and no join was bare",
+                   {"joins": len(watch.joins), "issued": len(stub.issued), "bare": bare, "max_uses": reused,
+                    "not_issued_by_the_stub": foreign})
+    if task.done():
+        raise Fail("S37: the peer is still running at the end", repr(task.exception()))
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1716,4 +1866,6 @@ SCENARIOS = [
              "0.7d fail-closed on, O-95", s35_heartbeat_ordering),
     Scenario("S36", "join capability staleness: a capability ahead of the mixer joins; only an older epoch is refused",
              "0.8b join capability required, O-96, §11.5", s36_join_cap_generation_staleness),
+    Scenario("S37", "connector rejoin: 485 retried with a fresh capability; a destroyed room noticed and rejoined",
+             "0.8f join capability required, O-99", s37_connector_rejoins_after_failed_join),
 ]

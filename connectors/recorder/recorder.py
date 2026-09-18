@@ -64,8 +64,11 @@ class Recorder(ConnectorPeer):
             consume_audio(track, self._writer, self._stopping, log))
 
     def on_teardown(self) -> None:
+        # One attempt ends; the peer may join again (slice 0.8f). Finalise the current segment, so a gap in the
+        # room's audio is a gap between files rather than silence spliced inside one.
         if self._track_task:
             self._track_task.cancel()
+        self._writer.close()
 
     def on_closed(self) -> None:
         self._writer.close()
