@@ -1631,6 +1631,25 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
     if state.get("cap_generation_ahead", 0) < 1:
         raise Fail("S36 leg c: that join is counted cap_generation_ahead", state)
 
+    # (d) Slice 0.8b ruling change: a capability carrying NO epoch at all, against a room that HAS adopted one.
+    # No epoch means the sim held no authority state for that room when it minted; it is not evidence of an older
+    # authority, and it is ordinary - the sim forgets a room while the mixer still holds its epoch through the
+    # empty-room grace, and the same avatar rejoins. It must be admitted, and counted as its own case.
+    before = _cap_state(await ctx.info(d)).get("cap_no_epoch", 0)
+    de, se = new_display(), new_display()
+    e = await ctx.join_without_media("NOEPOCH", r2, de, vis_authority=True, expect_join=False,
+                                     join_cap=_mint_cap(secret, de, se, r2), session_id=se)
+    if (e.join_reply or {}).get("audiobridge") != "joined":
+        raise Fail("S36 leg d: a capability with NO epoch joins a room that has adopted one (0.8b)", e.join_reply)
+    info = await ctx.info(e)
+    if info.get("join_cap_verdict") != "ok":
+        raise Fail("S36 leg d: the O-91 verdict for the no-epoch join is ok", pick(info))
+    state = _cap_state(info)
+    if state.get("cap_no_epoch", 0) <= before:
+        raise Fail("S36 leg d: that join is counted cap_no_epoch", state)
+    if state.get("refused", {}).get("cap_stale_generation", 0) != 1:
+        raise Fail("S36 leg d: leg c's refusal is still the only one in the whole scenario", state)
+
 
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),

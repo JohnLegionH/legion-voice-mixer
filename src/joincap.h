@@ -107,6 +107,7 @@ slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_e
 typedef enum slv_joincap_gen_note {
 	SLV_JOINCAP_GEN_MATCH = 0,     /*!< the room's own (epoch, generation) — or a capability that was refused */
 	SLV_JOINCAP_GEN_EPOCH_AHEAD,   /*!< a higher epoch than the room has adopted (including: it has adopted none) */
+	SLV_JOINCAP_GEN_NO_EPOCH,      /*!< 0.8b: no epoch at all, against a room that HAS adopted one (accepted) */
 	SLV_JOINCAP_GEN_AHEAD,         /*!< same epoch, a generation above what the mixer has applied */
 	SLV_JOINCAP_GEN_BEHIND,        /*!< same epoch, a generation below what the mixer has applied */
 } slv_joincap_gen_note;

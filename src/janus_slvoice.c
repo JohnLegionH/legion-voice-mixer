@@ -370,6 +370,7 @@ static volatile gint slv_join_cap_refused[SLV_JOINCAP_STALE_GENERATION + 1];   /
  * a refusal — they are the ordinary races between the sim ALLOCATING a generation and the mixer APPLYING one,
  * reported so a soak can see how often the two are apart without a join ever being lost to it. */
 static volatile gint slv_join_cap_epoch_ahead;    /* a higher epoch than adopted, or the room has adopted none */
+static volatile gint slv_join_cap_no_epoch;       /* 0.8b: no epoch at all against a room that has adopted one */
 static volatile gint slv_join_cap_gen_ahead;      /* same epoch, a generation the mixer has not applied yet */
 static volatile gint slv_join_cap_gen_behind;     /* same epoch, a batch landed between minting and joining */
 
@@ -1404,6 +1405,8 @@ static slv_joincap_verdict janus_slvoice_joincap_verify(const char *cap, const c
 				if(note != SLV_JOINCAP_GEN_MATCH) {
 					if(note == SLV_JOINCAP_GEN_EPOCH_AHEAD)
 						g_atomic_int_inc(&slv_join_cap_epoch_ahead);
+					else if(note == SLV_JOINCAP_GEN_NO_EPOCH)
+						g_atomic_int_inc(&slv_join_cap_no_epoch);
 					else if(note == SLV_JOINCAP_GEN_AHEAD)
 						g_atomic_int_inc(&slv_join_cap_gen_ahead);
 					else
@@ -1867,6 +1870,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		/* O-96: accepted, and counted only so the difference is visible. A soak reads these beside
 		 * refused.cap_stale_generation, which after 0.8b can only mean an epoch below the room's adopted one. */
 		json_object_set_new(jcap, "cap_epoch_ahead", json_integer(g_atomic_int_get(&slv_join_cap_epoch_ahead)));
+		json_object_set_new(jcap, "cap_no_epoch", json_integer(g_atomic_int_get(&slv_join_cap_no_epoch)));
 		json_object_set_new(jcap, "cap_generation_ahead", json_integer(g_atomic_int_get(&slv_join_cap_gen_ahead)));
 		json_object_set_new(jcap, "cap_generation_behind", json_integer(g_atomic_int_get(&slv_join_cap_gen_behind)));
 		janus_mutex_lock(&slv_join_cap_mutex);

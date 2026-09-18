@@ -231,12 +231,17 @@ slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_e
 	if(c == NULL)
 		return SLV_JOINCAP_MALFORMED;
 	/* §11.5 as the 0.8b amendment restates it (O-96): the epoch is what makes a capability die with its
-	 * authority, and ONLY an epoch below the adopted one proves the authority that minted it is gone. An epoch
-	 * above it, or a room that has adopted none (auth_epoch 0, which nothing is below), means the mixer has not
-	 * caught up — a capability admits a join, it does not adopt an epoch. The generation is not a bound in
+	 * authority, and ONLY a NON-ZERO epoch below the adopted one proves the authority that minted it is gone. An
+	 * epoch above it, or a room that has adopted none (auth_epoch 0, which nothing is below), means the mixer has
+	 * not caught up — a capability admits a join, it does not adopt an epoch. The generation is not a bound in
 	 * either direction: the sim publishes it when ALLOCATED and the mixer holds what it has APPLIED, so ahead
-	 * and behind are both ordinary races between minting, sending and joining. */
-	if(c->epoch < auth_epoch)
+	 * and behind are both ordinary races between minting, sending and joining.
+	 *
+	 * NO epoch (0) is ACCEPTED whatever the room has adopted (0.8b ruling change). A zero epoch means the sim held
+	 * no authority state for that room when it minted, which is not evidence of an older authority, and it is
+	 * easily reached: the sim forgets a room while the mixer still holds its epoch through the empty-room grace,
+	 * and the same avatar rejoins. Refusing it would refuse an ordinary rejoin. */
+	if(c->epoch != 0 && c->epoch < auth_epoch)
 		return SLV_JOINCAP_STALE_GENERATION;
 	return SLV_JOINCAP_OK;
 }
@@ -244,6 +249,7 @@ slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_e
 const char *slv_joincap_gen_note_str(slv_joincap_gen_note n) {
 	switch(n) {
 		case SLV_JOINCAP_GEN_EPOCH_AHEAD: return "cap_epoch_ahead";
+		case SLV_JOINCAP_GEN_NO_EPOCH:    return "cap_no_epoch";
 		case SLV_JOINCAP_GEN_AHEAD:       return "cap_generation_ahead";
 		case SLV_JOINCAP_GEN_BEHIND:      return "cap_generation_behind";
 		case SLV_JOINCAP_GEN_MATCH:       break;
@@ -253,8 +259,12 @@ const char *slv_joincap_gen_note_str(slv_joincap_gen_note n) {
 
 slv_joincap_gen_note slv_joincap_generation_note(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen) {
 	/* A refused capability says nothing here; the refusal is what gets counted. */
-	if(c == NULL || c->epoch < auth_epoch)
+	if(c == NULL || (c->epoch != 0 && c->epoch < auth_epoch))
 		return SLV_JOINCAP_GEN_MATCH;
+	/* 0.8b: accepted with no epoch at all, against a room that has adopted one - its own counter, because it is
+	 * the case the ruling changed. Arming off on both sides (0 against 0) is not this: nothing to report. */
+	if(c->epoch == 0 && auth_epoch != 0)
+		return SLV_JOINCAP_GEN_NO_EPOCH;
 	if(c->epoch > auth_epoch)
 		return SLV_JOINCAP_GEN_EPOCH_AHEAD;
 	if(c->generation > policy_gen)

@@ -170,10 +170,12 @@ static void test_generation(void) {
 	plain.epoch = 0;
 	plain.generation = 0;
 	CHECK(slv_joincap_generation(&plain, 0, 0) == SLV_JOINCAP_OK, "arming off on both sides: accepted");
-	/* The one asymmetry the rule leaves standing, recorded deliberately: a capability carrying NO epoch (the
-	 * sim resolved a room it never armed) is numerically below any adopted epoch, so it is refused. */
-	CHECK(slv_joincap_generation(&plain, EPOCH, GEN) == SLV_JOINCAP_STALE_GENERATION,
-		"a capability with no epoch at all, against a room that has adopted one: cap_stale_generation (O-96)");
+	/* Slice 0.8b ruling change: a capability carrying NO epoch is ACCEPTED, whatever the room has adopted. No
+	 * epoch means the sim held no authority state for that room when it minted, which is not proof of an older
+	 * authority - and it is easily reached: the sim forgets a room while the mixer still holds its epoch through
+	 * the 60 s empty-room grace, and the same avatar rejoins. Only a NON-ZERO epoch below the adopted one refuses. */
+	CHECK(slv_joincap_generation(&plain, EPOCH, GEN) == SLV_JOINCAP_OK,
+		"a capability with no epoch at all, against a room that has adopted one: accepted (O-96, 0.8b)");
 }
 
 /* O-96: what a difference that was ACCEPTED is counted as. The verdict above says nothing about which race
@@ -193,6 +195,15 @@ static void test_generation_notes(void) {
 		"a room that has adopted no epoch: cap_epoch_ahead");
 	CHECK(slv_joincap_generation_note(&c, EPOCH + 1, GEN) == SLV_JOINCAP_GEN_MATCH,
 		"a refused capability counts nothing here: the refusal is what is counted");
+	slv_joincap none = c;
+	none.epoch = 0;
+	CHECK(slv_joincap_generation_note(&none, EPOCH, GEN) == SLV_JOINCAP_GEN_NO_EPOCH,
+		"no epoch at all against an adopted one: cap_no_epoch (O-96, 0.8b)");
+	none.generation = 0;
+	CHECK(slv_joincap_generation_note(&none, 0, 0) == SLV_JOINCAP_GEN_MATCH,
+		"arming off on both sides is not cap_no_epoch: nothing to count");
+	CHECK(!strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_NO_EPOCH), "cap_no_epoch"),
+		"the no-epoch counter name is what the reports carry");
 	CHECK(!strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_EPOCH_AHEAD), "cap_epoch_ahead")
 		&& !strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_AHEAD), "cap_generation_ahead")
 		&& !strcmp(slv_joincap_gen_note_str(SLV_JOINCAP_GEN_BEHIND), "cap_generation_behind"),

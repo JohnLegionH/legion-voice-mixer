@@ -1011,14 +1011,47 @@ Every refusal answers `error_code` 496 with a `reason` a sim can branch on; none
 | `cap_expired` | `exp` is in the past, or `iat` in the future, beyond the skew tolerance |
 | `cap_replayed` | this nonce has been seen |
 | `cap_replay_store_full` | the nonce store is full, so replay cannot be ruled out (§11.6) |
-| `cap_stale_generation` | the epoch or generation is not the room's current arming state (§11.5) |
+| `cap_stale_generation` | the capability's epoch is NON-ZERO and LOWER than the room's adopted epoch (§11.5, amended 2026-09-17) |
+
+**Amendment 2026-09-17 (slice 0.8b, ledger O-96).** That last row used to read "the epoch or generation is not the
+room's current arming state", and the mixer refused any generation above the room's `policy_generation` and any epoch
+that differed. Measured live in the 0.8 soak with the knob off, that refused **two of four ordinary avatar joins**
+(`cap_stale_generation` 2 of `seen` 5), each the first join into a room the mixer had not yet applied a generation
+for. **The generation is now information, never a refusal, in either direction; and only a NON-ZERO epoch below the
+adopted one refuses.** A capability with no epoch at all is ACCEPTED. The three accepted-but-different cases are
+counted instead — `cap_generation_ahead`, `cap_generation_behind`, `cap_epoch_ahead`, and `cap_no_epoch` — reported
+in the Admin API's visibility block beside the refusal counters, and logged once per join.
 
 ### 11.5 Generation, and why it is not the session id again
 
-The capability carries the room's `(epoch, generation)` as the sim believed them at issue. The mixer refuses when
-the epoch differs from its adopted `auth_epoch`, or when the generation is above the room's `policy_generation`
-(a generation the mixer has not seen). A capability minted under an older authority therefore dies with that
-authority instead of outliving it for its remaining lifetime.
+The capability carries the room's `(epoch, generation)` as the sim believed them at issue.
+
+**Amendment 2026-09-17 (slice 0.8b, ledger O-96): the generation never refuses; only a non-zero epoch below the
+adopted one does.** The rule is now:
+
+| the capability carries | against the room's adopted epoch | verdict | counted as |
+|---|---|---|---|
+| epoch E, generation above `policy_generation` | same E | **accepted** | `cap_generation_ahead` |
+| epoch E, generation below `policy_generation` | same E | **accepted** | `cap_generation_behind` |
+| epoch above the adopted one | lower E, or none adopted | **accepted** | `cap_epoch_ahead` |
+| **no epoch (0)** | any, including an adopted E | **accepted** | `cap_no_epoch` |
+| non-zero epoch BELOW the adopted one | higher E | **refused** `cap_stale_generation` | the refusal counter |
+
+Why each:
+- **Ahead** is the normal case, not a fault. The sim publishes a room's `(epoch, generation)` when a generation is
+  **allocated** (`VisAuthority.NextGeneration` -> `JoinCapabilityAuthority.Publish`, read at `JanusRoom.cs:80`),
+  while the mixer holds what it has **applied**. Every first join into a fresh room, every room whose batch is in
+  flight or was dropped, and every room re-created after a grace destroy is ahead. Refusing it refused real joins.
+- **Behind** means a batch landed between minting and joining. Also a race, also not evidence.
+- **No epoch** means the sim held no authority state for that room when it minted — not proof of an older
+  authority. It is easily reached: the sim forgets a room while the mixer still holds its epoch through the
+  empty-room grace, and the same avatar rejoins. Refusing it would refuse an ordinary rejoin. **This is the 0.8b
+  ruling change**; the first 0.8b pass (`171af94`) still refused it, as numerically below any adopted epoch.
+- **A non-zero epoch below the adopted one** is the one case that proves the authority which minted the capability
+  is gone: the mixer has since adopted a higher epoch. That, and only that, refuses.
+
+A capability minted under an older authority therefore still dies with that authority, which is what §11.5 was for;
+it simply no longer takes ordinary joins with it.
 
 The audit's field list says "generation" alone. **Generation alone cannot express "did not survive an epoch
 change"**: generations restart at 1 in a new epoch, so an old capability can coincidentally match a new one. The
