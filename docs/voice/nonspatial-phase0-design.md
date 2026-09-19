@@ -553,6 +553,30 @@ ensure asks the mixer - unit-proven here, live proof owed in 0.8g. The peer re-f
   viewer path - or a retry on a fresh handle) are for Claude to rule on; ledger O-98 stays open.
 - The first `485` is still logged at ERROR by `JanusRoom.JoinRoom`; on a path that recovers it should not be.
 
+**Amendment, slice 0.8i (2026-09-19, ledger O-98): R2 is REPLACED - the viewer path creates before it joins.**
+0.8f's R2 (on a 485, re-create and re-send the join inline) is removed, not repaired: a JSEP-bearing join can never be
+re-sent on the handle that carried it, because Janus core builds the handle's ICE agent from the offer before the
+plugin looks at the room and refuses a second JSEP join on that handle with 490 (harness S39 pins this against a
+real Janus). What replaces it:
+
+- **A1 - create before every JSEP join.** `SelectRoom` sends the create every time and treats already-exists (486) as
+  success, before the join - R1's rule, now on every path, so the join never meets a room the sim merely believed
+  in. The process-wide "room exists" hint is **deleted**: after A1 it had no decision reader left and nothing else
+  needed it. A per-room gate remains, serializing creates of one room number so concurrent provisions send one
+  "created" and 486s.
+- **A2 - no same-handle retry.** A 485 that still happens (the grace sweep landing between the create and the join)
+  fails the provision back to the viewer exactly as before - same failure map - with one WARN and no ERROR; the
+  viewer's own retry sends a fresh create on a fresh handle.
+- **A3** - the 486 "already exists. Reusing!" line is DEBUG: it is the normal case on almost every provision now.
+- **A4** - two provisions into one missing room: one room created, both joined (the loser's 486 is success).
+- **Mixer (F2).** A create answered 486 now re-arms an EMPTY room's grace clock (`janus_slvoice_room_rearm_grace_locked`),
+  so a room in its last second of grace cannot be destroyed between the sim's create and its join; occupied and
+  permanent rooms are untouched, and a room nobody joins is still reclaimed one grace after its last create. This
+  changes the mixer image.
+
+The cost is one create round trip per provision - a few milliseconds (the 0.8g live creates answered in 2-7 ms). Live proof owed
+in the next deploy: a return visit inside the ten-minute window joins in tens of milliseconds, with no ERROR.
+
 ---
 
 ## 3. Heartbeat
