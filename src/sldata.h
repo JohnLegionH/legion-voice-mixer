@@ -56,7 +56,11 @@ typedef enum slv_field {
 	SLV_FIELD_ECHO = 1u << 8,  /*!< "echo" — slvoice echo-mode toggle (extension) */
 } slv_field;
 
-/*! \brief A 3D vector in region-local metres. */
+/*! \brief A 3D vector as the viewer sends it: GLOBAL coordinates in centimetres (metres x 100), integers
+ * on the wire. Firestorm builds "sp" from getPositionGlobal() and "lp" from getPosGlobalFromRegion(camera), each
+ * (int)(v * 100) (llvoicewebrtc.cpp:1108, :1119, :1241-1256), and sends the same payload to every session,
+ * neighbour regions included. The mixer only ever uses differences, so every participant - a connector too
+ * (slice 0.8h) - must be in this one frame. (This comment used to say "region-local metres"; it never was.) */
 typedef struct slv_vec3 { double x, y, z; } slv_vec3;
 
 /*! \brief An orientation quaternion. */

@@ -1374,6 +1374,8 @@ class CapStub:
         self._last = None
         self._runner = None
         self.url = ""
+        #: slice 0.8h: when set, the grant carries "position": {"x","y","z"} in GLOBAL centimetres, as the sim's does
+        self.position = None
 
     async def start(self) -> "CapStub":
         from aiohttp import web
@@ -1391,6 +1393,9 @@ class CapStub:
             self._last = {"display": self.display, "room": self.room, "session_id": self.session,
                           "join_cap": _mint_cap(self._key, self.display, self.session, self.room, iat=now),
                           "expires": now + 60}
+            if self.position is not None:
+                self._last["position"] = {"x": int(self.position[0]), "y": int(self.position[1]),
+                                          "z": int(self.position[2])}
             self.issued.append(self._last["join_cap"])
             return web.json_response(self._last)
 
@@ -1861,6 +1866,115 @@ async def s39_jsep_join_cannot_be_resent_on_the_same_handle(ctx: Ctx) -> None:
             pass
 
 
+# ---- S38: a connector has a position (slice 0.8h, O-62) -------------------------------------------------------------
+# 0.8g, live: the injector never sent sp or lp, so the mixer held no geometry for it and mixed it FLAT - the same level
+# to everyone in its room, at any distance. Now the sim's grant carries the connector's position in the viewer's own
+# frame (global centimetres, integers) and the REAL connector peer sends it as SLData once its data channel opens. The
+# listener here is a TestPeer at a fixed global point; the source is the real Injector, fed a position by the stub
+# endpoint. The mixer's numbers (janus_slvoice.c): full gain inside 10 m, gain ((60 - d) / 50)^2 out to 60 m, culled at
+# and beyond 60 m.
+S38_ORIGIN_M = 256000.0                                    # a region at grid (1000, 1000)
+S38_LISTENER_M = (S38_ORIGIN_M + 128.0, S38_ORIGIN_M + 128.0, 22.0)
+
+
+async def _s38_level(ctx: Ctx, listener, source_display: str, samples: int = 8) -> float:
+    """The listener's last_mix_rms, the median of a few readings a quarter-second apart."""
+    vals = []
+    for _ in range(samples):
+        info = await ctx.admin.handle_info(listener) or {}
+        vals.append(float(info.get("last_mix_rms") or 0.0))
+        await asyncio.sleep(0.25)
+    vals.sort()
+    return vals[len(vals) // 2]
+
+
+async def s38_connector_position_is_spatialised(ctx: Ctx) -> None:
+    import os
+    import tempfile
+
+    import common.peer as peer_mod
+    from injector.injector import Injector
+
+    if not ctx.cfg.join_cap_secret:
+        raise Skip("--join-cap-secret not given: the harness cannot mint the stub's capabilities")
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}")
+    listener = await ctx.join("L", r)
+    await ctx.ready(listener)
+    listener.send_geometry(*S38_LISTENER_M)
+
+    # Mutation proof: a peer that sends the record's REGION-LOCAL METRES, as a naive implementation would, instead of
+    # global centimetres. Leg a must then fail on its own text: the connector is ~256 km from every avatar, so culled.
+    real_encoder = peer_mod.geometry_message
+    if os.environ.get("S38_MUTANT") == "region-local-metres":
+        peer_mod.geometry_message = lambda cm: real_encoder(
+            (cm[0] / 100.0 - S38_ORIGIN_M, cm[1] / 100.0 - S38_ORIGIN_M, cm[2] / 100.0))
+
+    tmp = tempfile.mkdtemp(prefix="s38-")
+    wav = f"{tmp}/tone.wav"
+    _s37_tone_wav(wav)
+    npc, session = new_display(), new_display()
+    stub = await CapStub(ctx.cfg.join_cap_secret, npc, r, session, name="S38").start()
+    ctx.background.append(stub)
+
+    class PlacedInjector(Injector):
+        name = "INJ"
+
+        @property
+        def ids(self) -> tuple:
+            return (self.janus.session_id, self.janus.handle_id) if self.janus else (None, None)
+
+    async def run_leg(position_m):
+        stub.position = None if position_m is None else tuple(round(v * 100) for v in position_m)
+        cfg = {"janus_url": ctx.cfg.janus_url, "api_secret": ctx.cfg.api_secret, "room": r, "display": npc,
+               "source": wav, "loop": True, "record": False, "out_dir": tmp, "segment_seconds": 600,
+               **stub.config(backoff=(0.2, 0.5)), "rejoin_backoff": (0.3, 1.0)}
+        inj = PlacedInjector(cfg)
+        task = asyncio.create_task(inj.run(), name="peer-S38-injector")
+
+        async def src_state():
+            info = dict(await ctx.admin.handle_info(inj) or {})
+            info["peer_position_cm"] = inj.position_cm
+            info["peer_channel"] = getattr(inj.channel, "readyState", None)
+            return info
+
+        want = "sp" if position_m is not None else None
+        await until(src_state, lambda s: s.get("room") == r and (want is None or want in (s.get("last_data_fields_seen") or "")),
+                    "S38: the connector joined and (when it has one) its position reached the mixer", timeout=20.0)
+        await asyncio.sleep(2.0)                          # a few mix ticks at the settled geometry
+        level = await _s38_level(ctx, listener, npc)
+        src = await src_state()
+        inj.stop()
+        try:
+            await asyncio.wait_for(task, 15.0)
+        except BaseException:
+            pass
+        await asyncio.sleep(1.0)
+        return level, src
+
+    x, y, z = S38_LISTENER_M
+    try:
+        l10, src10 = await run_leg((x + 10.0, y, z))
+        if not l10 > 0.01:
+            raise Fail("S38 leg a: 10 m away the connector is audible (level L10 > 0.01)",
+                       {"L10": l10, "fields": src10.get("last_data_fields_seen")})
+        l50, _ = await run_leg((x + 50.0, y, z))
+        if not (0.0 < l50 < 0.5 * l10):
+            raise Fail("S38 leg b: 50 m away the connector is audible and quieter than at 10 m "
+                       "(mixer falloff ((60-50)/50)^2 = 0.04)", {"L10": l10, "L50": l50, "ratio": l50 / l10})
+        l70, _ = await run_leg((x + 70.0, y, z))
+        if l70 > 1e-4:
+            raise Fail("S38 leg c: beyond the mixer's 60 m cull distance the connector is silent", {"L70": l70})
+        lflat, srcflat = await run_leg(None)
+        if not lflat > 0.01 or "sp" in (srcflat.get("last_data_fields_seen") or ""):
+            raise Fail("S38 leg d: with no position the connector is mixed flat, as before 0.8h - audible where a "
+                       "positioned one 70 m away was silent", {"L_flat": lflat,
+                                                               "fields": srcflat.get("last_data_fields_seen")})
+        print(f"      S38 levels: L10={l10:.4f} L50={l50:.4f} (ratio {l50 / l10:.3f}) L70={l70:.5f} flat={lflat:.4f}")
+    finally:
+        peer_mod.geometry_message = real_encoder
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1924,6 +2038,8 @@ SCENARIOS = [
              "0.8b join capability required, O-96, §11.5", s36_join_cap_generation_staleness),
     Scenario("S37", "connector rejoin: 485 retried with a fresh capability; a destroyed room noticed and rejoined",
              "0.8f join capability required, O-99", s37_connector_rejoins_after_failed_join),
+    Scenario("S38", "a connector has a position: 10 m audible, 50 m quieter, beyond the cull silent, none = flat",
+             "0.8h, O-62", s38_connector_position_is_spatialised),
     Scenario("S39", "a JSEP join cannot be re-sent on the same handle: 485, then core refuses it 490; a fresh handle joins",
              "0.8i, O-98 (why the sim creates before it joins)", s39_jsep_join_cannot_be_resent_on_the_same_handle),
 ]

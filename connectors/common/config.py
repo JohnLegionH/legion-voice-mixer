@@ -40,6 +40,27 @@ def capability_env(prog: str, environ=os.environ) -> tuple:
     return (url, secret) if url else (None, None)
 
 
+POSITION_ENV = "CONNECTOR_POSITION_GLOBAL_CM"
+
+
+def position_env(prog: str, environ=os.environ):
+    """Slice 0.8h (O-62): CONNECTOR_POSITION_GLOBAL_CM=x,y,z - this connector's position in the frame a viewer's
+    SLData uses: GLOBAL centimetres as integers, (region global origin + position in the region) x 100. For a peer with
+    no CONNECTOR_CAP_URL; with one, the sim's grant carries the position and wins. Unset returns None: no position,
+    mixed non-spatially (the peer warns once at start). Malformed is fatal, like the capability pair."""
+    raw = (environ.get(POSITION_ENV) or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",")]
+    try:
+        if len(parts) != 3:
+            raise ValueError(raw)
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        sys.exit(f"{prog}: {POSITION_ENV} must be three integers x,y,z in GLOBAL centimetres "
+                 f"((region origin + position) x 100, the viewer's own SLData frame), got {raw!r}")
+
+
 def base_env(prog: str) -> dict:
     """The env keys every peer needs. ROOM and DISPLAY come from the sim's
     registration line; JANUS_URL is compose-derived (see docker-compose.yml)."""
@@ -59,6 +80,7 @@ def base_env(prog: str) -> dict:
         cfg["room"] = int(cfg["room"])
     except ValueError:
         sys.exit(f"{prog}: ROOM must be an integer room number, got {cfg['room']!r}")
+    cfg["position_cm"] = position_env(prog)   # slice 0.8h; a grant's "position" replaces it at every join
     if cap_url:
         # Slice 0.7b: the sim's grant supplies display and room at every join; the env values are the expectation
         # it is compared against (common/peer.py warns when they disagree).

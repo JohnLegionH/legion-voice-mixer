@@ -51,6 +51,18 @@ from aiortc.sdp import candidate_from_sdp
 from common.janus import KEEPALIVE_SECONDS, JanusHttp
 from common.joincap import DEFAULT_BACKOFF, fetch_until_granted
 
+#: slice 0.8h: the identity quaternion a viewer sends as x100 integers (the harness's send_geometry sends the same)
+IDENTITY_ROT = {"x": 0, "y": 0, "z": 0, "w": 100}
+
+
+def geometry_message(position_cm) -> str:
+    """Slice 0.8h (O-62): one SLData spatial message putting this peer at `position_cm` - GLOBAL centimetres as
+    integers, the viewer's own frame (Firestorm llvoicewebrtc.cpp:1241-1262: sp, sh, lp, lh, each (int)(v * 100)).
+    sp and lp are the same point (a connector has no camera), sh and lh the identity, as the harness's send_geometry
+    sends them; byte for byte the same encoding. The mixer parses it at sldata.c:134-146."""
+    pos = {"x": int(position_cm[0]), "y": int(position_cm[1]), "z": int(position_cm[2])}
+    return json.dumps({"sp": pos, "sh": IDENTITY_ROT, "lp": pos, "lh": IDENTITY_ROT}, separators=(",", ":"))
+
 #: Slice 0.8f: (first delay, ceiling) in seconds between attempts; doubles between them.
 REJOIN_BACKOFF = (2.0, 60.0)
 #: a join that stayed up this long resets the backoff to its first delay
@@ -92,6 +104,9 @@ class ConnectorPeer:
     shutdown_note = ""
     #: slice 0.8f: rejoin after a failed join or a lost room/session. The harness's TestPeer sets it False.
     rejoin = True
+    #: slice 0.8h: warn once at start when this peer has no position. The harness's TestPeer sets it False: it sends
+    #: its own geometry (send_geometry).
+    position_warning = True
 
     def __init__(self, cfg: dict, log: logging.Logger):
         self._cfg = cfg
@@ -103,6 +118,9 @@ class ConnectorPeer:
         self.janus: JanusHttp | None = None
         #: the SLData data channel once an attempt has created it
         self.channel = None
+        #: slice 0.8h (O-62): this peer's position, GLOBAL centimetres (x, y, z) as integers, or None - from
+        #: CONNECTOR_POSITION_GLOBAL_CM at start, replaced by the sim's grant at every join that carries one
+        self.position_cm = cfg.get("position_cm")
         self._attempts = 0
         self._joined_at: float | None = None
         self._my_id = None
@@ -140,6 +158,11 @@ class ConnectorPeer:
         first, ceiling = cfg.get("rejoin_backoff", REJOIN_BACKOFF)
         backoff = RejoinBackoff(first, ceiling, cfg.get("rejoin_stable_s", REJOIN_STABLE_S))
         attempt = 0
+        if self.position_warning and self.position_cm is None and not cfg.get("cap_url"):
+            # Slice 0.8h (O-62, R3): exactly today's behaviour, said once.
+            self._log.warning("no position: neither a capability grant (CONNECTOR_CAP_URL) nor "
+                              "CONNECTOR_POSITION_GLOBAL_CM is configured, so the mixer has no geometry for this "
+                              "connector and mixes it non-spatially - the same level to everyone in its room")
         try:
             async with aiohttp.ClientSession() as http:
                 while not self._stopping.is_set():
@@ -201,8 +224,7 @@ class ConnectorPeer:
                 # addTrack negotiates the same sendrecv m-line, carrying the track.
                 self._pc.addTrack(track)
             channel = self._pc.createDataChannel("SLData")
-            channel.on("message", self._on_sldata)
-            self.channel = channel
+            self._wire_channel(channel)
             self._pc.on("track", self._on_track)
             # The mixer's SLData (presence, power batches) does not come back on the channel created
             # above: the plugin sends with no label, so Janus opens its own "JanusDataChannel" toward
@@ -238,6 +260,22 @@ class ConnectorPeer:
     def stop(self) -> None:
         self._stopping.set()
 
+    def _wire_channel(self, channel) -> None:
+        """The attempt's SLData channel. Slice 0.8h (O-62): once it opens, send this peer's position, so the mixer
+        places it instead of mixing it flat to the whole room. Every attempt (so every rejoin) builds a new channel and
+        sends again. The channel is ordered and reliable (aiortc's defaults: no maxRetransmits or maxPacketLifeTime),
+        so one send per channel is enough, and the mixer keeps a session's last SLData until the next."""
+        channel.on("message", self._on_sldata)
+        self.channel = channel
+
+        def on_open() -> None:
+            if self.position_cm is None:
+                return
+            channel.send(geometry_message(self.position_cm))
+            self._log.info("position sent on the data channel: global cm %s", ",".join(str(v) for v in self.position_cm))
+
+        channel.on("open", on_open)
+
     def _adopt_grant(self, grant: dict) -> None:
         """The sim's grant is authoritative for display and room; an env value that disagrees loses, loudly."""
         cfg = self._cfg
@@ -246,6 +284,10 @@ class ConnectorPeer:
                 self._log.warning("%s from the environment (%s) differs from the sim's capability grant (%s); "
                                   "using the grant", key.upper(), cfg[key], grant[key])
             cfg[key] = grant[key]
+        # Slice 0.8h (O-62): the sim computes the position at every fetch; it replaces whatever this peer held.
+        pos = grant.get("position")
+        if isinstance(pos, dict) and all(k in pos for k in ("x", "y", "z")):
+            self.position_cm = (int(pos["x"]), int(pos["y"]), int(pos["z"]))
         self.on_identity(cfg["display"], cfg["room"])
 
     # ---- event plumbing

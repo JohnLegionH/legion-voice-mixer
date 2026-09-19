@@ -245,6 +245,8 @@ class TestPeer(ConnectorPeer):
     attempt and stops, as every connector peer did before O-99. S37 drives the real injector, with rejoin on."""
 
     rejoin = False
+    #: slice 0.8h: a test peer sends its own geometry (send_geometry), so the connector's no-position warning is noise
+    position_warning = False
 
     def __init__(self, cfg: Config, name: str, room: int, display: str,
                  join_cap: str | None = None, session_id: str | None = None, recorder: bool = False,
