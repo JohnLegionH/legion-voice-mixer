@@ -537,6 +537,22 @@ it, so the hint is only ever a guess. Four rules, sim-side, no new config:
 As built from 0.8f, a room destroyed by the grace **is** re-created at the connector's next fetch, because the fetch's
 ensure asks the mixer - unit-proven here, live proof owed in 0.8g. The peer re-fetching after a 485 (O-99) is still what triggers that fetch.
 
+**Live result, slice 0.8g (2026-09-18/19): R1, R3 and R4 hold live; R2 does NOT, and the reason is below.**
+- **R1, live:** on an empty mixer both connectors' first fetch created their rooms (`EnsureRoom` then `Created room`
+  within 3 ms), and after the grace destroyed Elm's room the next fetch created it again - the exact 0.8d failure.
+- **R3 and O-99, live:** with the Ebony room destroyed under a joined injector, the sim's next batches drew
+  unknown_room (the hint forgotten), the peer noticed through a `485` on its 5 s probe, re-fetched, the ensure
+  re-created the room, and the peer was re-armed 6.4 s after the destroy, with no restart.
+- **R2 fails live.** A viewer's return into a room the grace had destroyed hit `485` on the first join, `RecreateRoom`
+  re-created the room - and the second join failed `490 "Error setting ICE locally"`, so the provision fell back to
+  the viewer's own retry (5.25 s, as in 0.8d). **Cause:** the join carries the viewer's JSEP offer; Janus core
+  creates the handle's ICE agent from it *before* the plugin refuses the join, so re-sending the same JSEP-bearing
+  join **on the same handle** is rejected by the core (`Agent already exists?`) and never reaches the plugin. The unit
+  tests used a fake join with no ICE state and could not see it. **"Retry the join once" is not safe on the same
+  handle.** The fix options (a create before the first JSEP join, 486 counting as success - R1's rule applied to the
+  viewer path - or a retry on a fresh handle) are for Claude to rule on; ledger O-98 stays open.
+- The first `485` is still logged at ERROR by `JanusRoom.JoinRoom`; on a path that recovers it should not be.
+
 ---
 
 ## 3. Heartbeat

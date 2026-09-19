@@ -243,6 +243,19 @@ independent reason cross-region and child-agent spatial belongs with the sim-pos
 feed, and it confirms same-region-two-avatars as the right first cut — it sidesteps
 both the frame transform and the child-position gap.
 
+**Correction (2026-09-19, slice 0.8g, from the viewer source): the frame premise above is wrong.** The viewer does not
+send region-local positions. Firestorm (`indra/newview/llvoicewebrtc.cpp`) builds `sp` from
+`gAgentAvatarp->getPositionGlobal()` plus a 1 m head bump (`:1108`, `:1111`) and `lp` from
+`region->getPosGlobalFromRegion(camera origin)` (`:1119`), both **global**, ×100 (`:1241-1256`), and sends the
+**identical** payload to **every** session and every connection, neighbour regions included (`:1268` ->
+`predSendData` `:1987-1992` -> `sessionState::sendData` `:1995-1999`). Nothing converts it: the sim never sees
+SLData, and the mixer stores the values as they arrive (`sldata.c:134-146`). Because every viewer is in the same
+global frame and the mixer only uses differences, **avatar-to-avatar distance across a region border is already
+correct** - no region-offset transform is needed. (The mixer's `sldata.h:59` comment "region-local metres" is wrong
+on both counts: global, and ×100.) The one party this breaks is a peer that sends a REGION-LOCAL position: a
+connector fixing O-62 must send global centimetres (region origin + its Position), or it is off by the region's global
+origin from every avatar and always culled. The child-position gap is unaffected by this correction.
+
 ---
 
 ## AMENDMENT 1 — per-pair state must be UUID-keyed (2026-08-18)
