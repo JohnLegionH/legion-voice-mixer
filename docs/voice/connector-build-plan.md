@@ -92,6 +92,31 @@ registration and false after removal; the room record lands; the mute push happe
 `show voice moderation` (or the admin API `mod_muted_entries`) showing the mute when
 `MayInject=false`.
 
+### Connector NPC identity (O-63) — deterministic since slice 7b
+
+*Before:* `INPCModule.CreateNPC` handed the NPC a random agent id, so every regionserver restart gave
+the connector a new UUID. The operator had to re-edit `DISPLAY` in `connectors/*/recorder.env` /
+`injector.env`, and a peer still joined under the OLD id was not the identity the sim had
+moderation-muted, so a stale injector played unmuted and undisclosed (seen 2026-09-12).
+
+*Now:* the NPC's id is **derived**. `ConnectorIdentity.DeriveAgentId(gridId, regionName, recordName)`
+is RFC 4122 **version 5** (SHA-1, name-based) under a fixed Legion namespace
+(`ConnectorIdentity.LegionNamespace`, itself `uuid5(NAMESPACE_URL, "urn:legion-grid:voice-connector")`),
+with the exact, case-sensitive name `"{gridId}/{regionName}/{recordName}"`:
+
+- `gridId` — the normalised `GatekeeperURI` (`JanusAudioBridge.ReadGridId`, the same grid identity the
+  multiagent room numbers use; empty when the grid has none). There is no grid UUID in this tree.
+- `regionName` — the scene name the record starts in (a record without `Region` starts in every region
+  of the instance and gets a distinct id in each).
+- `recordName` — the `[VoiceConnector.<name>]` suffix.
+
+`VoiceConnectorModule` creates the NPC through the existing fixed-id `CreateNPC` overload (the one taking
+`agentID`), which now **refuses** (`UUID.Zero` + ERROR) when a presence with that id is already in the
+scene — a restart racing a not-yet-cleaned NPC cannot double-register. The registration line prints the
+id (`[CONNECTOR] registered <name> npc=<uuid> … identity=derived`): set `DISPLAY` once; it stays valid
+across restarts until the grid, region or record is renamed. The "stop injector/recorder before a
+restart" rule is obsolete.
+
 ### S-CON-3 — disclosure — DONE `d95754509d`
 **Files:** `VoiceConnectorModule` — (i) attach/detach **region alert** (the peer's mixer join
 and leave for the connector's display, or — v1 simplification — the module's own

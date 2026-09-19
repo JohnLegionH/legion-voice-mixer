@@ -429,6 +429,16 @@ Citations: Vivox `:684`/`:690`; FreeSwitch `:456`/`:464`; WebRTC `:233`/`:274`.
   `:258`; comment `//do fully not trust viewers voice parcel requests` `:230`), whereas
   Vivox/FreeSwitch derive the parcel from server-side avatar position.
 
+  *Amended 2026-09-12 (O-48, audit W-1):* the WebRTC parcel is now **server-derived** like
+  Vivox/FreeSwitch — `scene.LandChannel.GetLandObject(sp.AbsolutePosition.X,
+  sp.AbsolutePosition.Y)` in the `"local"` arm of `ProvisionVoiceAccountRequest`. AllowVoiceChat,
+  `UseEstateVoiceChan` and ban/restrict all run against that parcel, and when the estate flag is
+  clear the forwarded `parcel_local_id` is overwritten with the server's `LocalID`, so the room
+  hash input is server-derived. The viewer's `parcel_local_id` is a **hint only**: a mismatch logs
+  a WARN and is never refused (a viewer mid-crossing can be honestly stale, O-11); an absent id no
+  longer skips the parcel checks or falls through to the `-999` estate room. Decision in
+  `ProvisionParcelResolver.cs`. The line citations above predate this change.
+
   Downstream the room number is a deterministic hash in
   `JanusAudioBridge.CalcRoomNumber(pRegionId, pChannelType, pParcelLocalID, pChannelID)`
   (`Addons/os-webrtc-janus/Janus/JanusAudioBridge.cs:141`–`:167`): for `"local"` it hashes

@@ -83,6 +83,17 @@ same values in the region server's `os-webrtc-janus` config (`APIToken`, `AdminA
 
 With `JS_ADMIN_BIND=127.0.0.1` the region server must call `http://127.0.0.1:14225/voiceAdmin`.
 
+
+> **Never put the Janus API behind a proxy that logs query strings.** A long poll carries the API secret as a
+> URL query argument, `GET .../voice/<session>?maxev=1&apisecret=...`, and there is no alternative: Janus's HTTP
+> transport reads a GET's secret only from query arguments
+> (`vendor/janus-gateway/src/transports/janus_http.c:1601`, `MHD_GET_ARGUMENT_KIND`; `token` auth is read the
+> same way). Every POST carries it in the JSON body instead, and this repo has tests pinning that
+> (`connectors/common/test_apisecret.py`). So an nginx/Caddy/ALB access log in default configuration, or any
+> tracing proxy that records full URLs, writes your `JS_API_SECRET` to disk on every poll. If you must proxy,
+> strip or mask the query string in the access-log format, and keep the admin API (`/voiceAdmin`, which uses a
+> body-carried `admin_secret`) on its own bind address. Ledger O-101.
+
 ## 5. Compose profile and network mode
 
 **Default profile:** `docker compose up -d`. The `recorder`, `injector` and `turn-test` profiles are not part of this

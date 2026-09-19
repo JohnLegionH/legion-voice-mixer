@@ -15,6 +15,127 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer 1.2.0 (proposed; untagged): Phase A + Phase 0, enforcement ON - 2026-09-19
+
+| Deployed (CDT) | Image | Rollback tag |
+|---|---|---|
+| 10:15 (image), 10:54 (enforcement on) | `d5ddf359a17a` (`:09a`) | `ghcr.io/johnlegionh/legion-voice-mixer:rollback-pre-09b` (`d5ddf359a17a`, the same image with both knobs off); the image before it is `rollback-pre-09a` (`e8360fb5f5d5`) |
+
+**The version number is a proposal; tagging is the operator's call.** 1.2.0 because Phase 0 adds behaviour
+that is off by default and on here - a minor bump, not a patch, and not a major one: nothing existing changes
+shape.
+
+### What Phase A adds
+
+Operational safety around the container itself, every default reproducing the previous release:
+public-address discovery with a NAT mapping that follows a changing home IP, a background self-check that
+prints one board after start, per-session ICE diagnostics, optional TURN wiring (`JS_TURN_*`), and an
+entrypoint that refuses to start with an empty `JS_API_SECRET` or `JS_ADMIN_SECRET`. The full knob register
+is in `docs/docker-notes.md`.
+
+### What Phase 0 adds
+
+The simulator becomes the **authority** for who may hear whom, and the mixer can be made to obey it:
+
+- The sim arms every listener per room, with an epoch and a monotonic `policy_generation`, and heartbeats
+  that arming once a second. An unarmed listener, one armed under an older epoch, or one whose arming has
+  gone stale past the window is **silenced** rather than heard - but only in rooms the sim created with
+  `vis_authority`, and only with `JS_VIS_FAIL_CLOSED=1`.
+- Every join into such a room can be required to carry a **sim-minted join capability**, bound to agent,
+  session, room, epoch, generation, expiry and a one-use nonce (`JS_JOIN_CAP_REQUIRED=1`). Before this,
+  anything holding `JS_API_SECRET` could join any room as any avatar (ledger O-46).
+- Connector peers (recorder, injector) are armed and capability-bearing like any other participant, and a
+  connector now carries a **position**, so injected audio fades with distance instead of playing at one level
+  to the whole room (O-62).
+
+### Config keys added, with defaults
+
+| Key | Default | Notes |
+|---|---|---|
+| `JS_VIS_FAIL_CLOSED` | `0` | `1` enforces the arming rule, in `vis_authority` rooms only |
+| `JS_VIS_STALE_MS` | `8000` | how long an arming stays fresh without confirmation; below 7250 it is raised to 7250 with a WARN |
+| `JS_JOIN_CAP_REQUIRED` | `0` | `1` requires a valid capability to join a `vis_authority` room |
+| `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start |
+| `JS_EMPTY_ROOM_GRACE_S` | `60` | a non-permanent room empty this long is destroyed |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a participant whose PeerConnection never comes up is reaped (O-75) |
+
+**Every default reproduces the previous release.** Upgrading the image alone changes nothing audible; the two
+Phase 0 knobs are the only switches that do, and both are off until set.
+
+### Upgrade order
+
+1. **Mixer first, knobs off.** Pull or build the image and recreate the container with no
+   `JS_VIS_FAIL_CLOSED` and no `JS_JOIN_CAP_REQUIRED`. Shadow mode is inert: it counts what enforcement
+   *would* do and refuses nothing.
+2. **Then the sim.** Deploy the region build with `[WebRtcVoice] VisibilityArmingEnabled = true`,
+   `JoinCapabilityEnabled = true`, and `[JanusWebRtcVoice] JoinCapabilitySecret` equal to the mixer's
+   `JS_JOIN_CAP_SECRET`. From here the sim arms and mints; the mixer verifies and counts.
+3. **Soak in shadow** until the counters are quiet (see the gate below).
+4. **Only then** turn the knobs on.
+
+A new mixer against an old sim, and an old mixer against a new sim, both work: protocol compatibility is
+pinned by `docs/protocol-compat.md` and exercised by the harness's S21 and S24.
+
+### Enabling enforcement (design 6.4 step 4 and 11.9 step 4)
+
+1. Confirm the sim half is live and arming: every listener in a declared room reads `vis_row 4`.
+2. **The pre-flip gate.** List every connector peer and recorder tap in a declared room with its arming
+   state. **Every one must be armed at row 4 with capability verdict `ok`.** Read the shadow counters at the
+   same time: `cap_stale_generation` 0, every refusal counter 0 apart from known test-room cases, and
+   `would_silence_listeners` and `would_silence_pairs` 0. If any of that is untrue, stop - enforcement would
+   silence or refuse a real participant.
+3. Add `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1` to `.env`. Nothing else.
+4. Tag the running image, then recreate the container (`docker compose up -d janus`), so rollback is one
+   `docker tag` away.
+5. Confirm the banner: `fail-closed ENABLED` and `join capability REQUIRED in rooms with vis_authority`, with
+   `join_cap_secret=set`.
+6. Watch one join: it should read `verdict ok`, `row 4`, and be armed within a fraction of a second.
+
+**Rollback is symmetric:** remove the two lines and recreate. The sim needs no change either way.
+
+### What a mixer restart looks like to users
+
+Voice drops and comes back by itself in **about 30 seconds**, with nobody touching anything - measured on
+Legion Grid on 2026-09-19 under enforcement, with both connectors and a viewer in-world:
+
+- the mixer is back up ~21 s after the restart command (container start, then Janus and plugin init);
+- viewers re-provision on their own: the room is re-created and the listener re-armed **21.4 s** after the
+  restart, 2.8 ms between joining and being armed;
+- connector peers rejoin on their own backoff (2 s doubling to 60 s, a fresh capability per attempt) and were
+  armed again at **30.2 s**;
+- audio was flowing again at **30.7 s**.
+
+Rooms are re-created by the sim as viewers and connectors return, so nothing has to be pre-provisioned. The
+mixer's identity changes on restart (`mixer_instance`); the sim notices and re-arms against it. That is the
+intended path, not an error.
+
+### Known open rows an operator should know
+
+- **O-102** - a participant that never sends a position is mixed **flat** to the whole room: full level to
+  every listener, at any distance, with no cull. That is how a position-less connector was audible
+  everywhere, and the same holds for anything else that joins and never sends `sp`/`lp`. It is an
+  eavesdropping route, not a crash, and closing it needs sim-authoritative positions.
+- **O-87** - the recorder writes room audio to disk under an NPC identity. It needs an explicit operator
+  opt-in (`RECORDING_OPT_IN`) and an in-channel disclosure, but the disclosure is the **sim's**: if you run a
+  recorder, satisfy yourself that the people in the room can see it.
+- **O-77** - for a **child agent** the sim still takes the room from the viewer's own `parcel_local_id`, so a
+  capability can be minted for a room the viewer nominated. The capability attests what the sim decided; it
+  does not make that decision safer. This is why O-46 is narrowed rather than closed.
+
+### Behaviour changes on upgrade
+
+None with the defaults. With `JS_VIS_FAIL_CLOSED=1`, a listener the sim has not armed in a `vis_authority`
+room is silent instead of hearing everyone - which is the point, and the reason for the gate. With
+`JS_JOIN_CAP_REQUIRED=1`, a join into such a room without a valid capability is refused with `error_code` 496
+and a machine-readable reason, so connector peers must be configured with `CONNECTOR_CAP_URL` and
+`CONNECTOR_CAP_SECRET`.
+
+### One-time migrations
+
+None. `.env` gains keys; no file format, room number, database or on-disk layout changes.
+
+---
+
 ## Mixer 0.4: sim-issued join capability, requirement off (untagged) — 2026-09-15
 
 | Deployed (CDT) | Image | Rollback tag |

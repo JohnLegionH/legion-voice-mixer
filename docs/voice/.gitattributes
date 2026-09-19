@@ -1,0 +1,6 @@
+# Docs in this directory are synced verbatim with legion-voice-mixer:docs/voice/, and the
+# sync convention verifies BLOB hashes (git rev-parse HEAD:<path>) on both sides. Pin LF so
+# fresh checkouts of both repos materialise byte-identical files (the mixer pins eol=lf
+# repo-wide). This directory is Legion-authored and absent upstream, so this file cannot
+# conflict on a rebase.
+* text eol=lf
