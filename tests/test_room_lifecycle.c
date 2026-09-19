@@ -249,6 +249,41 @@ static void test_grace_destroy(void) {
 	free_session(b);
 }
 
+/* Slice 0.8i (O-98, F2): a create answered 486 re-arms an EMPTY room's grace clock, so the join the sim sends right
+ * after its create cannot lose the room to a sweep landing in between. Occupied and permanent rooms are untouched, and
+ * a room nobody joins is still reclaimed, one grace after its last create. */
+static void test_create_existing_rearms_grace(void) {
+	gint64 grace = (gint64)slv_empty_room_grace_s * G_USEC_PER_SEC;
+
+	janus_slvoice_room *r = add_room(1011, FALSE);
+	gint64 since = empty_since_of(r);
+	gint64 t486 = since + grace - 1;   /* a create answered 486 in the grace's last microsecond */
+	janus_mutex_lock(&rooms_mutex);
+	janus_slvoice_room_rearm_grace_locked(r, t486);
+	janus_mutex_unlock(&rooms_mutex);
+	CHECK(empty_since_of(r) == t486, "a 486 on an empty room re-arms its grace clock");
+	CHECK(sweep(since + grace) == 0 && room_present(1011),
+		"so the sweep at the old deadline keeps the room for the join that follows the create");
+	CHECK(sweep(t486 + grace) == 1 && !room_present(1011),
+		"and a room nobody joins is still reclaimed, one grace after its last create");
+
+	janus_slvoice_room *p = add_room(1012, TRUE);
+	janus_mutex_lock(&rooms_mutex);
+	janus_slvoice_room_rearm_grace_locked(p, FAR_FUTURE);
+	janus_mutex_unlock(&rooms_mutex);
+	CHECK(empty_since_of(p) == 0, "a permanent room never gets a grace clock from a 486");
+
+	janus_slvoice_room *o = add_room(1013, FALSE);
+	janus_slvoice_session *a = make_session();
+	join_room(o, a, 9);
+	janus_mutex_lock(&rooms_mutex);
+	janus_slvoice_room_rearm_grace_locked(o, FAR_FUTURE);
+	janus_mutex_unlock(&rooms_mutex);
+	CHECK(empty_since_of(o) == 0, "an occupied room gets no grace clock from a 486");
+	janus_slvoice_leave_room(a);
+	free_session(a);
+}
+
 /* O-56: a downed PeerConnection leaves the room, frees media, resets jitter-buffer priming. */
 static void test_hangup_leaves_room(void) {
 	janus_slvoice_room *h = add_room(1006, FALSE);
@@ -441,6 +476,7 @@ int main(void) {
 
 	test_reset_room_state();
 	test_grace_destroy();
+	test_create_existing_rearms_grace();
 	test_hangup_leaves_room();
 	test_spatial_pair();
 	test_spatial_default();

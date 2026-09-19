@@ -956,6 +956,20 @@ static guint janus_slvoice_sweep_empty_rooms_locked(gint64 now) {
 	return n;
 }
 
+/* Slice 0.8i (O-98, F2): a create for a room that already exists answers 486 - and the sim now sends a create before
+ * EVERY join. If that room is empty and inside its grace, the 486 must re-arm the grace clock at `now`: otherwise a
+ * room in its last second of grace can be destroyed by the sweep between the create's answer and the join that
+ * follows it, and the join draws 485. Occupied and permanent rooms are untouched. Called with rooms_mutex held (as the
+ * sweep is, so the two never interleave); takes room->mutex, the lock empty_since is guarded by. */
+static void janus_slvoice_room_rearm_grace_locked(janus_slvoice_room *room, gint64 now) {
+	if(room == NULL || room->permanent)
+		return;
+	janus_mutex_lock(&room->mutex);
+	if(room->empty_since != 0 && g_hash_table_size(room->participants) == 0)
+		room->empty_since = now;
+	janus_mutex_unlock(&room->mutex);
+}
+
 /* ---- Mixer->client SLData (data channel send) ---------------------------- */
 
 /* Relay a JSON object to one participant over the data channel. Text, default
@@ -3011,6 +3025,9 @@ static void *janus_slvoice_handler(void *data) {
 				/* Match audiobridge exactly: an existing room is error 486. The
 				 * C# side (CreateRoom) treats 486 as success — every region that
 				 * hashes to the same room number relies on this (§3.3). */
+				/* Slice 0.8i (F2): the sim creates before every join, so a 486 is the join's announcement - an empty
+				 * room gets a fresh grace clock, and the join that follows cannot lose it to the sweep. */
+				janus_slvoice_room_rearm_grace_locked(room, janus_get_monotonic_time());
 				janus_mutex_unlock(&rooms_mutex);
 				error_code = JANUS_SLVOICE_ERROR_ROOM_EXISTS;
 				g_snprintf(error_cause, 512, "Room %"PRIu64" already exists", room_id);

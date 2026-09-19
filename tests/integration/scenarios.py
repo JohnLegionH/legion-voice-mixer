@@ -1805,6 +1805,62 @@ async def s37_connector_rejoins_after_failed_join(ctx: Ctx) -> None:
         raise Fail("S37: the peer is still running at the end", repr(task.exception()))
 
 
+# ---- S39: the Janus constraint that retired the sim's same-handle retry (slice 0.8i, O-98) ----------------------
+# 0.8g PROOF D, live 2026-09-19 01:33:42Z: the sim's viewer join (carrying the viewer's JSEP offer) drew 485 from the
+# plugin, the sim re-created the room and re-sent the same join on the SAME handle, and Janus core refused it with 490
+# "Error setting ICE locally" - core builds the handle's ICE agent from the offer BEFORE the plugin looks at the room,
+# so the agent survives the 485 and a second JSEP join on that handle collides with it. The sim now creates before it
+# joins and never retries on the handle. This scenario pins the rule against a REAL Janus, so nobody re-adds the retry.
+async def s39_jsep_join_cannot_be_resent_on_the_same_handle(ctx: Ctx) -> None:
+    from aiortc import RTCPeerConnection
+
+    from tests.integration.harness import ERR_NO_SUCH_ROOM, Control
+
+    room = ctx.new_room()                                 # allocated, deliberately NOT created yet
+    display = new_display()
+    pc = RTCPeerConnection()
+    same = fresh = None
+    try:
+        pc.addTransceiver("audio", direction="sendrecv")
+        await pc.setLocalDescription(await pc.createOffer())   # a real offer, so core really builds an ICE agent
+        jsep = {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp}
+        join = {"request": "join", "room": room, "display": display}
+
+        same = await Control(ctx.cfg, ctx.http).open()
+        first = await same.request(dict(join), jsep=jsep)
+        if first.get("error_code") != ERR_NO_SUCH_ROOM:
+            raise Fail("leg a: a JSEP join into a room that does not exist answers 485", first)
+
+        await ctx.control.create_room(room, f"integration {ctx.name}")
+
+        try:
+            again = await same.request(dict(join), jsep=jsep)
+        except RuntimeError as e:                         # JanusHttp raises on a top-level {"janus":"error"}
+            if "490" not in str(e):
+                raise Fail("leg b: the same JSEP join re-sent on the SAME handle is refused by Janus core with 490",
+                           str(e))
+        else:
+            raise Fail("leg b: the same JSEP join re-sent on the SAME handle must NOT reach the plugin - Janus core "
+                       "refuses it (490) - but it was answered", again)
+
+        fresh = await Control(ctx.cfg, ctx.http).open()
+        joined = await fresh.request(dict(join), jsep=jsep)
+        if joined.get("audiobridge") != "joined":
+            raise Fail("leg c: the same join on a FRESH handle joins", joined)
+    finally:
+        for c in (same, fresh):
+            if c is not None:
+                try:
+                    await c.close()
+                except Exception:
+                    pass
+        await pc.close()
+        try:
+            await ctx.control.destroy_room(room)
+        except Exception:
+            pass
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -1868,4 +1924,6 @@ SCENARIOS = [
              "0.8b join capability required, O-96, §11.5", s36_join_cap_generation_staleness),
     Scenario("S37", "connector rejoin: 485 retried with a fresh capability; a destroyed room noticed and rejoined",
              "0.8f join capability required, O-99", s37_connector_rejoins_after_failed_join),
+    Scenario("S39", "a JSEP join cannot be re-sent on the same handle: 485, then core refuses it 490; a fresh handle joins",
+             "0.8i, O-98 (why the sim creates before it joins)", s39_jsep_join_cannot_be_resent_on_the_same_handle),
 ]
