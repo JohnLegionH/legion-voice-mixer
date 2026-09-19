@@ -38,6 +38,13 @@ Against a mixer with `JS_JOIN_CAP_REQUIRED=1`, set `CONNECTOR_CAP_URL` (the regi
 both or neither; see [../README.md](../README.md#join-capability-slice-07b). The injector then fetches a capability
 before every join and never joins without one. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
 
+## Position (slice 0.8h)
+
+With `CONNECTOR_CAP_URL` set there is nothing to do: the sim's grant carries the NPC's position and the injector sends
+it to the mixer, so the audio fades with distance instead of playing at the same level everywhere in the room. Without
+a capability, set `CONNECTOR_POSITION_GLOBAL_CM=x,y,z` (global centimetres); with neither, the injector logs one
+warning at start and is mixed flat. See [../README.md](../README.md#position-slice-08h-ledger-o-62).
+
 ## Running
 
     cp connectors/injector/injector.env.example connectors/injector/injector.env

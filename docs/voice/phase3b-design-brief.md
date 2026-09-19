@@ -320,7 +320,11 @@ Recon for slice one item 4 found that none of the conventions panning depends on
 
 **Stereo pan sign — DECIDED:** a source to the listener's **right** is louder in the **right** output channel. Nothing in the repo, the viewer, or the docs fixed this; it is chosen here explicitly.
 
-**Frame:** `sp` and `lp` are region-local (`sldata.h:59`), ×100. Axis semantics are SL/OpenSim convention, external to this repo: X east, Y north, Z up, right-handed. Azimuth uses `S.sp − L.lp`, so the origin is immaterial and only axis directions matter.
+**Frame:** `sp` and `lp` are **global** coordinates, ×100 (centimetres), integers on the wire - NOT region-local, and
+the `sldata.h:59` comment that said so was wrong and is corrected (slice 0.8h). Firestorm builds `sp` from
+`gAgentAvatarp->getPositionGlobal()` and `lp` from `region->getPosGlobalFromRegion(camera)`
+(`llvoicewebrtc.cpp:1108`, `:1119`, `:1241-1256`). The mixer only ever uses differences, so every participant must be
+in this one frame: a connector sends (region global origin + its Position) x 100 (O-62, slice 0.8h). Axis semantics are SL/OpenSim convention, external to this repo: X east, Y north, Z up, right-handed. Azimuth uses `S.sp − L.lp`, so the origin is immaterial and only axis directions matter.
 
 **Orientation:** `lh` is the listener/camera orientation, set from `setListenerPosition`'s rot (`llvoicewebrtc.cpp:1156`, `:1168`); `sh` is the avatar's (`:1173`, `:1193`). `slv_quat{x,y,z,w}` maps to `LLQuaternion (x,y,z,w)`, confirmed by the viewer's serialization order (`:1260`-`:1263`). Forward is local +X rotated by the orientation — at identity, forward is +X (east). Positive rotation about +Z is counter-clockwise viewed from above. These are external SL conventions, not repo-established.
 

@@ -36,6 +36,23 @@ after a join that stayed up 60 s), fetches a fresh capability and joins again, l
 with the reason and the next delay. A room destroyed under a joined peer sends it nothing, so the peer asks the
 mixer for its room's participants every 5 s and treats a 485, or its own absence from the list, as a lost room.
 
+## Position (slice 0.8h, ledger O-62)
+
+A connector that has a position is mixed **spatially**: the mixer fades it with distance (full volume inside 10 m,
+silent past 60 m) and pans it. Without one it is mixed **flat** - the same level to every listener in the room, at any
+distance - and the peer says so once at start.
+
+Two ways to have one:
+
+- **With a capability** (the usual way): nothing to configure. The sim's grant carries `position` - the record's
+  `Position` in its region, as GLOBAL centimetres - and the peer sends it as SLData once its data channel opens, and
+  again after every rejoin. The sim re-computes it at every fetch, so moving the record's `Position` and re-fetching
+  moves the connector.
+- **Without one:** `CONNECTOR_POSITION_GLOBAL_CM=x,y,z`, the same frame - integers, `(region global origin +
+  position in the region) x 100`. For a region at grid (1000, 1000), an NPC at `<128, 128, 22>` is
+  `25612800,25612800,2200`. Region-local metres here would put the connector kilometres from every avatar, where the
+  mixer culls it: this is the frame the viewer itself sends (`llvoicewebrtc.cpp:1108`, `:1241-1244`).
+
 ## Receiving SLData from the mixer
 
 The mixer's SLData (presence, power batches) does **not** come back on the `SLData` data channel a
