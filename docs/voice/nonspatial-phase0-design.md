@@ -800,6 +800,21 @@ The mixer logs once per room when the knob is on and a room is undeclared:
 
 **Rollback:** set the knob to 0. No sim change is needed.
 
+**STEP 4 DONE - enforcement is LIVE on Legion Grid, 2026-09-19 15:54:43Z (slice 0.9b).** `JS_VIS_FAIL_CLOSED=1`
+and `JS_JOIN_CAP_REQUIRED=1` were added to the live mixer `.env` (two lines; nothing else changed) and the container
+recreated on `:09a`; the banner reads `fail-closed ENABLED` and `join capability REQUIRED in rooms with
+vis_authority`. The step 3 gate passed first: both connector peers armed at row 4, verdict ok, `cap_stale_generation`
+0, every refusal 0 apart from two harness test-room cases, `would_silence` listeners and pairs 0.
+
+*Measured join-edge silence under fail-closed* - the window this design says is the only time a listener may be
+unarmed: **9.4 ms** (a viewer joining Ebony: joined 16:06:33.2261Z, `1 listener(s) newly armed` .2355Z), **177 ms**
+(viewer into Transylvania), **188 ms** (the neighbour-region child session into Ebony), **182 ms** (viewer into Elm),
+and **0 ms for both connector peers**, which the mixer had already armed before they joined - the batch arrived
+first and was deferred and replayed at the join (design section 9 item 18). Nothing was silenced outside a join:
+over a 30-minute parked soak, 7 samples 5 minutes apart, `would_silence_listeners` and `would_silence_pairs` were 0
+at every sample and `would_silence_listener_ticks` never moved from 14 (Ebony) / 9 (Elm).
+
+
 ---
 
 ## 7. Failure modes
@@ -1232,6 +1247,13 @@ Neither direction degrades to a refused join while the knob is off, which is the
 2. Sim with `JoinCapabilityEnabled=true` and the shared secret set.
 3. Soak: every join to a declared room carries a capability that validates, and `cap_stale_generation` is 0.
 4. `JS_JOIN_CAP_REQUIRED=1`. Rollback is `0` and a container recreate; no sim change.
+
+**STEP 4 DONE 2026-09-19 (slice 0.9b), together with 6.4 step 4 - the two knobs went on in one recreate.** Live under
+enforcement: every viewer join and every connector join carried a capability that verified (`seen` 74, `accepted` 64,
+the 12 refusals all harness test rooms 903531120/132/137, one per reason), `cap_stale_generation` 0 for every real
+participant, and no join by a real participant was ever refused. The connector half of 11.10 is answered by the 0.7b
+capability: both injectors fetch one per attempt and joined enforced rooms with it, including unattended after two
+mixer restarts.
 
 ### 11.10 What this does not close
 

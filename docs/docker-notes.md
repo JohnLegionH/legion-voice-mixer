@@ -563,6 +563,10 @@ its knobs have no "before".
 | `JS_JOIN_CAP_REQUIRED` | `0` (shadow) | the plugin join was ungated: anything holding `JS_API_SECRET` could join any room as any avatar (ledger O-46). `0` keeps that exactly, and verifies and counts any capability that arrives. `1` requires a valid sim-issued capability to join a room created with `vis_authority`, and changes nothing in any other room. Environment only: no generated config changes either way | slice 0.4 |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | n/a (no capability). The HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, deliberately **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start | slice 0.4 |
 
+**Live state on Legion Grid, 2026-09-19 (slice 0.9b):** `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1`,
+both set in the mixer's `.env` and in force since 15:54:43Z. Rollback for either is the same: remove the line and
+recreate the container; the sim needs no change.
+
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR`, `JANUS_BIN`, `SLV_LIB_DIR`,
