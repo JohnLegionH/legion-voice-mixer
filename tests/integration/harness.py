@@ -47,6 +47,22 @@ ROOM_BASE = 900_000_000
 POLL_TIMEOUT = 5.0
 POLL_STEP = 0.1
 
+#: READINESS, not an assertion. Bringing a PeerConnection up (DTLS, then SCTP for the SLData channel) is
+#: transport work whose latency is the host's, not the mixer's: on a loaded machine it has been measured
+#: past POLL_TIMEOUT, which turned a slow handshake into a scenario failure ("data channel open; observed:
+#: connecting"). A scenario may not start asserting until its peers are ready, so readiness gets its own,
+#: longer bound, and a timeout here FAILS naming readiness rather than the scenario's expectation.
+READY_TIMEOUT = 15.0
+#: After the mixer has seen a peer's first RTP, the first frames still arrive into a filling jitter buffer and
+#: the mix can legitimately carry nothing for a tick or two. Settle once per peer, at readiness, so no
+#: assertion window pays for it (§9's timed windows have no budget to give).
+MEDIA_SETTLE_S = 0.4
+#: last_mix_rms is a per-tick SAMPLE of the mix, so "audible" is a media health question, not a policy one:
+#: a lone 0.0 while the peer's rtp_in_count keeps climbing is a frame with nothing decoded in time. Hold
+#: windows require audibility in at least this fraction of their polls. Policy is checked separately, and
+#: exactly -- see _hold_audible in scenarios.py.
+AUDIBLE_MIN_RATIO = 0.8
+
 ERR_NO_SUCH_ROOM = 485
 ERR_ROOM_EXISTS = 486
 
@@ -346,10 +362,14 @@ class TestPeer(ConnectorPeer):
     def ids(self) -> tuple:
         return (self.janus.session_id, self.janus.handle_id) if self.janus else (None, None)
 
-    async def wait_channel_open(self, timeout: float = POLL_TIMEOUT) -> None:
-        """Our side of the SLData channel is writable (the mixer's own view is datachannel_open)."""
+    async def wait_channel_open(self, timeout: float = READY_TIMEOUT) -> None:
+        """READINESS: our side of the SLData channel is writable (the mixer's own view is datachannel_open).
+
+        Bounded by READY_TIMEOUT, not POLL_TIMEOUT: this is SCTP coming up over DTLS, whose latency belongs to
+        the host. A timeout says so, so it is never mistaken for the scenario's own expectation."""
         await until(self._channel_state, lambda s: s == "open",
-                    f"{self.name} SLData data channel open", timeout)
+                    f"READINESS: {self.name}'s SLData channel never reached 'open' within {timeout:.0f} s",
+                    timeout)
 
     async def _channel_state(self):
         return self.channel.readyState if self.channel is not None else None
@@ -922,12 +942,18 @@ class Ctx:
                            [{"id": r.get("id"), "display": r.get("display"), "setup": r.get("setup")} for r in rows])
 
     async def ready(self, *peers: TestPeer) -> None:
-        """Each peer's channel is open on both sides and its tone is reaching the mixer."""
+        """READINESS: each peer's channel is open on both sides and its tone is reaching the mixer.
+
+        No scenario may assert before this returns. The settle at the end is the 'first RTP seen' one: the
+        mixer has a packet, but the first frames land in a filling jitter buffer, so the mix is entitled to
+        carry nothing for a tick or two. Paying it here, once per peer, keeps it out of every timed window."""
         for p in peers:
             await p.wait_channel_open()
             await self.until_info(p, lambda i, p=p: i.get("room") == p.room and i.get("datachannel_open") is True
                                   and (i.get("rtp_in_count") or 0) > 0,
-                                  f"{p.name} in room {p.room} with datachannel_open and rtp_in_count > 0")
+                                  f"READINESS: {p.name} in room {p.room} with datachannel_open and "
+                                  f"rtp_in_count > 0", timeout=READY_TIMEOUT)
+        await asyncio.sleep(MEDIA_SETTLE_S)
 
     async def teardown(self) -> None:
         for task in self.background:

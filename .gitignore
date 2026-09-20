@@ -20,6 +20,9 @@ tests/test_sdp_redact
 .env.bak-*
 secrets
 
+# integration-harness virtualenv (tests/integration/README: aiortc + aiohttp, pinned)
+.venv-it/
+
 # --- Editor / OS cruft ---
 *.swp
 *~

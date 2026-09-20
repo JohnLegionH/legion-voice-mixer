@@ -18,7 +18,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from tests.integration.harness import (POLL_TIMEOUT, BatchResender, Ctx, Fail, Heartbeater, Skip, TestPeer, displays,
+from tests.integration.harness import (AUDIBLE_MIN_RATIO, POLL_STEP, POLL_TIMEOUT, BatchResender, Ctx, Fail,
+                                       Heartbeater, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
                                        wait_mixer_up, mint_cap)
 from tests.integration.source_probe import own_candidates, parse_pair, verdict
@@ -451,13 +452,65 @@ async def _mode(ctx: Ctx, peer, want_fail_closed: bool) -> dict:
 
 
 async def _hold(ctx: Ctx, peer, pred, what: str, seconds: float) -> None:
-    """pred holds at every poll for `seconds` (a continuous check, not a blind sleep)."""
+    """pred holds at every poll for `seconds` (a continuous check, not a blind sleep).
+
+    Used as-is for SILENCE and for exact state. Silence keeps this strictness deliberately: a listener that
+    should hear nothing and is heard once has leaked, and a leak is never jitter. For "audible", use
+    _hold_audible, which separates the mixer's decision from the media sample."""
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         info = await ctx.info(peer)
         if info is None or not pred(info):
             raise Fail(what, pick(info))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(POLL_STEP)
+
+
+async def _hold_audible(ctx: Ctx, peer, what: str, seconds: float, policy=None,
+                        ws_ticks_flat: bool = True) -> None:
+    """Hold "this listener is being heard" as TWO checks over one window, because they are two questions.
+
+    POLICY -- the mixer's own decision, exact, at EVERY poll, never tolerant:
+      * `policy(info)`, the scenario's own exact expectation (epoch, excluded_entries, counted gauges);
+      * in a room the mixer reports `enforced`, this listener must still be at `vis_row` 4. Row 4 is the
+        per-listener form of the same test that feeds the room gauge: `janus_slvoice_vis_ok_locked` decides
+        row 4, and every listener that is NOT row 4 at a tick is what `would_silence_listeners` counts;
+      * `visibility.would_silence_listener_ticks` must not move (`ws_ticks_flat`). That counter rises by
+        one per withheld listener per tick, so a single withheld tick -- an arming record that flaps for
+        80 ms and recovers -- is caught here even though the audio never dropped. Scenarios that withhold
+        another listener on purpose (shadow mode, a deliberately staled peer) pass ws_ticks_flat=False and
+        state their expectation in `policy` instead.
+
+    MEDIA -- `last_mix_rms > 0.01` in at least AUDIBLE_MIN_RATIO of the window's polls. This is a per-tick
+    sample of the last mixed frame, so a 0.0 while the peer's RTP keeps climbing is a frame with nothing
+    decoded in time. Exactness here would assert the host's scheduling, not the mixer's behaviour.
+    """
+    end = time.monotonic() + seconds
+    polls = audible = 0
+    ticks0 = None
+    quietest = None
+    while time.monotonic() < end:
+        info = await ctx.info(peer)
+        if info is None:
+            raise Fail(f"{what} [POLICY: handle_info stopped answering]", None)
+        vis = _vis(info)
+        ticks = vis.get("would_silence_listener_ticks")
+        if ticks0 is None:
+            ticks0 = ticks
+        if policy is not None and not policy(info):
+            raise Fail(f"{what} [POLICY]", pick(info))
+        if vis.get("enforced") is True and info.get("vis_row") != 4:
+            raise Fail(f"{what} [POLICY: withheld -- vis_row {info.get('vis_row')}, not 4]", pick(info))
+        if ws_ticks_flat and ticks != ticks0:
+            raise Fail(f"{what} [POLICY: would_silence_listener_ticks moved {ticks0} -> {ticks}]", pick(info))
+        polls += 1
+        if _audible(info):
+            audible += 1
+        else:
+            quietest = pick(info)
+        await asyncio.sleep(POLL_STEP)
+    if polls and audible < AUDIBLE_MIN_RATIO * polls:
+        raise Fail(f"{what} [MEDIA: audible in {audible}/{polls} polls, want >= "
+                   f"{AUDIBLE_MIN_RATIO:.0%}]", quietest)
 
 
 def _check_reply(reply: dict, what: str, **expect) -> None:
@@ -510,7 +563,8 @@ async def s15_shadow_mode(ctx: Ctx) -> None:
     if sorted(room.get("unarmed_listeners") or []) != sorted([a.display, b.display]) or room.get("authority_epoch") != e2:
         raise Fail("a new-epoch heartbeat lists both unarmed and reports E2", hb)
     await ctx.until_info(a, lambda i: _vis(i).get("would_silence_listeners") == 2, "disarmed by E2: counted again")
-    await _hold(ctx, a, _audible, "disarmed in shadow mode: A keeps hearing B", 1.5)
+    await _hold_audible(ctx, a, "disarmed in shadow mode: A keeps hearing B", 1.5,
+                        policy=lambda i: _vis(i).get("would_silence_listeners") == 2, ws_ticks_flat=False)
     excl = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e2, generation=1)
     _check_reply(excl, "an exclusion replace in E2 is applied", slvoice="applied", status="ok")
     await ctx.until_info(a, _silent, "the exclusion silences B for A, as before")
@@ -545,11 +599,12 @@ async def s16_fail_closed_decision_table(ctx: Ctx) -> None:
     print(f"      S16 info: audible {time.monotonic() - armed_at:.2f} s after B's arming reply (poll-limited)", flush=True)
     await until(lambda: _joined(a, b.display), lambda ok: ok, "row 4: A gets B's join presence")
 
-    await _hold(ctx, a, _audible, "heartbeats alone keep A audible (10 s, no batches)", 10.0)
+    await _hold_audible(ctx, a, "heartbeats alone keep A audible (10 s, no batches)", 10.0)
 
     last = await hb.pause()
     until_s = last + stale_s - 1.0
-    await _hold(ctx, a, _audible, f"window: still audible {stale_s - 1.0:.1f} s after the last heartbeat", max(0.0, until_s - time.monotonic()))
+    await _hold_audible(ctx, a, f"window: still audible {stale_s - 1.0:.1f} s after the last heartbeat",
+                        max(0.0, until_s - time.monotonic()))
     await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 3, "row 3: silent once the window has passed",
                          timeout=max(1.0, last + stale_s + 1.0 - time.monotonic()))
     print(f"      S16 info: silent {time.monotonic() - last:.2f} s after the last heartbeat (window {stale_s:.1f} s)", flush=True)
@@ -593,7 +648,8 @@ async def s17_fail_closed_undeclared_room(ctx: Ctx) -> None:
     if vis.get("vis_authority") is not False or vis.get("enforced") is not False:
         raise Fail("an undeclared room reports vis_authority false and enforced false", vis)
     await ctx.until_info(a, _audible, "undeclared: A hears B with no arming and no heartbeat")
-    await _hold(ctx, a, lambda i: _audible(i) and _vis(i).get("would_silence_listeners") == 0, "undeclared: audible, nothing counted", 2.0)
+    await _hold_audible(ctx, a, "undeclared: audible, nothing counted", 2.0,
+                        policy=lambda i: _vis(i).get("would_silence_listeners") == 0)
     logs = await mixer_logs(ctx.cfg, since)
     line = f"fail-closed enabled but room {r} has no vis_authority: NOT enforced"
     if logs.count(line) != 1:
@@ -616,7 +672,8 @@ async def s18_fail_closed_epochs_base_omission_stop(ctx: Ctx) -> None:
     lower = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e1, generation=9)
     _check_reply(lower, "a lower epoch while E2 is fresh: refused as stale_epoch", slvoice="error", reason="stale_epoch",
                  status="stale_epoch", authority_epoch=e2)
-    await _hold(ctx, a, lambda i: _audible(i) and _vis(i).get("authority_epoch") == e2, "stale_epoch changed nothing", 1.0)
+    await _hold_audible(ctx, a, "stale_epoch changed nothing", 1.0,
+                        policy=lambda i: _vis(i).get("authority_epoch") == e2)
 
     bad = await ctx.admin.peer_ctl_batch(r, "add", excl={a.display: [b.display]}, epoch=e2, generation=2, base={a.display: 99})
     if bad.get("slvoice") != "applied" or a.display not in (bad.get("stale_listeners") or []):
@@ -684,7 +741,7 @@ async def s19_fail_closed_reconnect_fanout(ctx: Ctx) -> None:
     await ctx.until_info(a2, _audible, "fan-out: and the second")
 
     await a.close()
-    await _hold(ctx, a2, _audible, "the second session stays audible after the first leaves", 2.0)
+    await _hold_audible(ctx, a2, "the second session stays audible after the first leaves", 2.0)
 
     await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [b.display]}, mute={a.display: []}, epoch=e1, generation=3)
     hb.listeners = {a.display: 3, b.display: 1}
@@ -1031,7 +1088,7 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
     hb.listeners = {l.display: 99, m.display: 3, src.display: 3}
     await ctx.until_info(l, lambda i: _silent(i) and i.get("vis_row") == 3,
                          "§9 14: a generation above the stored one silences L (row 3)")
-    await _hold(ctx, m, _audible, "§9 14: M in the same room stays audible", 2.0)
+    await _hold_audible(ctx, m, "§9 14: M in the same room stays audible", 2.0, ws_ticks_flat=False)
     reply = hb.last_reply or {}
     room = (reply.get("rooms") or {}).get(str(r)) or {}
     if l.display not in (room.get("stale_listeners") or []):
@@ -1100,8 +1157,8 @@ async def s27_out_of_order_generation(ctx: Ctx) -> None:
                                           base={a.display: 10})
     if late.get("status") != "stale_generation" and late.get("reason") != "stale_generation":
         raise Fail("§9 17: a generation below the stored one is refused as stale_generation", late)
-    await _hold(ctx, a, lambda i: _audible(i) and i.get("excluded_entries") == 0,
-                "§9 17: the out-of-order add left A's set unchanged", 1.5)
+    await _hold_audible(ctx, a, "§9 17: the out-of-order add left A's set unchanged", 1.5,
+                        policy=lambda i: i.get("excluded_entries") == 0)
     after = _vis(await ctx.info(a)).get("stale_generation_rejects") or 0
     if after <= before:
         raise Fail("§9 17: stale_generation_rejects climbs", {"before": before, "after": after})
@@ -1526,8 +1583,9 @@ async def s35_heartbeat_ordering(ctx: Ctx) -> None:
     hb.listeners = {src.display: 1, l.display: 2}
     hb.as_of = 2
     hb.resume()
-    await _hold(ctx, l, lambda i: _audible(i) and i.get("vis_row") == 4,
-                "S35 leg A: L stays at row 4 and its audio does not drop for 2 s after the late heartbeat", 2.0)
+    await _hold_audible(ctx, l,
+                        "S35 leg A: L stays at row 4 and its audio does not drop for 2 s after the late heartbeat",
+                        2.0)
 
     # ---- leg B ----
     l2 = await ctx.join("L2", r)
@@ -1543,8 +1601,7 @@ async def s35_heartbeat_ordering(ctx: Ctx) -> None:
     hb.resume()
     await ctx.until_info(l2, lambda i: i.get("vis_row") == 4 and _audible(i),
                          "S35 leg B: a heartbeat built before L2's arming leaves L2 armed, and L2 hears SRC")
-    await _hold(ctx, l2, lambda i: _audible(i) and i.get("vis_row") == 4,
-                "S35 leg B: and L2 keeps hearing for 2 s", 2.0)
+    await _hold_audible(ctx, l2, "S35 leg B: and L2 keeps hearing for 2 s", 2.0)
 
 
 # ---- Phase 0 slice 0.8b: the join capability's staleness rule (O-96) ------------------------------------------

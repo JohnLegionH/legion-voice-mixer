@@ -13,13 +13,27 @@ SLData data channel + teardown — and adds what a viewer does that a connector 
 
 From the repo root, against a running mixer (`docker compose up -d janus`):
 
+The harness needs **aiortc**, which no system Python here has; it lives in a virtualenv at the repo root,
+`.venv-it` (gitignored). Create it once, then activate it in every shell that runs a board:
+
 ```sh
-python -m venv .venv-it && . .venv-it/bin/activate      # Windows: .venv-it\Scripts\activate
-pip install --only-binary=:all: -r tests/integration/requirements.txt
+# once
+python -m venv .venv-it
+.venv-it/Scripts/python.exe -m pip install --only-binary=:all: -r tests/integration/requirements.txt
+
+# every shell (Git Bash / MSYS on Windows -- note Scripts, not bin)
+. .venv-it/Scripts/activate
+# PowerShell:  .\.venv-it\Scripts\Activate.ps1        cmd:  .venv-it\Scripts\activate.bat
+# Linux/macOS: python3 -m venv .venv-it && . .venv-it/bin/activate
+```
+
+```sh
 python -m tests.integration.run                          # all scenarios, grace 60 s
 python -m tests.integration.run --only S3 --no-restart   # one scenario, never restart the mixer
 make integration INTEGRATION_ARGS="--only S1,S7"        # same, through make (PYTHON=... to pick the venv)
 ```
+
+Without activating, run it by full path: `.venv-it/Scripts/python.exe -m tests.integration.run ...`.
 
 It is safe while the grid is up: test rooms are numbered from **900 000 000** (a fresh block per
 run), far from any room `CalcRoomNumber` produces, and every display is a random UUID. **S4 is the
@@ -62,6 +76,17 @@ shown wrong; report it, do not bend the scenario to pass.
   `mod_muted_entries`, `excluded_entries`, `last_data_fields_seen`, `last_msg_fields_seen`,
   `room_participants`), plus the plugin's `list` / `listparticipants` through a per-scenario
   control handle for the room-level view.
+- **Policy and media are asserted separately.** `last_mix_rms` is a per-tick sample of the last mixed
+  frame, so a single `0.0` while `rtp_in_count` keeps climbing is a frame with nothing decoded in time —
+  jitter, not a decision. `_hold_audible()` therefore splits the window: **POLICY** at *every* poll and
+  never tolerant (the scenario's own exact predicate; `vis_row == 4` in any room reporting `enforced`;
+  and `visibility.would_silence_listener_ticks` not moving, which catches an arming record that flaps for
+  a single tick even when the audio never drops), and **MEDIA** as `last_mix_rms > 0.01` in at least
+  `AUDIBLE_MIN_RATIO` (80%) of the window's polls. Scenarios that withhold some other listener on purpose
+  pass `ws_ticks_flat=False` and state what they expect in `policy`. **Silence assertions keep `_hold()`
+  and its every-poll strictness**: a listener that should hear nothing and is heard once has leaked, and a
+  leak is never jitter. Readiness (`Ctx.ready`, `wait_channel_open`) is bounded by `READY_TIMEOUT` (15 s)
+  and fails naming readiness, so a slow DTLS/SCTP handshake is never reported as a scenario's expectation.
 - **Moderation feed**: `peer_ctl_batch` over Admin `message_plugin` with `admin_secret` in the body,
   in the sim's shape (`PeerCtlBatchSerializer.BuildRequest` + the sink's `room` stamp):
   `{"request":"peer_ctl_batch","op":"replace","excl":{},"mute":{"<listener>":["<source>"]},"room":R}`;
