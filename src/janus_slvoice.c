@@ -464,6 +464,7 @@ typedef struct janus_slvoice_room {
 	guint64 vis_ws_listener_ticks;  /* declared rooms: vis_ws_listeners summed over every tick (catches brief windows) */
 	guint64 vis_heartbeats;         /* heartbeat room entries accepted */
 	guint64 vis_heartbeats_outdated;  /* slice 0.7d: accepted entries whose as_of was below vis_policy_gen (listeners not evaluated) */
+	guint64 vis_heartbeats_feed_stale;  /* slice V-1b (O-120): entries REFUSED because the sim's own feed_age_ms exceeded the window */
 	guint64 vis_stale_epoch_rejects;       /* batches and heartbeat entries answered stale_epoch */
 	guint64 vis_stale_generation_rejects;  /* batches whose policy_generation was not above vis_policy_gen */
 	guint64 vis_records_full;       /* arming refused because vis_records held SLV_VIS_MAX_RECORDS */
@@ -1873,6 +1874,9 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(vis, "would_silence_listener_ticks", json_integer((json_int_t)qroom->vis_ws_listener_ticks));
 		json_object_set_new(vis, "heartbeats", json_integer((json_int_t)qroom->vis_heartbeats));
 		json_object_set_new(vis, "heartbeats_outdated", json_integer((json_int_t)qroom->vis_heartbeats_outdated));
+		/* Slice V-1b (O-120): heartbeat entries this room REFUSED because the sim reported its own visibility feed as
+		 * older than the staleness window. The sim keeps heartbeating through a stall; this is where that stall shows. */
+		json_object_set_new(vis, "heartbeats_feed_stale", json_integer((json_int_t)qroom->vis_heartbeats_feed_stale));
 		json_object_set_new(vis, "stale_epoch_rejects", json_integer((json_int_t)qroom->vis_stale_epoch_rejects));
 		json_object_set_new(vis, "stale_generation_rejects", json_integer((json_int_t)qroom->vis_stale_generation_rejects));
 		json_object_set_new(vis, "records_full", json_integer((json_int_t)qroom->vis_records_full));
@@ -2557,6 +2561,12 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 	json_t *jepoch = json_object_get(message, "room_epoch");
 	json_t *jinterval = json_object_get(message, "interval_ms");
 	json_t *jrooms = json_object_get(message, "rooms");
+	/* Slice V-1b (O-120): the sim reports how old its own visibility feed is, in ms, at the moment it BUILT this
+	 * body. Its heartbeat now runs on a timer of its own, so it keeps arriving through a feeder stall; without this
+	 * field a starved sim would look exactly like a healthy one and keep its listeners armed on a frozen matrix.
+	 * The sim does NOT decide what counts as live - it reports, the mixer rules, against the one staleness window
+	 * it already owns. ABSENT means a pre-V1b sim: everything below behaves exactly as it did before. */
+	json_t *jfeed_age = json_object_get(message, "feed_age_ms");
 	if(!json_is_string(jepoch) || !slv_vis_parse_epoch(json_string_value(jepoch), &epoch)
 			|| !json_is_integer(jinterval) || json_integer_value(jinterval) < 1
 			|| (jrooms != NULL && !json_is_object(jrooms))) {
@@ -2586,6 +2596,13 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 		janus_slvoice_vis_reply_common(response);
 		return response;
 	}
+	/* Slice V-1b (O-120): THE DECISION. A heartbeat only asserts liveness if the authority behind it is current,
+	 * and the sim's own feed age is what says whether it is. Judged against slv_vis_stale_ms - the same window that
+	 * ages a record out - so there is exactly one rule about what "live" means and it lives here. A negative or
+	 * non-integer value is treated as absent rather than as a refusal: a malformed age must not silence a grid. */
+	json_int_t feed_age_ms = json_is_integer(jfeed_age) ? json_integer_value(jfeed_age) : -1;
+	gboolean feed_stale = !slv_vis_feed_live(json_is_integer(jfeed_age) ? 1 : 0,
+		(int64_t)feed_age_ms, slv_vis_stale_ms);
 	json_t *jstate = json_object_get(message, "state");
 	gboolean stopping = json_is_string(jstate) && !strcmp(json_string_value(jstate), "stopping");
 
@@ -2607,6 +2624,26 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 			janus_slvoice_vis_reply_room_locked(rout, NULL, "unknown_room", stale, unarmed);
 		} else {
 			janus_mutex_lock(&room->mutex);
+			if(feed_stale && !stopping) {
+				/* Slice V-1b: counted, answered, and NOT adopted. Skipping the adoption is the whole point: it is
+				 * what leaves vis_auth_last_us untouched, so this room ages out on the existing window exactly as if
+				 * the sim had gone quiet - which, as far as its arming is concerned, it has. A "stopping" heartbeat
+				 * is still honoured however old the feed is: a sim shutting down should be believed at once. */
+				room->vis_heartbeats_feed_stale++;
+				if(room->vis_heartbeats_feed_stale % 100 == 1)
+					JANUS_LOG(LOG_WARN, "[%s] room %"PRIu64": peer_ctl_heartbeat reports feed_age_ms %"JSON_INTEGER_FORMAT
+						" above the staleness window %u: NOT counted as live, this room's authority ages out "
+						"(%"PRIu64" so far)\n", JANUS_SLVOICE_PACKAGE, room->room_id, feed_age_ms, slv_vis_stale_ms,
+						room->vis_heartbeats_feed_stale);
+				janus_slvoice_vis_reply_room_locked(rout, room, "feed_stale", stale, unarmed);
+				janus_mutex_unlock(&room->mutex);
+				janus_refcount_decrease(&room->ref);
+				/* Same teardown the normal path does below: the reply took its own references. */
+				json_decref(stale);
+				json_decref(unarmed);
+				json_object_set_new(rooms_out, rkey, rout);
+				continue;
+			}
 			slv_vis_epoch_verdict v = janus_slvoice_vis_adopt_locked(room, epoch, now,
 				stopping ? "peer_ctl_heartbeat stopping" : "peer_ctl_heartbeat");
 			const char *status = room->vis_declared ? "ok" : "undeclared_room";

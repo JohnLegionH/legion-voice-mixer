@@ -2211,6 +2211,53 @@ async def s40b_one_authority_control(ctx: Ctx) -> None:
         print("      S43 NOTE: the control did NOT reach 3 armed listeners - read S40 as a harness measurement, not a mixer one")
 
 
+async def s45_heartbeat_with_a_stalled_feed(ctx: Ctx) -> None:
+    """REGRESSION (V-1b, O-120): a sim whose heartbeat keeps arriving but whose FEEDER has stalled is not live.
+
+    O-120: the sim's heartbeat used to ride the feeder's tick, so a starved region simply went quiet and the mixer
+    aged it out correctly. Now the heartbeat has its own timer and keeps arriving through a stall -- which, without
+    this rule, would assert authority over a matrix that stopped moving 60 s ago. The sim therefore REPORTS its own
+    feed age and the MIXER rules on it, against the same staleness window it already owns.
+
+    Armed and heartbeating normally, L hears SRC. Then the heartbeat starts reporting a feed older than the window
+    while continuing to arrive on time. L must go NOT live -- exactly as if the sim had gone silent -- and the room
+    must count it in visibility.heartbeats_feed_stale."""
+    r, l, src = await _declared_pair(ctx)
+    vis = await _mode(ctx, l, want_fail_closed=True)
+    stale_ms = vis.get("stale_ms") or 8000
+    e1 = _epoch(1)
+    hb = Heartbeater(ctx.admin, e1, r, {l.display: 1, src.display: 1}).start()
+    ctx.background.append(hb)
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: [], src.display: []},
+                                                mute={l.display: [], src.display: []}, epoch=e1, generation=1),
+                 "arming L and SRC", slvoice="applied", status="ok")
+    await ctx.until_info(l, lambda i: i.get("vis_row") == 4, "healthy feed: L is armed at row 4")
+    before = _vis(await ctx.info(l)).get("heartbeats_feed_stale") or 0
+
+    # The stall: the heartbeat keeps its cadence, but now says its feed is older than the window.
+    hb.feed_age_ms = stale_ms + 4000
+    await ctx.until_info(l, lambda i: i.get("vis_row") != 4,
+                         f"a heartbeat reporting feed_age_ms {stale_ms + 4000} does not keep L live",
+                         timeout=max(5.0, stale_ms / 1000.0 + 4.0))
+    info = await ctx.info(l)
+    v = _vis(info)
+    if (v.get("heartbeats_feed_stale") or 0) <= before:
+        raise Fail("the room counts the refused heartbeats in heartbeats_feed_stale",
+                   {"before": before, "after": v.get("heartbeats_feed_stale")})
+    if not _silent(info):
+        raise Fail("fail-closed silences a listener whose authority went stale behind a stalled feed", pick(info))
+    print(f"      S45: feed_age_ms {stale_ms + 4000} > stale_ms {stale_ms} -> vis_row {info.get('vis_row')}, "
+          f"heartbeats_feed_stale {before} -> {v.get('heartbeats_feed_stale')}, last_mix_rms {info.get('last_mix_rms')}",
+          flush=True)
+
+    # And it recovers: a heartbeat reporting a HEALTHY feed re-establishes liveness without a new arming.
+    hb.feed_age_ms = 250
+    _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={l.display: [], src.display: []},
+                                                mute={l.display: [], src.display: []}, epoch=e1, generation=2),
+                 "re-arming after the stall", slvoice="applied", status="ok")
+    await ctx.until_info(l, lambda i: i.get("vis_row") == 4, "a healthy feed age makes L live again")
+
+
 async def s41_sim_created_room_requires_a_capability(ctx: Ctx) -> None:
     """REGRESSION (slice 1.4, O-105). Until 1.4 the capability requirement keyed on `vis_authority`, so an
     UNDECLARED room admitted a join carrying nothing - and every A2A "multiagent" room on a live grid is undeclared
@@ -2377,6 +2424,8 @@ SCENARIOS = [
              "1.4 PART 0, O-106", s40b_one_authority_control),
     Scenario("S41", "REGRESSION: a sim-created room refuses a bare join and admits a capability-bearing one",
              "1.4, O-105", s41_sim_created_room_requires_a_capability),
+    Scenario("S45", "REGRESSION: a heartbeat whose reported feed age is past the window is not live",
+             "V-1b, O-120", s45_heartbeat_with_a_stalled_feed),
     Scenario("S44", "mixed version: an UNMARKED room (old sim) keeps the pre-1.4 rule",
              "1.4, mixed version 3(a)", s44_old_sim_room_keeps_the_old_rule),
     Scenario("S42", "CHARACTERISATION: the moderation mute in an UNDECLARED room",

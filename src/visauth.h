@@ -122,6 +122,23 @@ static inline int slv_vis_row(int armed, uint64_t record_epoch, uint64_t auth_ep
 	return 4;
 }
 
+/*! \brief Slice V-1b (O-120): does a heartbeat carrying this feed age count as LIVE?
+ *
+ * The sim's heartbeat runs on its own timer, so it keeps arriving while the sim's visibility feeder is starved.
+ * `feed_age_ms` is how old the sim says its own feed was when it BUILT the body; a heartbeat older than the
+ * staleness window asserts authority over a matrix that has stopped moving, so it must not refresh liveness.
+ * The sim reports, the mixer rules, and the rule is the window this header already owns.
+ *
+ * `present` false (a pre-V1b sim that sends no age) is LIVE: absent means absent, and the mixer behaves exactly
+ * as it did before the field existed. A NEGATIVE age is malformed, and malformed is treated as absent rather
+ * than as a refusal - a sim with a broken clock must not be able to silence its own grid.
+ */
+static inline int slv_vis_feed_live(int present, int64_t feed_age_ms, uint64_t stale_ms) {
+	if(!present || feed_age_ms < 0)
+		return 1;
+	return (uint64_t)feed_age_ms <= stale_ms;
+}
+
 /*! \brief would_silence_pairs for a room of n participants of which `good` stand in row 4: the ordered
  * (listener, source) pairs, listener != source, where either side is not row 4. */
 static inline uint64_t slv_vis_would_silence_pairs(uint64_t n, uint64_t good) {

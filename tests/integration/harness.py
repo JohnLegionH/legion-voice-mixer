@@ -585,13 +585,20 @@ class Admin:
             raise Fail(f"{request.get('request')} refused by the Admin API", data.get("error"))
         return data.get("response") or {}
 
-    async def heartbeat(self, epoch: str, rooms: dict, interval_ms: int = 1000, stopping: bool = False) -> dict:
+    async def heartbeat(self, epoch: str, rooms: dict, interval_ms: int = 1000, stopping: bool = False,
+                        feed_age_ms: int | None = None) -> dict:
         """The 0.2 sim's peer_ctl_heartbeat (VisAuthority.BuildHeartbeat): rooms is {room: {"policy_generation": g,
-        "listeners": {display: generation}}}."""
+        "listeners": {display: generation}}}.
+
+        Slice V-1b (O-120): `feed_age_ms` is how old the sim says its own visibility feed was when it built the
+        body. None omits the key, which is what a pre-V1b sim sends and what every scenario written before this
+        slice therefore exercises."""
         request = {"request": "peer_ctl_heartbeat", "room_epoch": epoch, "interval_ms": interval_ms,
                    "rooms": {str(room): body for room, body in rooms.items()}}
         if stopping:
             request["state"] = "stopping"
+        if feed_age_ms is not None:
+            request["feed_age_ms"] = feed_age_ms
         return await self.plugin_request(request)
 
 
@@ -650,7 +657,7 @@ class Heartbeater:
     heartbeat's reply arrived, the mixer's latest confirmation."""
 
     def __init__(self, admin: Admin, epoch: str, room: int, listeners: dict, generation: int = 1, period: float = 1.0,
-                 as_of: int | None = None):
+                 as_of: int | None = None, feed_age_ms: int | None = None):
         self._admin = admin
         self.epoch = epoch
         self._room = room
@@ -659,6 +666,9 @@ class Heartbeater:
         #: Slice 0.7d: the highest policy_generation this sender has had applied to the room, sent as "as_of" (the 0.7d
         #: sim sends it). None omits the key, as a pre-0.7d sim does.
         self.as_of = as_of
+        #: Slice V-1b (O-120): the feed age this sender reports, mutable while running so a scenario can make a
+        #: healthy sim "stall" without stopping its heartbeat -- which is the whole shape O-120 describes.
+        self.feed_age_ms = feed_age_ms
         self._period = period
         self._running = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -684,7 +694,8 @@ class Heartbeater:
                     if self.as_of is not None:
                         body["as_of"] = self.as_of
                     sent_at = time.monotonic()
-                    self.last_reply = await self._admin.heartbeat(self.epoch, {self._room: body})
+                    self.last_reply = await self._admin.heartbeat(self.epoch, {self._room: body},
+                                                                  feed_age_ms=self.feed_age_ms)
                     self.last_sent = time.monotonic()
                     self.sent += 1
                     self.history.append((sent_at, self.last_sent, body["listeners"],

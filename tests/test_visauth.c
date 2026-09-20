@@ -976,6 +976,26 @@ static void test_heartbeat_ordering(void) {
 	free_session(s);
 }
 
+/* Slice V-1b (O-120): the sim reports its feed's age, the mixer decides whether that is live. */
+static void test_feed_age_liveness(void) {
+	/* absent = a pre-V1b sim: live, so the field changes nothing for an old sim */
+	CHECK(slv_vis_feed_live(0, -1, 8000), "feed age: absent is live (pre-V1b sim unchanged)");
+	CHECK(slv_vis_feed_live(0, 999999, 8000), "feed age: absent is live even if a value is lying around");
+	/* inside the window is live, including exactly at it */
+	CHECK(slv_vis_feed_live(1, 0, 8000), "feed age: 0 ms is live");
+	CHECK(slv_vis_feed_live(1, 250, 8000), "feed age: one tick of slip is live");
+	CHECK(slv_vis_feed_live(1, 8000, 8000), "feed age: exactly the window is still live");
+	/* past the window is NOT live - this is the O-120 case, a starved feeder still heartbeating */
+	CHECK(!slv_vis_feed_live(1, 8001, 8000), "feed age: one ms past the window is not live");
+	CHECK(!slv_vis_feed_live(1, 60094, 8000), "feed age: the measured 60 s stall is not live");
+	/* malformed is treated as absent: a broken clock must not be able to silence a grid */
+	CHECK(slv_vis_feed_live(1, -1, 8000), "feed age: negative is malformed, treated as absent");
+	CHECK(slv_vis_feed_live(1, -60094, 8000), "feed age: very negative is still just malformed");
+	/* the rule follows the configured window, it is not hard-coded to 8000 */
+	CHECK(slv_vis_feed_live(1, 9000, 20000), "feed age: a wider window makes the same age live");
+	CHECK(!slv_vis_feed_live(1, 9000, 7250), "feed age: a narrower window makes it stale");
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -986,6 +1006,7 @@ int main(void) {
 	fake_now_us = G_GINT64_CONSTANT(1000000000000);
 
 	test_pure_rules();
+	test_feed_age_liveness();
 	test_knobs_and_clamp();
 	test_keying();
 	test_decision_table();
