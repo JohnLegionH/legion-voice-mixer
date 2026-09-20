@@ -45,7 +45,7 @@ import logging
 import time
 
 import aiohttp
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.sdp import candidate_from_sdp
 
 from common.janus import KEEPALIVE_SECONDS, JanusHttp
@@ -99,6 +99,25 @@ def describe(e: Exception) -> str:
     return type(e).__name__
 
 
+def _new_peer_connection(cfg: dict) -> RTCPeerConnection:
+    """A PeerConnection with this peer's ICE policy.
+
+    `ice_servers` absent keeps aiortc's own default, which is a STUN lookup. `ice_servers: []` gathers
+    HOST CANDIDATES ONLY, and for a peer whose mixer is on this host or this Docker network that is all
+    it can ever use: the server-reflexive pair is never selected. It matters because gathering is
+    synchronous with the join. MEASURED on this host, one peer, same code path otherwise:
+
+        aiortc default   setLocalDescription  5026 ms   8 candidates (6 host + 2 srflx)
+        ice_servers=[]   setLocalDescription    45 ms   6 candidates (host only)
+
+    Five seconds, on every join, waiting on a public STUN server for a candidate the peer discards.
+    """
+    servers = cfg.get("ice_servers")
+    if servers is None:
+        return RTCPeerConnection()
+    return RTCPeerConnection(RTCConfiguration(iceServers=list(servers)))
+
+
 class ConnectorPeer:
     #: appended to the "shutting down" log line by subclasses (e.g. ", close wav")
     shutdown_note = ""
@@ -111,7 +130,7 @@ class ConnectorPeer:
     def __init__(self, cfg: dict, log: logging.Logger):
         self._cfg = cfg
         self._log = log
-        self._pc = RTCPeerConnection()
+        self._pc = _new_peer_connection(cfg)
         self._answered = asyncio.Event()
         self._stopping = asyncio.Event()
         #: the Janus client (session/handle ids) once an attempt has attached
@@ -200,7 +219,7 @@ class ConnectorPeer:
         Always leaves its session torn down."""
         cfg = self._cfg
         if self._attempts:
-            self._pc = RTCPeerConnection()   # a closed PeerConnection cannot be reused; the first is __init__'s
+            self._pc = _new_peer_connection(cfg)   # a closed PeerConnection cannot be reused; the first is __init__'s
         self._attempts += 1
         self._answered = asyncio.Event()
         self._joined_at = None

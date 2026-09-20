@@ -162,8 +162,14 @@ async def s5_room_switch_grace(ctx: Ctx) -> None:
                 f"R1 absent from list after the {grace} s grace (O-54)", timeout=grace + 15, step=1.0,
                 show=lambda ids: {"r1_listed": r1 in ids, "waited_s": round(time.monotonic() - emptied, 1)})
     waited = time.monotonic() - emptied
-    if waited < grace - 1:
-        raise Fail("R1 destroyed before its grace expired", {"waited_s": round(waited, 1), "grace_s": grace})
+    # The mixer's grace clock starts when IT removes the last participant; `emptied` is taken after both
+    # close() calls RETURN, which is necessarily later, and the poll below has a 1 s step. So the harness's
+    # measured elapsed under-reports the mixer's by that much, and a board once read 58.9 s against a bare
+    # `grace - 1` floor and failed on 0.1 s of measurement granularity. GRACE_EPSILON_S covers both terms.
+    # The exact check is the next one: the mixer logs the empty seconds it actually counted.
+    if waited < grace - GRACE_EPSILON_S:
+        raise Fail("R1 destroyed before its grace expired", {"waited_s": round(waited, 1), "grace_s": grace,
+                                                             "epsilon_s": GRACE_EPSILON_S})
 
     logs = await mixer_logs(ctx.cfg, since)
     m = re.search(rf"\[slvoice\] room {r1} destroyed after (\d+)s empty", logs)
@@ -449,6 +455,12 @@ async def _mode(ctx: Ctx, peer, want_fail_closed: bool) -> dict:
         raise Skip(f"this scenario needs JS_VIS_FAIL_CLOSED={1 if want_fail_closed else 0}; the mixer reports "
                    f"fail_closed={vis['fail_closed']}")
     return vis
+
+
+#: S5: slack between the harness's "the room went empty" stamp and the mixer's own, plus the 1 s poll
+#: step of the wait that follows. Measurement granularity, not behaviour -- the mixer's logged empty
+#: seconds are what actually pin the grace.
+GRACE_EPSILON_S = 2.0
 
 
 async def _hold(ctx: Ctx, peer, pred, what: str, seconds: float) -> None:

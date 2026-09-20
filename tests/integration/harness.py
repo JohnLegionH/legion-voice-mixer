@@ -269,8 +269,14 @@ class TestPeer(ConnectorPeer):
                  connector_cap: dict | None = None):
         # Slice 0.7b: connector_cap = {"cap_url", "cap_secret", "cap_backoff"} runs ConnectorPeer's own capability
         # fetch (connectors/common/joincap.py) before the join, exactly as a configured recorder or injector does.
+        # ice_servers=[]: HOST CANDIDATES ONLY. aiortc's default gathers through a public STUN server,
+        # which costs a MEASURED 5026 ms inside setLocalDescription against 45 ms without it, on every
+        # join, for a server-reflexive candidate a localhost mixer never selects. start() allows 10 s,
+        # so half the budget was going to a lookup the peer discards. RelayOnlyPeer builds its own
+        # PeerConnection with the TURN server and is unaffected.
         super().__init__({"janus_url": cfg.janus_url, "api_secret": cfg.api_secret,
-                          "room": room, "display": display, **(connector_cap or {})},
+                          "room": room, "display": display, "ice_servers": [],
+                          **(connector_cap or {})},
                          logging.getLogger(f"integration.peer.{name}"))
         self.name = name
         self.room = room
@@ -825,7 +831,7 @@ class NoMediaPeer(Control):
     async def join(self) -> dict:
         """The join reply, whatever it says: this peer is how a scenario reads a REFUSAL (error_code and the
         slice 0.4 `reason`), where TestPeer.start would raise."""
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # host candidates only; see TestPeer
         try:
             pc.addTransceiver("audio", direction="sendrecv")
             pc.createDataChannel("SLData")
