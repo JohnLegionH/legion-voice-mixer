@@ -989,18 +989,41 @@ async def compose(cfg: Config, *args: str, timeout: float = 180.0) -> subprocess
                                    errors="replace", timeout=timeout, cwd=str(cfg.compose_file.parent))
 
 
-async def wait_mixer_up(cfg: Config, http: aiohttp.ClientSession, timeout: float = 90.0) -> float:
-    """Poll the client API's /info until it answers 200; returns the seconds it took."""
+#: wait_mixer_up: consecutive successful probes, ~0.5 s apart, before a restart counts as recovered.
+RESTART_SETTLED_PROBES = 6
+
+
+async def wait_mixer_up(cfg: Config, http: aiohttp.ClientSession, timeout: float = 60.0,
+                        settled: int = RESTART_SETTLED_PROBES) -> float:
+    """READINESS after a harness-initiated restart: the signalling port answers FROM THE HOST, and KEEPS
+    answering. Returns the seconds it took.
+
+    One 200 is not enough. A restarted container's published-port forwarding has been observed answering and
+    then going away again seconds later (O-113): a board's S20 passed this wait, joined a peer, and then lost
+    the mixer for the remaining 24 scenarios. The container was healthy throughout -- `docker exec ... curl
+    127.0.0.1` answered 200 while the same request to localhost did not -- so this is the host-side hop, not
+    the mixer. Requiring `settled` consecutive probes means a scenario only continues once forwarding has
+    held for a few seconds, and a timeout here FAILS naming port forwarding rather than the scenario's own
+    expectation."""
     start = time.monotonic()
+    streak = 0
 
     async def probe():
+        nonlocal streak
         try:
             async with http.get(f"{cfg.janus_url}/info", timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                return resp.status
+                streak = streak + 1 if resp.status == 200 else 0
+                return f"HTTP {resp.status}, {streak} in a row"
         except Exception as e:
+            streak = 0
             return repr(e)
 
-    await until(probe, lambda s: s == 200, "mixer /info answering after the restart", timeout, step=0.5)
+    await until(probe, lambda _: streak >= settled,
+                f"READINESS: after restarting {mixer_target(cfg)}, its signalling port did not stay "
+                f"reachable from the host for {settled} probes in a row within {timeout:.0f} s "
+                f"(published-port forwarding, not the mixer: compare `docker exec` curl to 127.0.0.1 "
+                f"inside the container)",
+                timeout, step=0.5)
     return time.monotonic() - start
 
 

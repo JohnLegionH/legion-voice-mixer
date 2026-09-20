@@ -139,6 +139,13 @@ shown wrong; report it, do not bend the scenario to pass.
 | S37 | **`JS_JOIN_CAP_REQUIRED=1` only**, and needs a key. The REAL injector (`connectors/injector/injector.py` over `common/peer.py`, rejoin on, fast backoff and a 0.5 s room probe) against the capability stub; its joins are recorded on the wire. (a) its room does not exist yet; then the harness creates it. (b) the harness destroys the room under the joined peer, then re-creates it | (a) 3 refusals `485`, 3 fetches, 3 Janus sessions; then joined, and `rtp_in_count` > 0 in the room. (b) a new fetch and a new join after the destroy; the lost session's handle is gone; joined again with RTP. (c) every join carried a capability the stub issued, none twice, none bare | **O-99 / slice 0.8f**: a connector survives a failed join and a lost room. `TestPeer` keeps rejoin off, so every other scenario still reads one join. Fails before the fix, and with the retry removed, on `S37 leg a: after '485 No such room' the peer tears down, re-fetches a capability and joins again` |
 
 **Phase 0 runs (0.3).** S15 runs against the deployed mixer (fail-closed off). S16-S20 need a mixer with
+**Keep a scratch mixer's `JS_RTP_PORT_RANGE` small — 20 ports is plenty.** The busiest scenario (S19, S36) creates
+6 peers, so 20 is clear even at 2 UDP ports per PeerConnection. It matters because S4 and S20 restart the container,
+and on Docker Desktop every published port is a `docker-proxy` that has to come back before the host can reach the
+mixer again: measured on this host, a restart with 51 ports published (106 proxies) did not answer steadily for
+**167 s**, against **13–26 s** with 20 ports (44). See O-113. The LIVE mixer's range is a different question and is
+not affected by this.
+
 `JS_VIS_FAIL_CLOSED=1`, which must never be the live grid's: start a scratch container on other ports and pass
 `--janus-url`, `--admin-url`, its throwaway secrets and `--container <name>`. S21 needs the pre-0.3 image, also as
 a scratch container. `--container NAME` makes every scenario read that container's logs, exec into it and restart it (O-94).

@@ -112,6 +112,22 @@ gateway (measured: `172.23.0.1`), not from the viewer's address. Media is unaffe
 never tell a relayed viewer from a direct one, and show `undetermined`. On a **Linux** home server the viewer's address
 arrives and the diagnostics show `direct`.
 
+**Also on Docker Desktop for Windows: after a mixer restart, give it time before you judge it.** A restarted
+container can be reachable from *inside* while still unreachable from *outside* for minutes, because the published
+ports are re-established one proxy at a time and the mixer publishes a whole UDP media range. Observed on this host
+(O-113): the signalling port answered within a second, went away again, and did not answer steadily until **167 s**
+with 51 media ports published — against **13–26 s** with 20. A separate restart of the live mixer under load on the
+same host recovered in ~31 s, so treat this as a range to expect, not a fixed number. The diagnostic is one pair of
+commands — if the first answers and the second does not, nothing is wrong with the mixer and you are waiting on
+Docker's port forwarding:
+
+```sh
+docker exec <container> curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:14223/voice/info   # inside
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:14223/voice/info                           # outside
+```
+
+Not seen on Linux hosts, but never measured there across a restart.
+
 ## 6. The expected self-check board
 
 ```sh
