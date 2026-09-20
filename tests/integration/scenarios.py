@@ -613,10 +613,21 @@ async def s16_fail_closed_decision_table(ctx: Ctx) -> None:
 
     await _hold_audible(ctx, a, "heartbeats alone keep A audible (10 s, no batches)", 10.0)
 
-    last = await hb.pause()
-    until_s = last + stale_s - 1.0
-    await _hold_audible(ctx, a, f"window: still audible {stale_s - 1.0:.1f} s after the last heartbeat",
-                        max(0.0, until_s - time.monotonic()))
+    last = await hb.pause()   # kept for the row-3 wait below; the WINDOW is timed from the mixer
+    # The window belongs to the MIXER's clock, so read it from the mixer. It stales a record at
+    # confirmed_us + stale_ms, where confirmed_us is when IT accepted the heartbeat; Heartbeater.pause()
+    # returns when the REPLY arrived, which is necessarily later by the admin round trip. Timing the hold
+    # from the reply left only 1 s for that gap, and a board with a slow admin call read vis_row 3 while
+    # the scenario still thought it was inside the window -- with the mixer correct to the millisecond
+    # (measured: row 3 at authority_age_ms 8023-8111 against stale_ms 8000). `authority_age_ms` is the
+    # mixer's own "how long since I last accepted authority for this room", so hold for what IT has left,
+    # minus a second, and no round trip can move it.
+    vis_now = _vis(await ctx.info(a))
+    stale_ms = vis_now.get("stale_ms") or int(stale_s * 1000)
+    age_ms = vis_now.get("authority_age_ms") or 0
+    safe_s = max(0.0, (stale_ms - age_ms - 1000) / 1000.0)
+    await _hold_audible(ctx, a, f"window: still audible with {safe_s:.1f} s left of the mixer's own window",
+                        safe_s, policy=lambda i: (_vis(i).get("authority_age_ms") or 0) < stale_ms)
     await ctx.until_info(a, lambda i: _silent(i) and i.get("vis_row") == 3, "row 3: silent once the window has passed",
                          timeout=max(1.0, last + stale_s + 1.0 - time.monotonic()))
     print(f"      S16 info: silent {time.monotonic() - last:.2f} s after the last heartbeat (window {stale_s:.1f} s)", flush=True)
