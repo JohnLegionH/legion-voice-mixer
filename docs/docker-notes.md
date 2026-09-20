@@ -465,7 +465,7 @@ it (`docs/voice/nonspatial-phase0-design.md` §11).
 
 | Knob | Default | Effect |
 |---|---|---|
-| `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join a room created with `vis_authority`, and never gates any other room |
+| `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join any room **a simulator created** - from slice 1.4 that means any room whose create carried `"sim_created": true` (spatial and `multiagent` alike), plus any room created with `vis_authority`. A room nobody marked - the harness's, a static room from the config file, or one a pre-1.4 simulator created - is never gated. The knob has never shipped in a tagged release, so `0` is byte-identical to every published image |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key, shared with the sim. Not `JS_API_SECRET`. With `JS_JOIN_CAP_REQUIRED=1` and no key the container refuses to start |
 
 **The viewer never holds one.** The viewer talks to the region's capability URL; the sim's own Janus session

@@ -190,7 +190,7 @@ static void free_session(janus_slvoice_session *s) {
 
 /* A flat (non-spatial) room with its tick thread stopped: the test drives the tick. */
 static janus_slvoice_room *new_room(guint64 id, gboolean declared) {
-	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, FALSE, FALSE, declared);
+	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, FALSE, FALSE, declared, FALSE);
 	if(room == NULL) {
 		fprintf(stderr, "test_visauth: room_create(%" PRIu64 ") failed\n", id);
 		exit(2);

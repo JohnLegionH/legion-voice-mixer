@@ -15,6 +15,57 @@ upgrade** and **One-time migrations**, even when empty. O-items are rows in
 
 ---
 
+## Mixer 1.2.1 (proposed; untagged): the capability requirement covers every room a simulator creates - 2026-09-20
+
+Slice 1.4, ledger O-105. **One behaviour change, and only with `JS_JOIN_CAP_REQUIRED=1`.**
+
+Until now the requirement was scoped to rooms created with `vis_authority` - the spatial rooms a simulator
+arms. Every other room a simulator creates was ungated, and that includes **every avatar-to-avatar call**:
+an A2A room is `multiagent`, and `multiagent` rooms are never declared. With the requirement on, a join
+carrying no capability at all was still admitted there, and the refusal counters did not move. Measured, on
+a mixer configured exactly like production:
+
+    S41 (pre-1.4) required=True bare join into an UNDECLARED room: joined=True cap_present=False
+    verdict=cap_missing cap_missing before/after 0/0 enforced_refusals=0
+
+From 1.4 the gate keys on **how the room was created** instead. The simulator marks every room it creates
+with `"sim_created": true` on the create request, and a join into a marked room needs a valid capability
+when the requirement is on, declared or not.
+
+### Is this a released-behaviour change?
+
+**No.** `JS_JOIN_CAP_REQUIRED` has never shipped in a tagged release - it was added in slice 0.4 and has
+only ever run here. With the knob unset, which is its default and what every published image has done, this
+release behaves byte-identically to the previous one: the marker is read, recorded and reported, and nothing
+is refused. The change is visible only to a deployment that has already turned the requirement on
+deliberately.
+
+### Mixed versions
+
+| combination | behaviour |
+|---|---|
+| **new mixer, old simulator** | The old simulator sends no marker, so its rooms keep the pre-1.4 rule exactly - gated only if declared. Pinned by harness scenario **S44** |
+| **new simulator, old mixer** | Safe, and it needs no negotiation. The plugin's `create` arm reads its fields by name (`json_object_get`) and never validates the object against a schema, so an unknown field is ignored (`src/janus_slvoice.c`, the `create` request). The simulator therefore sends the marker unconditionally, and an old mixer behaves exactly as it did |
+| connector peers (recorder, injector) | Unaffected. They already fetch a sim-minted capability before every join (slice 0.7b, harness S34), so a marked room admits them as before |
+
+### What an operator sees
+
+`handle_info` gains `visibility.sim_created` per room, so "why was that join refused" (or admitted) can be
+answered without reading the create request back. The startup banner now reads *"Join capability: REQUIRED in
+rooms a simulator created (sim_created, and any room with vis_authority)"*.
+
+### Behaviour changes on upgrade
+
+None with the defaults. With `JS_JOIN_CAP_REQUIRED=1`: a join into any room a 1.4-or-later simulator created
+must carry a valid capability. If you run connector peers, they must be configured with `CONNECTOR_CAP_URL`
+and `CONNECTOR_CAP_SECRET` - which slice 0.7b already required of them in declared rooms.
+
+### One-time migrations
+
+None.
+
+---
+
 ## Mixer 1.2.0 (proposed; untagged): Phase A + Phase 0, enforcement ON - 2026-09-19
 
 | Deployed (CDT) | Image | Rollback tag |

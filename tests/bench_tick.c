@@ -199,7 +199,7 @@ int main(int argc, char **argv) {
 
 	/* room_create UNCONDITIONALLY starts the ticker thread (janus_slvoice.c:477);
 	 * quiesce it immediately, then drive room_tick synchronously ourselves. */
-	janus_slvoice_room *room = janus_slvoice_room_create(1, "bench", FALSE, SLV_RATE, TRUE, TRUE, FALSE);
+	janus_slvoice_room *room = janus_slvoice_room_create(1, "bench", FALSE, SLV_RATE, TRUE, TRUE, FALSE, FALSE);
 	janus_slvoice_room_stop(room);
 
 	janus_slvoice_session **sess = g_malloc0((gsize)N * sizeof(*sess));

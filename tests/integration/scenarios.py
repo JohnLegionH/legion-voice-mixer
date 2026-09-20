@@ -1982,12 +1982,86 @@ async def s38_connector_position_is_spatialised(ctx: Ctx) -> None:
 # changing the design brief first.
 
 
+class ArmingDriver:
+    """One authority's ARMING, repeated: a peer_ctl_batch replace under its own epoch every `period` seconds with a
+    rising generation, exactly as a region's feeder re-arms its population. Counts what the mixer did with each one.
+
+    Slice 1.4 PART 0 found S40 sent ONE replace, from one authority only, so the second authority could never have
+    armed anybody - the room read 0 armed because a heartbeat confirms arming, it does not create it. Both
+    authorities now arm."""
+
+    def __init__(self, admin, epoch: str, room: int, listeners: list, period: float = 1.0):
+        self._admin = admin
+        self.epoch = epoch
+        self._room = room
+        self._listeners = list(listeners)
+        self._period = period
+        self.generation = 0
+        self.applied = 0
+        self.stale_epoch = 0
+        self.other = 0
+        self.last_reply = None
+        self._task = None
+
+    def start(self) -> "ArmingDriver":
+        self._task = asyncio.create_task(self._loop(), name=f"arming-{self.epoch}")
+        return self
+
+    async def _loop(self) -> None:
+        while True:
+            self.generation += 1
+            try:
+                reply = await self._admin.peer_ctl_batch(
+                    self._room, "replace", excl={d: [] for d in self._listeners}, mute={},
+                    epoch=self.epoch, generation=self.generation)
+                self.last_reply = reply
+                room_reply = ((reply or {}).get("rooms") or {}).get(str(self._room)) or reply or {}
+                if room_reply.get("stale_epoch") or room_reply.get("verdict") == "stale_epoch":
+                    self.stale_epoch += 1
+                elif room_reply.get("stale_generation"):
+                    self.other += 1
+                else:
+                    self.applied += 1
+            except Exception:
+                self.other += 1
+            await asyncio.sleep(self._period)
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:
+                pass
+            self._task = None
+
+
+async def _s40_measure(ctx: Ctx, room: int, peers, seconds: int = 30):
+    """One sample a second: the room's authority state and every peer's row/stale/level."""
+    samples = []
+    for _ in range(seconds):
+        await asyncio.sleep(1.0)
+        info = await ctx.admin.handle_info(peers[0]) or {}
+        vis = info.get("visibility") or {}
+        rows = []
+        for peer in peers:
+            i = await ctx.admin.handle_info(peer) or {}
+            rows.append((i.get("vis_row"), bool(i.get("vis_stale")), round(i.get("last_mix_rms") or 0.0, 4)))
+        samples.append({"epoch": vis.get("authority_epoch"), "gen": vis.get("policy_generation"),
+                        "armed": vis.get("armed_listeners"), "stale_epoch_rejects": vis.get("stale_epoch_rejects"),
+                        "ws_l": vis.get("would_silence_listeners"), "ws_p": vis.get("would_silence_pairs"),
+                        "rows": rows})
+    return samples
+
+
 async def s40_two_authorities_one_room(ctx: Ctx) -> None:
-    """O-106: one room, two sims, two epochs. A conference spans regions, and each region is its own authority
-    (VoiceVisibilityService is per region; FeederWorldFromScene.SnapshotAgents is one scene's presences). The mixer
-    allows exactly one authority per room (visauth.h slv_vis_epoch_decide): a higher epoch ADOPTS and disarms every
-    record, a lower one is STALE_EPOCH and changes nothing. This measures what three participants experience while
-    two authorities heartbeat the same declared room."""
+    """O-106: one room, two sims, two epochs, BOTH ARMING. A conference spans regions and each region is its own
+    authority (VoiceVisibilityService is per region; FeederWorldFromScene.SnapshotAgents is one scene's presences),
+    while the mixer allows exactly one authority per room (visauth.h slv_vis_epoch_decide): a higher epoch ADOPTS and
+    disarms every record, a lower one is STALE_EPOCH and changes nothing.
+
+    Corrected in slice 1.4: the first version sent a single replace from one authority, so it could only ever show
+    the winner-never-arms case. Both authorities now re-arm every second, as two regions' feeders would."""
     r = ctx.new_room()
     da, db, dc = new_display(), new_display(), new_display()
     epoch_a = "01a0aaaa00000001"     # "region A"
@@ -1998,66 +2072,116 @@ async def s40_two_authorities_one_room(ctx: Ctx) -> None:
     c = await ctx.join("C", r, dc, vis_authority=True)
     await ctx.ready(a, b, c)
 
-    # Region A arms all three, then both regions heartbeat the same room with their own epochs.
     listeners = {da: 1, db: 1, dc: 1}
-    await ctx.admin.peer_ctl_batch(r, "replace", excl={da: [], db: [], dc: []}, mute={},
-                                   epoch=epoch_a, generation=1)
+    arm_a = ArmingDriver(ctx.admin, epoch_a, r, [da, db, dc], period=1.0)
+    arm_b = ArmingDriver(ctx.admin, epoch_b, r, [da, db, dc], period=1.0)
     hb_a = Heartbeater(ctx.admin, epoch_a, r, listeners, generation=1, period=1.0)
     hb_b = Heartbeater(ctx.admin, epoch_b, r, listeners, generation=1, period=1.0)
-    ctx.background.extend([hb_a, hb_b])
-    hb_a.start()
-    await asyncio.sleep(2.0)
-    hb_b.start()                      # the second authority appears, as a member's region would
+    ctx.background.extend([arm_a, arm_b, hb_a, hb_b])
 
-    samples = []
-    for _ in range(30):
-        await asyncio.sleep(1.0)
-        info = await ctx.admin.handle_info(a) or {}
-        vis = (info.get("visibility") or {})
-        rows = []
-        for peer in (a, b, c):
-            i = await ctx.admin.handle_info(peer) or {}
-            rows.append((i.get("vis_row"), bool(i.get("vis_stale")), round(i.get("last_mix_rms") or 0.0, 4)))
-        samples.append({"epoch": vis.get("authority_epoch"), "gen": vis.get("policy_generation"),
-                        "armed": vis.get("armed_listeners"), "stale_epoch_rejects": vis.get("stale_epoch_rejects"),
-                        "would_silence_listeners": vis.get("would_silence_listeners"),
-                        "would_silence_pairs": vis.get("would_silence_pairs"), "peers": rows})
+    arm_a.start()
+    hb_a.start()
+    await asyncio.sleep(3.0)          # region A alone, arming and heartbeating
+    solo = await _s40_measure(ctx, r, (a, b, c), seconds=3)
+    arm_b.start()
+    hb_b.start()                      # the second authority appears, as a member's region would
+    samples = await _s40_measure(ctx, r, (a, b, c), seconds=30)
 
     epochs = [s["epoch"] for s in samples]
     flips = sum(1 for i in range(1, len(epochs)) if epochs[i] != epochs[i - 1])
-    armed_zero = sum(1 for s in samples if not s["armed"])
-    rows_seen = sorted({p[0] for s in samples for p in s["peers"]})
-    rejects = samples[-1]["stale_epoch_rejects"]
-    print(f"      S40 30 s, two authorities on room {r}: epoch flips {flips}; distinct epochs held "
-          f"{len(set(epochs))}; samples with 0 armed listeners {armed_zero}/{len(samples)}; rows seen {rows_seen}; "
-          f"stale_epoch_rejects {rejects}; would_silence listeners/pairs "
-          f"{samples[-1]['would_silence_listeners']}/{samples[-1]['would_silence_pairs']}")
-    print(f"      S40 first 6 samples: " + "; ".join(
-        f"{s['epoch']}/g{s['gen']}/armed{s['armed']}" for s in samples[:6]))
+    armed = [s["armed"] or 0 for s in samples]
+    rows_seen = sorted({p[0] for s in samples for p in s["rows"]})
+    print(f"      S40 solo (A only, 3 s): armed={[s['armed'] for s in solo]} rows={sorted({p[0] for s in solo for p in s['rows']})}")
+    print(f"      S40 both arming, 30 s on room {r}: epoch flips {flips}; distinct epochs {sorted(set(epochs))}; "
+          f"armed min/max/last {min(armed)}/{max(armed)}/{armed[-1]}; samples with 0 armed {sum(1 for x in armed if not x)}/30; "
+          f"rows seen {rows_seen}; stale_epoch_rejects {samples[-1]['stale_epoch_rejects']}; "
+          f"would_silence l/p {samples[-1]['ws_l']}/{samples[-1]['ws_p']}")
+    print(f"      S40 per authority: A applied {arm_a.applied} stale_epoch {arm_a.stale_epoch} other {arm_a.other}; "
+          f"B applied {arm_b.applied} stale_epoch {arm_b.stale_epoch} other {arm_b.other}")
     if not samples:
         raise Fail("S40 took no measurement", {})
 
 
-async def s41_undeclared_room_admits_a_bare_join(ctx: Ctx) -> None:
-    """O-105 baseline: with JS_JOIN_CAP_REQUIRED=1, a room the sim created WITHOUT vis_authority - which is every
-    A2A/`multiagent` room today (JanusAudioBridge.ShouldDeclareVisAuthority) - still admits a join carrying no
-    capability at all, because the gate is keyed on vis_authority (janus_slvoice.c, joincap_verify: `if(declared)`).
-    This is the measurement behind "a conference room is ungoverned"."""
-    state = await _cap_mode(ctx, await ctx.join("probe", ctx.new_room()), want_required=True)
+async def s40b_one_authority_control(ctx: Ctx) -> None:
+    """S43, the CONTROL for S40 (slice 1.4): the same room shape and the same three peers with ONE authority arming and
+    heartbeating. If this reads armed 3 while S40 reads 0, the difference is the second authority and not the
+    harness."""
     r = ctx.new_room()
-    await ctx.control.create_room(r, f"integration {ctx.name}")        # NO vis_authority
-    before = dict(state.get("refused") or {})
-    bare = await ctx.join("BARE", r)                                   # no epoch for this room -> no capability
+    da, db, dc = new_display(), new_display(), new_display()
+    epoch = "01a0aaaa00000001"
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
+    a = await ctx.join("A", r, da, vis_authority=True)
+    b = await ctx.join("B", r, db, vis_authority=True)
+    c = await ctx.join("C", r, dc, vis_authority=True)
+    await ctx.ready(a, b, c)
+
+    arm = ArmingDriver(ctx.admin, epoch, r, [da, db, dc], period=1.0)
+    hb = Heartbeater(ctx.admin, epoch, r, {da: 1, db: 1, dc: 1}, generation=1, period=1.0)
+    ctx.background.extend([arm, hb])
+    arm.start()
+    hb.start()
+    samples = await _s40_measure(ctx, r, (a, b, c), seconds=30)
+    armed = [s["armed"] or 0 for s in samples]
+    rows_seen = sorted({p[0] for s in samples for p in s["rows"]})
+    print(f"      S43 (control) one authority, 30 s on room {r}: armed min/max/last {min(armed)}/{max(armed)}/{armed[-1]}; "
+          f"samples with 3 armed {sum(1 for x in armed if x == 3)}/30; rows seen {rows_seen}; "
+          f"stale_epoch_rejects {samples[-1]['stale_epoch_rejects']}; would_silence l/p {samples[-1]['ws_l']}/{samples[-1]['ws_p']}; "
+          f"arming applied {arm.applied} stale_epoch {arm.stale_epoch} other {arm.other}")
+    if max(armed) < 3:
+        print("      S43 NOTE: the control did NOT reach 3 armed listeners - read S40 as a harness measurement, not a mixer one")
+
+
+async def s41_sim_created_room_requires_a_capability(ctx: Ctx) -> None:
+    """REGRESSION (slice 1.4, O-105). Until 1.4 the capability requirement keyed on `vis_authority`, so an
+    UNDECLARED room admitted a join carrying nothing - and every A2A "multiagent" room on a live grid is undeclared
+    (JanusAudioBridge.ShouldDeclareVisAuthority). Measured against the pre-1.4 image in slice 1.1a:
+
+        S41 required=True bare join into an UNDECLARED room: joined=True cap_present=False verdict=cap_missing
+        cap_missing before/after 0/0 enforced_refusals=0
+
+    From 1.4 the gate keys on the sim's `sim_created` marker instead, so the same room refuses the same join with
+    496 cap_missing, while a capability-bearing join is admitted. Run it against a pre-1.4 image and leg (a)
+    fails."""
+    probe_state = await _cap_mode(ctx, await ctx.join("probe", ctx.new_room()), want_required=True)
+    r = ctx.new_room()
+    # Marked, NOT declared: exactly the shape of an A2A room. Later creates for the same number answer 486 and
+    # cannot change the flags, which are fixed at creation (janus_slvoice.c, janus_slvoice_room_create).
+    await ctx.control.create_room(r, f"integration {ctx.name}", sim_created=True)
+
+    # (a) a bare join is refused, with the reason named
+    await _refused(ctx, "BARE", r, new_display(), "cap_missing", bare=True)
+
+    # (b) a capability-bearing join is still admitted
+    ok = await ctx.join("CAP", r, sim_created=True)
+    await ctx.ready(ok)
+    info = await ctx.admin.handle_info(ok) or {}
+    vis = info.get("visibility") or {}
+    jc = vis.get("join_cap") or {}
+    refused = {k: v for k, v in (jc.get("refused") or {}).items() if v}
+    print(f"      S41 required={probe_state.get('required')} room {r} sim_created={vis.get('sim_created')} "
+          f"declared=False | bare join: refused 496 cap_missing | capability join: room={info.get('room')} "
+          f"cap_present={info.get('join_cap_present')} verdict={info.get('join_cap_verdict')} "
+          f"enforced_refusals={jc.get('enforced_refusals')} refused={refused}")
+    if info.get("room") != r or info.get("join_cap_verdict") != "ok":
+        raise Fail("S41 leg b: a capability-bearing join into a sim-created room is admitted", info)
+
+
+async def s44_old_sim_room_keeps_the_old_rule(ctx: Ctx) -> None:
+    """Mixed version 3(a), slice 1.4: a NEW mixer under an OLD sim. A pre-1.4 sim sends no `sim_created`, so its
+    undeclared rooms must keep the pre-1.4 rule exactly - gated only if declared - and a bare join into one is
+    admitted, as it is today. The new gate must not reach rooms nobody marked (harness rooms, static rooms, and
+    every room an old sim creates)."""
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}")        # no marker, no declaration: an old sim
+    bare = await ctx.join("OLDSIM", r, bare=True)
     await ctx.ready(bare)
     info = await ctx.admin.handle_info(bare) or {}
-    after = ((info.get("visibility") or {}).get("join_cap") or {})
-    joined = info.get("room") == r
-    print(f"      S41 required={state.get('required')} bare join into an UNDECLARED room: joined={joined} "
-          f"cap_present={info.get('join_cap_present')} verdict={info.get('join_cap_verdict')} "
-          f"cap_missing before/after {before.get('cap_missing')}/{(after.get('refused') or {}).get('cap_missing')} "
-          f"enforced_refusals={after.get('enforced_refusals')}")
-    if not joined:
-        raise Fail("S41: the bare join did not land in the room, so nothing was characterised",
+    vis = info.get("visibility") or {}
+    print(f"      S44 unmarked undeclared room {r}: joined={info.get('room') == r} "
+          f"sim_created={vis.get('sim_created')} cap_present={info.get('join_cap_present')} "
+          f"verdict={info.get('join_cap_verdict')}")
+    if info.get("room") != r:
+        raise Fail("S44: a bare join into an UNMARKED undeclared room is still admitted (old sim, new mixer)",
                    {"room": info.get("room"), "expected": r})
 
 
@@ -2167,10 +2291,14 @@ SCENARIOS = [
              "0.8h, O-62", s38_connector_position_is_spatialised),
     Scenario("S39", "a JSEP join cannot be re-sent on the same handle: 485, then core refuses it 490; a fresh handle joins",
              "0.8i, O-98 (why the sim creates before it joins)", s39_jsep_join_cannot_be_resent_on_the_same_handle),
-    Scenario("S40", "CHARACTERISATION: two authorities (epochs) heartbeat one declared room; what three peers experience",
+    Scenario("S40", "CHARACTERISATION: two authorities (epochs) BOTH arming one declared room; what three peers experience",
              "1.1a, O-106", s40_two_authorities_one_room),
-    Scenario("S41", "CHARACTERISATION: with the requirement ON, an UNDECLARED room still admits a bare join",
-             "1.1a, O-105", s41_undeclared_room_admits_a_bare_join),
+    Scenario("S43", "CONTROL for S40: ONE authority arming the same room shape",
+             "1.4 PART 0, O-106", s40b_one_authority_control),
+    Scenario("S41", "REGRESSION: a sim-created room refuses a bare join and admits a capability-bearing one",
+             "1.4, O-105", s41_sim_created_room_requires_a_capability),
+    Scenario("S44", "mixed version: an UNMARKED room (old sim) keeps the pre-1.4 rule",
+             "1.4, mixed version 3(a)", s44_old_sim_room_keeps_the_old_rule),
     Scenario("S42", "CHARACTERISATION: the moderation mute in an UNDECLARED room",
              "1.1a, Q2", s42_mod_mute_in_an_undeclared_room),
 ]

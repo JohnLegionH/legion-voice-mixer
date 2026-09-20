@@ -452,6 +452,9 @@ typedef struct janus_slvoice_room {
 
 	/* ---- Phase 0 visibility authority (nonspatial-phase0-design.md §1-§5). Guarded by room->mutex. */
 	gboolean vis_declared;          /* created with "vis_authority": true (§6.2); fixed for the room's lifetime */
+	gboolean sim_created;           /* slice 1.4: created with "sim_created": true - a simulator owns this room, so a
+	                                 * join into it needs a sim-minted capability when JS_JOIN_CAP_REQUIRED is on,
+	                                 * whether or not the room is declared. Fixed for the room's lifetime (O-105). */
 	guint64 vis_auth_epoch;         /* the adopted room_epoch; 0 = none yet */
 	guint32 vis_policy_gen;         /* highest policy_generation accepted in vis_auth_epoch */
 	gint64 vis_auth_last_us;        /* monotonic us of the last accepted authority message; 0 = none, or "stopping" */
@@ -699,7 +702,8 @@ static void janus_slvoice_room_free(const janus_refcount *ref) {
 }
 
 static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *desc,
-		gboolean is_private, guint32 rate, gboolean spatial, gboolean permanent, gboolean vis_authority) {
+		gboolean is_private, guint32 rate, gboolean spatial, gboolean permanent, gboolean vis_authority,
+		gboolean sim_created) {
 	janus_slvoice_room *room = g_malloc0(sizeof(janus_slvoice_room));
 	room->room_id = id;
 	room->description = desc ? g_strdup(desc) : g_strdup_printf("Region %"PRIu64, id);
@@ -713,6 +717,7 @@ static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *des
 	janus_refcount_init(&room->ref, janus_slvoice_room_free);
 	slv_deferred_init(&room->vis_deferred);   /* empty deferred store (g_malloc0 already zeroed it) */
 	room->vis_declared = vis_authority;
+	room->sim_created = sim_created;
 	room->vis_records = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, slv_vis_record_free);
 	/* O-54: a room is born empty, so a non-permanent one starts its grace clock now; the first join
 	 * clears it. A room the sim creates but nobody ever joins (a failed provision) is then reclaimed
@@ -1199,7 +1204,10 @@ static void janus_slvoice_load_static_rooms(janus_config *config) {
 		gboolean spatial = janus_slvoice_spatial_from_cfg(spatial_s);
 		janus_mutex_lock(&rooms_mutex);
 		if(g_hash_table_lookup(rooms, &room_id) == NULL) {
-			janus_slvoice_room *room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, TRUE, FALSE);
+			/* A static room from the config file is not a sim's room: no vis_authority, and not sim_created, so
+			 * it keeps the pre-1.4 rule (never gated on a capability). Slice 1.4. */
+			janus_slvoice_room *room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, TRUE,
+				FALSE, FALSE);
 			if(room == NULL) {
 				/* O-67: its tick thread could not start (logged by room_start); skip the room. */
 				JANUS_LOG(LOG_ERR, "[%s] Static room %"PRIu64" not loaded: room creation failed\n",
@@ -1354,7 +1362,7 @@ static void janus_slvoice_joincap_load_knobs(void) {
 	}
 	slv_join_cap_required = required ? TRUE : FALSE;
 	if(slv_join_cap_required)
-		JANUS_LOG(LOG_INFO, "[%s] Join capability: REQUIRED in rooms created with vis_authority "
+		JANUS_LOG(LOG_INFO, "[%s] Join capability: REQUIRED in rooms a simulator created (sim_created, and any room with vis_authority) "
 			"(JS_JOIN_CAP_REQUIRED=1); key set, clock skew +/-%d s, replay store %d nonces\n",
 			JANUS_SLVOICE_PACKAGE, SLV_JOINCAP_SKEW_S, SLV_JOINCAP_NONCE_MAX);
 	else if(slv_join_cap_key != NULL)
@@ -1814,6 +1822,9 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		 * count (reset by each REPLACE snapshot). */
 		json_t *vis = json_object();
 		json_object_set_new(vis, "epoch", json_integer((json_int_t)qroom->vis_epoch));
+		/* Slice 1.4: what the capability gate keys on for this room, so an operator can answer "why was that
+		 * join refused" (or admitted) without reading the create request back. */
+		json_object_set_new(vis, "sim_created", qroom->sim_created ? json_true() : json_false());
 		json_object_set_new(vis, "have_batch", qroom->vis_have_batch ? json_true() : json_false());
 		if(qroom->vis_have_batch) {
 			json_object_set_new(vis, "last_mode", json_string(slv_vis_op_str(qroom->vis_last_mode)));
@@ -3018,6 +3029,12 @@ static void *janus_slvoice_handler(void *data) {
 			gboolean permanent = json_is_true(json_object_get(root, "permanent"));
 			/* Phase 0 §6.2: the creator declares a sim authority arms this room's listeners. Only a JSON true counts. */
 			gboolean vis_authority = json_is_true(json_object_get(root, "vis_authority"));
+			/* Slice 1.4 (O-105): the creator says a simulator owns this room. The capability requirement keys on THIS,
+			 * not on vis_authority, so an undeclared sim room - every A2A "multiagent" room, and every future ADHOC
+			 * conference - is gated too. Absent means absent: a harness, static or pre-1.4-sim room keeps the old
+			 * rule (gated only if declared), which is what makes a new mixer safe under an old sim. Only a JSON
+			 * true counts. */
+			gboolean sim_created = json_is_true(json_object_get(root, "sim_created"));
 
 			janus_mutex_lock(&rooms_mutex);
 			janus_slvoice_room *room = g_hash_table_lookup(rooms, &room_id);
@@ -3035,7 +3052,8 @@ static void *janus_slvoice_handler(void *data) {
 					JANUS_SLVOICE_PACKAGE, room_id);
 				goto respond;
 			}
-			room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, permanent, vis_authority);
+			room = janus_slvoice_room_create(room_id, desc, is_private, rate, spatial, permanent, vis_authority,
+				sim_created);
 			if(room == NULL) {
 				/* O-67: the room's tick thread could not start; nothing was inserted. */
 				janus_mutex_unlock(&rooms_mutex);
@@ -3124,12 +3142,14 @@ static void *janus_slvoice_handler(void *data) {
 				const char *join_cap = json_string_value(json_object_get(root, "join_cap"));
 				const char *cap_session = json_string_value(json_object_get(root, "session_id"));
 				janus_mutex_lock(&room->mutex);
-				gboolean cap_declared = room->vis_declared;
+				/* Slice 1.4 (O-105): the gate is "a simulator created this room", not "a simulator arms it".
+				 * vis_declared still implies it, so a pre-1.4 sim's declared rooms are gated exactly as before. */
+				gboolean cap_gated = room->vis_declared || room->sim_created;
 				guint64 cap_epoch = room->vis_auth_epoch;
 				guint32 cap_gen = room->vis_policy_gen;
 				janus_mutex_unlock(&room->mutex);
 				slv_joincap_verdict cap_v = janus_slvoice_joincap_verify(join_cap, display, cap_session,
-					(int64_t)room_id, cap_epoch, cap_gen, cap_declared);
+					(int64_t)room_id, cap_epoch, cap_gen, cap_gated);
 				/* O-91: record the verdict on the SESSION, before any refusal below. Set here, not at the
 				 * membership commit, deliberately: a join refused for the capability, for capacity, or by a
 				 * failed negotiate still leaves a session record, and "what its last join attempt carried" is
@@ -3138,7 +3158,7 @@ static void *janus_slvoice_handler(void *data) {
 				session->cap_present = (join_cap != NULL && *join_cap != '\0');
 				session->cap_verdict = slv_joincap_reason(cap_v);
 				janus_mutex_unlock(&session->mutex);
-				if(cap_v != SLV_JOINCAP_OK && slv_join_cap_required && cap_declared) {
+				if(cap_v != SLV_JOINCAP_OK && slv_join_cap_required && cap_gated) {
 					g_atomic_int_inc(&slv_join_cap_enforced);
 					janus_refcount_decrease(&room->ref);
 					error_code = JANUS_SLVOICE_ERROR_JOIN_CAP;

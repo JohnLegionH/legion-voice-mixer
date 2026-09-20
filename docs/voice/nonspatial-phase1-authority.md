@@ -16,12 +16,14 @@ Mirrored byte-identical to `legion-voice-mixer:docs/voice/` (ledger O-28). Compa
 > revoked by eviction; in-call mutes use the existing moderation-mute channel; session **state** is
 > grid-scoped, a registry off the audio path rather than an arming authority.
 
-**Verdict: CONFIRMED, and more strongly than expected.** The measurement that was supposed to show
-oscillation showed something worse, which removes the main alternative outright.
+**Verdict: CONFIRMED.** The measurement that was supposed to show oscillation showed neither oscillation
+nor a dead room: one authority wins outright and the other becomes inert. That removes the main alternative
+just as firmly, for a different reason — see §2, which was rewritten in slice 1.4 after the first version of
+S40 turned out to be measuring the harness.
 
 | claim | verdict | evidence |
 |---|---|---|
-| A declared room cannot have two authorities | **confirmed — it fails harder than predicted** | S40 |
+| A declared room cannot have two authorities | **confirmed, but not in the way first reported — see §2** | S40 (corrected in slice 1.4), S43 |
 | An undeclared room admits an uncapability'd join today | **confirmed** | S41 |
 | The moderation-mute channel works in an undeclared room | **confirmed** | S42 |
 | Eviction alone removes nobody | **confirmed by source** | O-112, O-72 |
@@ -33,37 +35,54 @@ oscillation showed something worse, which removes the main alternative outright.
 
 ### S40 — two authorities, one declared room, three peers, 30 seconds
 
-Two `Heartbeater`s (epochs `01a0aaaa00000001` = "region A" and `01a0bbbb00000002` = "region B") heartbeat one
-declared non-spatial room. Region A arms all three peers with a `peer_ctl_batch` under its own epoch; region
-B then starts heartbeating the same room.
+**This section was rewritten in slice 1.4. The first version of S40 measured the harness, not the mixer, and
+the conclusion it carried ("deadlock") was wrong.** What it did was arm the room **once, from one authority
+only**, and then let both authorities heartbeat. A heartbeat confirms an arming; it does not create one. So
+the higher epoch took the room, wiped the records the other authority had written, and — having armed nobody
+— left the room at zero armed listeners. That is a real mixer rule, but it is the behaviour of *an authority
+that never arms*, not the behaviour of two regions each arming their own members.
+
+S40 now runs an `ArmingDriver` per authority: each sends a `peer_ctl_batch` replace under its own epoch every
+second, with a rising generation, exactly as two regions' feeders would. S43 is the control — the same room
+shape and the same three peers with **one** authority.
 
 ```
-S40 30 s, two authorities on room 904744300: epoch flips 0; distinct epochs held 1;
-samples with 0 armed listeners 30/30; rows seen [1]; stale_epoch_rejects 32;
-would_silence listeners/pairs 3/6
-S40 first 6 samples: 01a0bbbb00000002/g0/armed0 (x6)
+S43 (control) one authority, 30 s: armed min/max/last 3/3/3; samples with 3 armed 30/30;
+    rows seen [3, 4]; stale_epoch_rejects 0; would_silence l/p 0/0; arming applied 49
+
+S40 solo (A only, first 3 s):  armed=[3, 3, 3]  rows=[3, 4]
+S40 both arming, 30 s: epoch flips 0; distinct epochs ['01a0bbbb00000002'];
+    armed min/max/last 3/3/3; samples with 0 armed 0/30; rows seen [3, 4];
+    stale_epoch_rejects 82; would_silence l/p 3/6
 ```
 
-**The room did not oscillate — it went silent and stayed silent.** The higher epoch (region B) won
-immediately and held for all 30 samples; region A's traffic was refused 32 times as `stale_epoch`; and
-because the winning authority had armed nobody, `armed_listeners` was **0 in 30 of 30 samples** and all three
-peers sat at **row 1** — the "unarmed, therefore silenced" row — with `would_silence` counting 3 listeners
-and 6 pairs.
+**The true behaviour is adopt-and-hold: not oscillation, and not deadlock.** The higher epoch (region B)
+adopted the room on its first message and held it for all 30 samples — zero epoch flips. Because B *also*
+arms, the room stays armed: three armed listeners in 30 of 30 samples. Region A is simply switched off —
+**82 `stale_epoch` rejections** in 30 seconds, and not one of its batches or heartbeats changed anything
+again.
 
-This is exactly what `slv_vis_epoch_decide` (`src/visauth.h:88-95`) and the adoption path
-(`src/janus_slvoice.c:2364-2371`, `g_hash_table_remove_all(room->vis_records)`) specify. It is not a mixer
-defect. It is the design working as written, applied to a shape the design never described: **one room, more
-than one authority.**
+**What that means for a conference, stated carefully:**
 
-**What it kills.** "Let each member's region arm the conference room" is not a slow-degradation risk, it is a
-total outage of that conference for as long as two regions are interested in it. Any design in which more
-than one region can arm a non-spatial room is out, unless the mixer's one-authority rule changes — and that
-rule is what makes fail-closed safe for spatial voice, so it is not changing for conferences.
+- The room is not silenced *as such*. A conference whose members' regions all arm the same roster would keep
+  working, because whichever region wins arms everyone it knows about.
+- But the losing region's authority is **inert**, and this is the part that bites: any member that only the
+  losing region knows about — someone who teleported in and whose arming comes from their new region — is
+  never armed by the winner and never re-armed by the loser. They sit unarmed in an enforcing room, which is
+  silence. `would_silence` counted **3 listeners and 6 pairs** even in this run, where both authorities armed
+  the same three peers.
+- It is also **order-dependent and arbitrary**: the winner is whoever has the numerically higher epoch, which
+  is a restart counter, not a claim to ownership. The region that started the conference can lose to a region
+  that merely restarted more recently.
+- And a takeover is not permanent: if the winner goes quiet for longer than the staleness window, the other
+  authority takes the room and disarms everyone the winner had armed
+  (`janus_slvoice.c:2364-2371`). Two regions that restart at different times swap ownership, and each swap
+  disarms the room until the new owner's next replace lands.
 
-**A second consequence, recorded because it will bite:** even a *single* owning region silences the room
-whenever its arming is interrupted — a region restart, a feeder stall, an epoch bump — because unarmed means
-silent. For a spatial room that is correct: the people are in that region and the region is gone. For a
-conference whose members are elsewhere, it silences a call that had nothing to do with the failed region.
+So the conclusion stands and the reasoning is sharper: **more than one authority per room is not a workable
+shape**, not because the room stops dead, but because arming becomes the property of an arbitrary winner and
+anyone outside its population is silently excluded. Option (c) — keep conference rooms undeclared — is
+unaffected either way, which is why this correction does not reopen it.
 
 ### S41 — the ungoverned room, measured
 
@@ -104,8 +123,9 @@ admission-side refusal is a one-second interruption, not a removal.
 ## 3. The model, stated
 
 1. **ADHOC rooms are not declared.** A conference is everyone-hears-everyone by definition; there is no
-   per-listener matrix to enforce, so there is nothing for fail-closed to add — and, per S40, a great deal
-   for it to take away. Declaration stays what it is today: spatial `local` rooms only.
+   per-listener matrix to enforce, so there is nothing for fail-closed to add — and, per S40, an arbitrary
+   winner to pick if more than one region ever arms the room. Declaration stays what it is today: spatial
+   `local` rooms only.
 2. **Admission is the gate, and it moves.** The capability requirement must key on **how the room was
    created** (a sim-created room of any channel type) rather than on `vis_authority`. That is a small mixer
    change — the room already records its creation flags (`janus_slvoice.c:454`, `:715`) — and it closes
@@ -172,12 +192,15 @@ under retry/reconnect/region-crossing races to 1.1b; and the authority question 
 | **1.2b** | `start conference` / `invite` / `accept invitation` / `decline invitation` against the engine, **plus `ChatSessionAgentListUpdates`** on every membership change (O-107) | sim | **yes** | 80–100 + 65–70 + fix 45 = 190–215 |
 | **1.3** | Voice on a conference session: `call` provisions `multiagent` with the session's room, admission through the engine | sim | **yes** | 80–100 + 65–70 + fix 45 = 190–215 |
 | **1.4** | **Capability required for every sim-created room** (key the gate on creation, not on `vis_authority`), + harness scenario + board (O-105) | mixer | **yes** | 45–60 + 65–70 = **110–130** |
+| **1.4b** *(new)* | **Eviction that sticks** — a mixer kick verb plus a harness scenario (45–60), and the sim-side **persisted admission refusal** on the provision path so the viewer's automatic re-provision is answered `no` (80–100), one live proof (65–70). Reuses 1.4's admission seam; must come after it (O-112, Q3) | mixer + sim | **yes** | **190–230** |
 | 1.5 | Teleport continuity (depends on 1.0b and 1.1c) | sim + harness | **yes** | 185–225 |
 | 1.6 | Migrate A2A/P2P onto the engine, LAST | sim | **yes** | 190–215 |
 | 1.7 | Docs, coverage, release note | both (docs) | no | 40–55 |
 
-**Total 1475–1755 min ≈ 24 h 35 m – 29 h 15 m** of CC time, plus John's in-world time for seven live proofs.
-Without the optional 1.0b driver: **1355–1600 min ≈ 22 h 35 m – 26 h 40 m**.
+**Total 1665–1985 min ≈ 27 h 45 m – 33 h 5 m** of CC time, plus John's in-world time for eight live proofs.
+Without the optional 1.0b driver: **1545–1830 min ≈ 25 h 45 m – 30 h 30 m**. (Slice 1.4b was added in slice
+1.4 after the recon left eviction unowned: 1.1b owns *departure*, 1.4 owns *admission at join*, and nothing
+owned the kick verb plus the durable refusal that together make an eviction stick.)
 
 Against plan v3's **3 h 25 m** for all of Phase 1 that is **seven to eight times larger**, and the recon's own
 estimate (20–24 h) grew by about four hours once Q1 exposed O-111. The single biggest line is the one nobody
@@ -191,7 +214,12 @@ last, as carried in.
 
 ## 6. Scenarios added by this slice
 
-`S40`, `S41`, `S42` in `tests/integration/scenarios.py`, all marked **CHARACTERISATION**: they record what
-the mixer does today and pass as long as the measurement can be taken. They must not be "fixed" into
-acceptance tests without changing this brief first. S40 is the reproduction of O-106 and should be re-run
-against any future change to the arming or epoch rules.
+`S40` and `S42` are **CHARACTERISATION**: they record what the mixer does today and pass as long as the
+measurement can be taken; they must not be "fixed" into acceptance tests without changing this brief first.
+`S43` is S40's **control** (one authority), added in slice 1.4 when S40's first version turned out to measure
+the harness. S40 is the reproduction of O-106 and should be re-run against any change to the arming or epoch
+rules.
+
+`S41` was characterisation in 1.1a and became a **regression** in slice 1.4: a bare join into a `sim_created`
+room is refused, a capability-bearing one is admitted. `S44` is its mixed-version companion: a room created
+**without** the marker — an old sim, the harness, a static room — keeps the pre-1.4 rule.

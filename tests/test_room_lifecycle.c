@@ -94,7 +94,7 @@ static void join_room(janus_slvoice_room *room, janus_slvoice_session *s, guint6
 }
 
 static janus_slvoice_room *add_room_ex(guint64 id, gboolean permanent, gboolean spatial) {
-	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, spatial, permanent, FALSE);
+	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, spatial, permanent, FALSE, FALSE);
 	if(room == NULL) {
 		fprintf(stderr, "test_room_lifecycle: room_create(%" PRIu64 ") failed\n", id);
 		exit(2);

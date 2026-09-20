@@ -728,16 +728,24 @@ class Control:
         self._events.pop(tx, None)
         return data
 
-    async def create_room(self, room: int, description: str, vis_authority: bool = False) -> None:
+    async def create_room(self, room: int, description: str, vis_authority: bool = False,
+                          sim_created: bool = False) -> None:
         """create; 486 (already there) is fine. vis_authority: the 0.2 sim's declaration (AudioBridgeCreateRoomReq).
 
         Slice 0.8e: a declared room is remembered, because that is exactly where the mixer gates a join once
-        JS_JOIN_CAP_REQUIRED is on, and so exactly where an ordinary join must carry a capability."""
-        if vis_authority:
+        JS_JOIN_CAP_REQUIRED is on, and so exactly where an ordinary join must carry a capability.
+
+        Slice 1.4: `sim_created` is the sim's marker (JanusMessages.AudioBridgeCreateRoomReq). From 1.4 the mixer
+        gates a join on THIS rather than on the declaration, so a marked room - declared or not - is remembered as
+        gated too. A room created without it keeps the pre-1.4 rule, which is how an old sim behaves under a new
+        mixer (S44)."""
+        if vis_authority or sim_created:
             self.declared.add(room)
         body = {"request": "create", "room": room, "description": description}
         if vis_authority:
             body["vis_authority"] = True
+        if sim_created:
+            body["sim_created"] = True
         data = await self.request(body)
         if data.get("audiobridge") != "created" and data.get("error_code") != ERR_ROOM_EXISTS:
             raise Fail(f"create room {room}", data)
@@ -861,13 +869,14 @@ class Ctx:
 
     async def join(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                    join_cap: str | None = None, session_id: str | None = None,
-                   recorder: bool = False, bare: bool = False) -> TestPeer:
+                   recorder: bool = False, bare: bool = False, sim_created: bool = False) -> TestPeer:
         """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
         sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24).
         Slice 0.8e: an ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
         given, so a board can run against a mixer with JS_JOIN_CAP_REQUIRED on. `bare=True` keeps a join
         capability-less on purpose, which is what the capability scenarios themselves test."""
-        await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
+        await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority,
+                                       sim_created=sim_created)
         display = display or new_display()
         join_cap, session_id = self._auto_cap(room, display, join_cap, session_id, bare)
         peer = TestPeer(self.cfg, name, room, display, join_cap=join_cap, session_id=session_id,
