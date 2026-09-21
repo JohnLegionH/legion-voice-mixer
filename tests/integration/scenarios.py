@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from tests.integration.harness import (AUDIBLE_MIN_RATIO, POLL_STEP, POLL_TIMEOUT, BatchResender, Ctx, Fail,
+from tests.integration.harness import (AUDIBLE_MIN_RATIO, MEDIA_SETTLE_S, POLL_STEP, POLL_TIMEOUT, BatchResender, Ctx, Fail,
                                        Heartbeater, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
                                        wait_mixer_up, mint_cap)
@@ -2351,6 +2351,62 @@ async def s42_mod_mute_in_an_undeclared_room(ctx: Ctx) -> None:
         print("      S42 NOTE: the moderation mute did NOT take effect in an undeclared room")
 
 
+async def s48_three_way_group_room_turn_taking(ctx: Ctx) -> None:
+    """P1.2G: THREE peers take turns talking in the exact shape of a live group room.
+
+    The shape is the one the grid produced for group f7b9f744 as mixer room 68971284: created by the
+    sim (sim_created), UNDECLARED (vis_authority False, so never armed and never enforced -- slice
+    1.1a option (c) for ADHOC/group rooms, Docs/voice/nonspatial-phase1-authority.md), with every
+    join carrying a capability.
+
+    S17 already covers an undeclared room, but only with TWO peers, and it asserts the mixer logs
+    "NOT enforced" exactly once. It cannot express this: three participants, and a per-listener mix
+    that has to follow who is speaking. Hence a separate scenario rather than an extension that
+    would have had to weaken S17's logging assertion.
+
+    Each turn asserts BOTH halves, because either alone is satisfiable by a broken mixer:
+      - the two NON-speakers hear the speaker  (a mix carrying nothing fails here)
+      - the speaker does NOT hear itself       (a mix echoing the source back fails here)
+    """
+    r = ctx.new_room()
+    await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=False, sim_created=True)
+    a = await ctx.join("A", r, sim_created=True, gated=True)
+    b = await ctx.join("B", r, sim_created=True, gated=True)
+    c = await ctx.join("C", r, sim_created=True, gated=True)
+    await ctx.ready(a, b, c)
+
+    vis = await _mode(ctx, a, want_fail_closed=True)
+    if vis.get("vis_authority") is not False or vis.get("enforced") is not False:
+        raise Fail("the group room shape: vis_authority false, enforced false", vis)
+    if vis.get("sim_created") is not True:
+        raise Fail("the group room shape: sim_created true", vis)
+
+    peers = {"A": a, "B": b, "C": c}
+    for name, speaker in peers.items():
+        listeners = [(n, p) for n, p in peers.items() if n != name]
+        for p in peers.values():
+            p.tone.talking = p is speaker
+        await asyncio.sleep(MEDIA_SETTLE_S)
+
+        for ln, lp in listeners:
+            await ctx.until_info(lp, _audible, f"{name} talking: {ln} hears {name}")
+        await _hold_audible(ctx, listeners[0][1], f"{name} talking: {listeners[0][0]} keeps hearing it", 1.5,
+                            policy=lambda i: _vis(i).get("would_silence_listeners") == 0)
+        own = await ctx.info(speaker)
+        # NOT _silent: the two quiet peers are still sending real silence FRAMES, so the speaker's
+        # own mix has mix_sources 2 and an RMS of ~4e-34 -- a denormal, not an exact zero. The
+        # property that matters is that the speaker's own voice is not fed back to it, i.e. its mix
+        # is not AUDIBLE, and its own last_rms proves it really is the one talking.
+        if _audible(own):
+            raise Fail(f"{name} talking: {name}'s own mix must not carry {name}'s voice back", own)
+        if (own.get("last_rms") or 0.0) <= 0.01:
+            raise Fail(f"{name} talking: {name}'s own source RMS should be high", own)
+
+    for p in peers.values():
+        p.tone.talking = False
+
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -2430,4 +2486,6 @@ SCENARIOS = [
              "1.4, mixed version 3(a)", s44_old_sim_room_keeps_the_old_rule),
     Scenario("S42", "CHARACTERISATION: the moderation mute in an UNDECLARED room",
              "1.1a, Q2", s42_mod_mute_in_an_undeclared_room),
+    Scenario("S48", "P1.2G: three peers take turns in an UNDECLARED sim_created group room",
+             "P1.2G, 1.1a option (c)", s48_three_way_group_room_turn_taking),
 ]

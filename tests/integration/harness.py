@@ -208,6 +208,55 @@ async def until(probe, pred, what: str, timeout: float = POLL_TIMEOUT, step: flo
 
 # ---- media ------------------------------------------------------------------------------------
 
+class GatedToneTrack(MediaStreamTrack):
+    """A ToneTrack whose voice can be switched off at runtime, so a scenario can make peers TALK IN
+    TURN. When `talking` is False it emits real silence frames rather than stopping: the RTP keeps
+    flowing (no DTX gap to misread as a dead transport) and only the mix RMS goes to zero, which is
+    exactly the distinction P1.2G needed and a plain ToneTrack cannot express."""
+
+    kind = "audio"
+    RATE = 48000
+    SAMPLES = 960
+
+    def __init__(self, freq: float = 440.0, amplitude: float = 0.3, talking: bool = False):
+        super().__init__()
+        amp = int(32767 * amplitude)
+        self._table = array.array("h", (int(amp * math.sin(2.0 * math.pi * freq * i / self.RATE))
+                                        for i in range(self.RATE)))
+        self._silence = array.array("h", (0 for _ in range(self.SAMPLES)))
+        self._pos = 0
+        self._pts = 0
+        self._start = None
+        #: flipped by the scenario between turns
+        self.talking = talking
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        if self._start is None:
+            self._start = time.time()
+        else:
+            wait = self._start + self._pts / self.RATE - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        if self.talking:
+            end = self._pos + self.SAMPLES
+            if end <= self.RATE:
+                chunk = self._table[self._pos:end]
+            else:
+                chunk = self._table[self._pos:] + self._table[:end - self.RATE]
+            self._pos = end % self.RATE
+        else:
+            chunk = self._silence
+        frame = av.AudioFrame(format="s16", layout="mono", samples=self.SAMPLES)
+        frame.planes[0].update(chunk.tobytes())
+        frame.pts = self._pts
+        frame.sample_rate = self.RATE
+        frame.time_base = fractions.Fraction(1, self.RATE)
+        self._pts += self.SAMPLES
+        return frame
+
+
 class ToneTrack(MediaStreamTrack):
     """A real-time 440 Hz sine in 20 ms mono s16 frames at 48 kHz. aiortc encodes it as Opus, so
     the mixer receives a genuine stream: rtp_in_count climbs and last_rms is non-trivial."""
@@ -416,6 +465,16 @@ class TestPeer(ConnectorPeer):
 
 
 # ---- oracle and control -----------------------------------------------------------------------
+
+class GatedTestPeer(TestPeer):
+    """A TestPeer whose tone is gated; `peer.tone.talking = True/False` takes and yields the floor."""
+
+    def __init__(self, *args, **kwargs):
+        self.tone = GatedToneTrack()
+        super().__init__(*args, **kwargs)
+
+    def local_track(self):
+        return self.tone
 
 class RelayOnlyPeer(TestPeer):
     """A TestPeer that gathers ONLY relay candidates, through the TURN server in cfg.turn_uri (S13). Its offer carries
@@ -906,7 +965,8 @@ class Ctx:
 
     async def join(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                    join_cap: str | None = None, session_id: str | None = None,
-                   recorder: bool = False, bare: bool = False, sim_created: bool = False) -> TestPeer:
+                   recorder: bool = False, bare: bool = False, sim_created: bool = False,
+                   gated: bool = False) -> TestPeer:
         """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
         sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24).
         Slice 0.8e: an ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
@@ -916,8 +976,9 @@ class Ctx:
                                        sim_created=sim_created)
         display = display or new_display()
         join_cap, session_id = self._auto_cap(room, display, join_cap, session_id, bare)
-        peer = TestPeer(self.cfg, name, room, display, join_cap=join_cap, session_id=session_id,
-                        recorder=recorder)
+        cls = GatedTestPeer if gated else TestPeer
+        peer = cls(self.cfg, name, room, display, join_cap=join_cap, session_id=session_id,
+                   recorder=recorder)
         self.peers.append(peer)
         return await peer.start()
 
