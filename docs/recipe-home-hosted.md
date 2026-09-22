@@ -23,6 +23,20 @@ A Linux home server differs in two places, both marked **Linux**.
   (Legion Grid: `192.168.1.225`).
 - **Docker:** Docker Desktop with the WSL2 backend (Windows), or Docker Engine with the compose plugin (**Linux**).
 - The two files from the repo, `docker-compose.yml` and `env.sample`, in an empty directory.
+- **A host that will not confine the grid to its slow cores** (Windows 11 with a hybrid Intel CPU: 12th gen or later,
+  with P-cores and E-cores). Under sustained heavy load on the host, the default **Balanced** power plan can confine
+  **all** runnable work to the E-cores while the P-cores sit idle. The region server, Robust and the mixer's host all
+  stall together. Voice feeders miss their ticks, the watchdog fires, and armed listeners can be silenced. Legion Grid
+  measured it on an i7-12700KF: the four E-cores at 100%, eight P-cores idle, about 100 threads waiting, and delivered
+  CPU down from about 14.5 cores to about 4. It lasted 16 s to 7 min with the load unchanged. It is not the hypervisor
+  and not thermal throttling. Both were measured and excluded (ledger O-138). Before you go live, do one of these:
+  - a **power-plan step**: change the hybrid scheduling policy of the plan the host runs, or use a plan that does
+    not contain work to the E-cores (ledger O-138 records which settings, and the result of switching them);
+  - or **P-core pinning**: give the region server and Robust processor affinity to the P-cores only.
+  - Either way, **do not share the grid host with heavy, sustained work** (large builds, test boards, headless
+    browsers rendering in software). That is what triggered every measured episode.
+  - Hosts whose CPU has only one kind of core (Intel before 12th gen, and most AMD desktop parts; check the CPU's
+    spec sheet) and **Linux** hosts do not have this policy. **Linux**: nothing to do here.
 
 ## 2. Router forwards
 
