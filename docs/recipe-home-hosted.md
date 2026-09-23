@@ -58,6 +58,16 @@ New-NetFirewallRule -DisplayName "Legion Voice RTP" -Direction Inbound -Protocol
 ```
 Docker Desktop also installs its own "Docker Desktop Backend" allow rules when it is installed. Leave them.
 
+**Every region's UDP port needs its own inbound rule too.** The viewer's circuit to each region is UDP on that
+region's `InternalPort` (`config/regions/*.ini`), and each one is opened separately. One rule per region, for
+example:
+```powershell
+New-NetFirewallRule -DisplayName "OpenSim UDP 9002" -Direction Inbound -Protocol UDP -LocalPort 9002 -Action Allow
+```
+Legion Grid (2026-09-22): Ebony 9000 and Transylvania 9001 had rules and Elm 9002 did not, so Elm was never reachable
+from off the host. It only worked from the host itself, which hides the gap from every local test. When you add a
+region, add its rule in the same step.
+
 **Linux:** allow the range, e.g. `sudo ufw allow 10000:10200/udp`. Be aware that Docker publishes ports with its own
 iptables rules (the `DOCKER` nat chain, seen during A.6's measurements), so a `ufw deny` does not close a port Docker
 published. The admin port is narrowed by `JS_ADMIN_BIND` below, not by ufw.
