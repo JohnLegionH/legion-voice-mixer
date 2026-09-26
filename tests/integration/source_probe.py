@@ -4,9 +4,10 @@ One viewer-shaped peer (the harness's TestPeer: a real Opus tone and the SLData 
 brings media up. The probe then puts two things side by side:
   - the addresses the peer itself holds: the candidates in its own SDP offer;
   - the remote end of Janus's selected candidate pair, from Admin API handle_info.
-If that remote address is one of the peer's own, the source address survived the path to Janus. If not, something on
-the path rewrote it: a published-port proxy shows its own address (Docker Desktop: the network gateway), and Janus
-types the pair prflx, because it learned the address from connectivity checks rather than from the peer's signalling.
+If that remote address:port is one of the peer's own signalled endpoints (source_oracle.py), the source address
+survived the path to Janus. If not, something on the path rewrote it: a published-port proxy shows its own address
+(Docker Desktop: the network gateway) from its own port, and Janus types the pair prflx, because it learned the
+address from connectivity checks rather than from the peer's signalling.
 
     python -m tests.integration.source_probe [--janus-url URL] [--admin-url URL] [--env PATH] [--label TEXT] [--json]
 
@@ -30,33 +31,9 @@ from pathlib import Path
 import aiohttp
 
 from .harness import REPO, ROOM_BASE, Config, Control, TestPeer, new_display, read_env
+from .source_oracle import own_candidates, parse_pair, verdict
 
-_CANDIDATE = re.compile(r"^a=candidate:\S+ \d+ (udp|tcp) \d+ (\S+) (\d+) typ (\w+)", re.M)
-_PAIR = re.compile(r"^(.+):(\d+) \[(\w+),(\w+)\] <-> (.+):(\d+) \[(\w+),(\w+)\]$")
 _TYPE = re.compile(r"\btyp (host|srflx|relay|prflx)\b")
-
-
-def own_candidates(sdp: str) -> list:
-    return [{"address": m.group(2), "port": int(m.group(3)), "type": m.group(4), "transport": m.group(1)}
-            for m in _CANDIDATE.finditer(sdp or "")]
-
-
-def parse_pair(text: str | None):
-    m = _PAIR.match((text or "").strip())
-    if not m:
-        return None
-    g = m.groups()
-    return {"local": {"address": g[0], "port": int(g[1]), "type": g[2], "transport": g[3]},
-            "remote": {"address": g[4], "port": int(g[5]), "type": g[6], "transport": g[7]}}
-
-
-def verdict(own: list, pair) -> dict:
-    if pair is None:
-        return {"verdict": "no-pair", "remote_address_is_peers_own": None}
-    addresses = sorted({c["address"] for c in own})
-    remote = pair["remote"]["address"]
-    return {"verdict": "preserved" if remote in addresses else "rewritten",
-            "remote_address_is_peers_own": remote in addresses, "peer_addresses": addresses}
 
 
 async def _admin(http, url: str, secret: str, path: str, body: dict) -> dict:
@@ -127,9 +104,10 @@ async def probe(args) -> int:
             print(f"{tag} verdict: NO PAIR — media did not come up within {args.timeout:g} s")
         else:
             remote = pair["remote"]
-            what = "is" if result["remote_address_is_peers_own"] else "is NOT"
-            print(f"{tag} verdict: {result['verdict'].upper()} — the pair's remote address {remote['address']} {what} "
-                  f"one of the peer's own addresses {result['peer_addresses']} (Janus types it {remote['type']})")
+            what = "is" if result["remote_endpoint_is_peers_own"] else "is NOT"
+            print(f"{tag} verdict: {result['verdict'].upper()} ({result['branch']}) — the pair's remote end "
+                  f"{remote['address']}:{remote['port']} {what} one of the peer's own endpoints "
+                  f"{result['peer_endpoints']} (Janus types it {remote['type']})")
         print(f"{tag} ICE diagnostics record: legion-voice-selfcheck --session {result.get('handle')}")
     return 0 if result.get("janus_pair") else 2
 

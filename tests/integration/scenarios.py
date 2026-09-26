@@ -22,7 +22,7 @@ from tests.integration.harness import (AUDIBLE_MIN_RATIO, MEDIA_SETTLE_S, POLL_S
                                        Heartbeater, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
                                        wait_mixer_up, mint_cap)
-from tests.integration.source_probe import own_candidates, parse_pair, verdict
+from tests.integration.source_oracle import expected_path, own_candidates, parse_pair, verdict
 
 
 @dataclass(frozen=True)
@@ -384,11 +384,13 @@ async def s13_relay_only_peer(ctx: Ctx) -> None:
 
 async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
     """A.6: the ICE diagnostics path verdict agrees with where the peer's packets actually came from.
-    Ground truth is the source probe's comparison: the remote end of Janus's selected pair is, or is not, one of the
-    addresses the peer itself holds (its own offer's candidates). After A's session ends, its diagnostics record must
-    read `undetermined` when the source was rewritten on the way (a Docker Desktop port publish), never direct or relay,
-    and `direct` when the source survived (a Linux published port or host networking). Only one branch can run on a
-    given deployment; the info line says which."""
+    Ground truth is source_oracle.verdict: the remote address:port of Janus's selected pair is, or is not, one of the
+    endpoints A signalled (its offer's host/srflx candidates). An IP A owns is not enough: a published-port proxy on
+    A's own host re-sends from the Docker gateway, which is one of A's addresses, but from a port A never signalled.
+    After A's session ends, its diagnostics record must read `undetermined` when the source was rewritten on the way
+    (Docker Desktop, or a Linux loopback publish through docker-proxy), never direct or relay, and `direct` when the
+    source survived (a Linux published port reached on a host address, --media-address). Either branch PASSES when
+    the record agrees with it; the info line says which branch ran and why."""
     r = ctx.new_room()
     a = await ctx.join("A", r)
     await ctx.ready(a)
@@ -409,15 +411,16 @@ async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
     rec = await until(record, lambda s: s is not None and s.get("live") is False,
                       "A's ICE diagnostics record exists and has ended", timeout=20.0, step=1.0)
     path = rec.get("path") or {}
-    print(f"      S14 info: Janus pair {ice.get('selected-pair')}; A's own addresses {truth.get('peer_addresses')}; "
-          f"source {truth['verdict']}; diagnostics path {path.get('verdict')}", flush=True)
-    expected = {"rewritten": "undetermined", "preserved": "direct"}.get(truth["verdict"])
+    expected = expected_path(truth)
+    print(f"      S14 info: Janus pair {ice.get('selected-pair')}; A's own endpoints {truth.get('peer_endpoints')}; "
+          f"branch: source {truth['verdict']} ({truth.get('branch')}), expects {expected}; "
+          f"diagnostics path {path.get('verdict')}", flush=True)
     if expected is None:
         raise Fail("A's selected pair can be parsed", {"selected-pair": ice.get("selected-pair")})
     if path.get("verdict") != expected:
         raise Fail(f"a {truth['verdict']} source address reads {expected} in the diagnostics record",
-                   {"selected-pair": ice.get("selected-pair"), "peer_addresses": truth.get("peer_addresses"),
-                    "path": path})
+                   {"selected-pair": ice.get("selected-pair"), "branch": truth.get("branch"),
+                    "peer_endpoints": truth.get("peer_endpoints"), "path": path})
 
 
 # ---- Phase 0 slice 0.3: the visibility authority (docs/voice/nonspatial-phase0-design.md §9) -------------------------

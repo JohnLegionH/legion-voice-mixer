@@ -35,11 +35,13 @@ if str(_CONNECTORS) not in sys.path:
 import aiohttp  # noqa: E402
 import av  # noqa: E402
 from aioice.ice import TransportPolicy  # noqa: E402
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection  # noqa: E402
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription  # noqa: E402
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack  # noqa: E402
 
 from common.janus import PLUGIN, JanusHttp  # noqa: E402
 from common.peer import ConnectorPeer  # noqa: E402
+
+from .source_oracle import retarget_candidate, retarget_sdp  # noqa: E402
 
 #: test rooms live far above anything CalcRoomNumber hands out for real parcels/estates
 ROOM_BASE = 900_000_000
@@ -115,6 +117,10 @@ class Config:
     #: slice 0.5: turn Skip into Fail. Only for the "behaviour absent" proof runs against an older image, where
     #: a scenario that merely skips proves nothing. Never for a reporting run.
     prove_fail: bool = False
+    #: --media-address: the IPv4 every TestPeer sends media to, in place of the addresses in Janus's candidates
+    #: (source_oracle.retarget_sdp). Empty = Janus's own candidates, as a viewer would use them. CI sets the runner's
+    #: host address so S14 reaches the published port without the loopback docker-proxy (the preserved branch).
+    media_address: str = ""
 
 
 def read_env(path: Path) -> dict:
@@ -330,6 +336,7 @@ class TestPeer(ConnectorPeer):
         self.name = name
         self.room = room
         self.display = display
+        self.media_address = cfg.media_address
         #: Phase 0 slice 0.4: what the sim would send on the join; None sends neither key, as a pre-0.4 sim does.
         self.join_cap = join_cap
         self.session_id = session_id
@@ -400,6 +407,8 @@ class TestPeer(ConnectorPeer):
             self._join_result.set_result(data)
 
     async def start(self, timeout: float = 10.0) -> "TestPeer":
+        if self.media_address:
+            self._retarget_answer()
         self._task = asyncio.create_task(self.run(), name=f"peer-{self.name}")
         done, _ = await asyncio.wait({self._task, self._join_result}, timeout=timeout,
                                      return_when=asyncio.FIRST_COMPLETED)
@@ -412,6 +421,22 @@ class TestPeer(ConnectorPeer):
         if self._task in done:
             raise Fail(f"{self.name} peer died before joining room {self.room}", repr(self._task.exception()))
         raise Fail(f"{self.name} got no join answer within {timeout:.0f} s", None)
+
+    def _retarget_answer(self) -> None:
+        """--media-address: Janus's answer reaches the PeerConnection with every candidate pointed at that address.
+        TestPeer makes one join attempt (rejoin is off), so the PeerConnection built in __init__ is the one used."""
+        apply = self._pc.setRemoteDescription
+        address = self.media_address
+
+        async def retargeted(desc):
+            return await apply(RTCSessionDescription(sdp=retarget_sdp(desc.sdp, address), type=desc.type))
+
+        self._pc.setRemoteDescription = retargeted
+
+    async def _apply_trickle(self, cand: dict) -> None:
+        if self.media_address and cand.get("candidate"):
+            cand = dict(cand, candidate=retarget_candidate(cand["candidate"], self.media_address))
+        await super()._apply_trickle(cand)
 
     @property
     def ids(self) -> tuple:

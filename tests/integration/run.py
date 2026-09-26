@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import itertools
 import json
 import logging
@@ -23,6 +24,16 @@ import aiohttp
 
 from tests.integration.harness import REPO, ROOM_BASE, Admin, Config, Ctx, Fail, Skip, read_env, read_secret_file
 from tests.integration.scenarios import SCENARIOS
+
+
+def _ipv4(text: str) -> str:
+    """--media-address: an IPv4 literal (aiortc's candidates need one), or empty for Janus's own candidates."""
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.IPv4Address(text.strip()))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an IPv4 address: {text!r}") from None
 
 
 def parse_args(argv):
@@ -69,6 +80,10 @@ def parse_args(argv):
                         "history, the process list or this run's output. With a key, every ordinary join into a "
                         "declared room carries a freshly minted capability, which is what a board against a mixer "
                         "with JS_JOIN_CAP_REQUIRED=1 needs")
+    p.add_argument("--media-address", default="", type=_ipv4,
+                   help="send every peer's media to this IPv4 instead of the addresses in Janus's candidates. CI "
+                        "passes the runner's own host address, so S14 reaches the published RTP port without the "
+                        "loopback docker-proxy and runs its preserved-source branch")
     p.add_argument("-v", "--verbose", action="store_true", help="peer/harness logs and tracebacks")
     return p.parse_args(argv)
 
@@ -104,6 +119,7 @@ async def main_async(args) -> int:
                          else args.join_cap_secret),
         stale_ms_started_with=args.stale_ms_started_with,
         prove_fail=args.prove_fail,
+        media_address=args.media_address,
     )
     only = {s.strip().upper() for arg in args.only for s in arg.split(",") if s.strip()}
     unknown = only - {s.id for s in SCENARIOS}
