@@ -146,8 +146,8 @@ jobs:
       # (--media-address; derived here, never hard-coded). A local packet to a host address on a
       # published port is DNATed by the kernel straight to the container, so Janus should see the
       # peer's own socket address:port: the preserved branch, whose record must read "direct".
-      # A FAIL (the record disagrees with the source) fails the job. Which branch runs is not yet
-      # proven on the hosted runner, so taking the rewritten branch only warns.
+      # A FAIL (the record disagrees with the source) fails the job. The preserved branch was
+      # proven on the hosted runner (run 36254101706), so taking the rewritten branch fails the job too.
       - name: S14 via the runner's host address (preserved-source branch)
         shell: bash
         run: |
@@ -170,7 +170,7 @@ jobs:
           echo "S14 ${branch:-branch: <not printed>}"
           case "${branch}" in
             *preserved*) ;;
-            *) echo "::warning::S14 via ${host_ip} did not run the preserved-source branch (${branch:-none printed})" ;;
+            *) echo "::error::S14 via ${host_ip} did not run the preserved-source branch (${branch:-none printed})"; exit 1 ;;
           esac
 
       # The two steps below run after a failure too. If the image build failed, the .env step never ran and
