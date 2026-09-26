@@ -134,10 +134,12 @@ jobs:
             --join-timeout 10 \
             --no-restart
 
+      # The two steps below run after a failure too. If the image build failed, the .env step never ran and
+      # compose would fail on the missing env_file ("env file .../.env not found"), burying the real failure.
       - name: Mixer log (on failure)
-        if: failure()
+        if: failure() && hashFiles('.env') != ''
         run: docker compose logs --no-log-prefix janus | tail -400
 
       - name: Stop the mixer
-        if: always()
+        if: always() && hashFiles('.env') != ''
         run: docker compose down

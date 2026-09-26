@@ -31,10 +31,13 @@ COPY vendor/janus-gateway /root/janus-gateway
 # Normalise line endings: if the submodule was checked out on Windows the
 # autotools/shell inputs arrive as CRLF, which breaks autogen.sh (e.g. it would
 # `mkdir -p m4\r`) and any sed matching. Strip CR from the build inputs first.
+# The stock *.jcfg.sample configs are included: they become the entrypoint's templates, and a
+# Windows checkout would otherwise bake CRLF into the image a Linux checkout builds as LF
+# (upstream commits them LF), breaking the byte-exact tests/golden/phase0-knobs-off in CI.
 # Then drop the redundant `ACLOCAL_AMFLAGS = -I m4` (it conflicts with
 # AC_CONFIG_MACRO_DIR under libtool >= 2.4.7, which is what the base image ships).
 RUN cd /root/janus-gateway \
-    && find . -type f \( -name '*.sh' -o -name '*.ac' -o -name '*.am' -o -name '*.m4' -o -name '*.in' \) -exec sed -i 's/\r$//' {} + \
+    && find . -type f \( -name '*.sh' -o -name '*.ac' -o -name '*.am' -o -name '*.m4' -o -name '*.in' -o -name '*.jcfg.sample' \) -exec sed -i 's/\r$//' {} + \
     && sed -i '/^ACLOCAL_AMFLAGS = -I m4$/d' Makefile.am \
     && sh autogen.sh \
     && ./configure \

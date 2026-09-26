@@ -12,6 +12,7 @@ Dockerfile text eol=lf
 *.jcfg  text eol=lf
 *.yml   text eol=lf
 
-# Byte-exact captures of generated config (slice 0.3's knobs-off golden). The stock Janus transport templates carry
-# CRLF lines and the entrypoint copies them as they are, so these files must never be normalised.
+# Byte-exact captures of generated config (slice 0.3's knobs-off golden): cmp'd against the image's output, so git
+# must never rewrite their bytes. They are LF: upstream Janus commits its stock configs LF and the Dockerfile strips
+# the CR a Windows (core.autocrlf) checkout of the submodule adds, so every platform builds the same templates.
 tests/golden/phase0-knobs-off/** -text
