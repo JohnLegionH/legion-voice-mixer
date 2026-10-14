@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """TEST FIXTURE ONLY (compose profile `turn-test`). NOT FOR PRODUCTION.
 
 A minimal TURN REST API backend for the turn-test coturn, in the shape Janus's turnrest.c calls:

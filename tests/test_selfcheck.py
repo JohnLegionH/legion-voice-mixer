@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Unit tests for entrypoint/selfcheck.py (slices A.2, A.2b, A.3). They cover:
   - every check's PASS, FAIL (or WARN) and INCONCLUSIVE branch;
   - C2a preserved, remapped and blocked;

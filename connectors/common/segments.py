@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """WAV segment writer for the connector peers (docs/voice/connector-build-plan.md;
 written for the S-CON-4 recorder, reused by the S-CON-6 injector's RECORD=1).
 

@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 # public-address-watch.sh: periodic re-check of the discovered public address (slice A.1).
 #
 # docker-entrypoint.sh starts this in the background just before it execs Janus, and only when:

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """The source-address oracle (slice A.6, S14 and source_probe.py): did the peer's own socket address reach Janus?
 
 Pure functions, no aiortc or aiohttp, so tests/integration/test_source_oracle.py runs them on synthetic input.

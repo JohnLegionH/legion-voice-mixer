@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 # docker-entrypoint.sh tests:
 #   - O-55 WS default, O-65 fail-closed secrets, the nat_1_1_mapping verdict, JS_NAT_EXTRA_IPS;
 #   - A.1 address discovery, state file and periodic re-check;

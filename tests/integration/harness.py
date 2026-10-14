@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Plumbing for the two-peer integration harness (tests/integration/README.md).
 
 Everything Janus-shaped is reused from connectors/common: JanusHttp for the client API and

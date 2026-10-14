@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Where the Janus API secret travels (ledger O-101), pinned by test.
 
 The finding of slice 0.10a: every POST this repo makes already carries `apisecret` in the JSON body, and the

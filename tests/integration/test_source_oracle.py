@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Unit tests for source_oracle.py, the S14 / source_probe ground truth, on synthetic SDP and pairs.
 
 No mixer, no network, no aiortc:

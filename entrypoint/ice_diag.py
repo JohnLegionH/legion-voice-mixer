@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """legion-voice ICE diagnostics (slice A.5, SC-126): one record per slvoice session, kept after the session ends.
 
 The question it answers is "why did voice fail for that one user", after the fact and without Janus's raw log.

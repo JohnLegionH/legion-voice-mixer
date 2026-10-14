@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Entry point: python -m tests.integration.run [--only S3[,S5]] [--grace N] [--join-timeout N] [--no-restart]
 
 Runs the scenarios against a LIVE mixer and prints one PASS/FAIL/SKIP line per scenario (the

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """The churn scenarios S1-S8 and S10-S14 -- the mixer's robustness contract (README.md in this directory).
 
 Each scenario gets a fresh Ctx (its own control handle and room ids) and the runner tears it down

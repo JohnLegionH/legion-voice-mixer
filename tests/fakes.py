@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Loopback fakes for the A.1/A.2 Python tests: a STUN server, a minimal Janus HTTP API and a silent TCP
 listener. Everything binds 127.0.0.1, so the image build runs these tests with no network."""
 

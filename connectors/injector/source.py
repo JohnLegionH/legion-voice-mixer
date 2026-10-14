@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Streaming WAV parsing and 20 ms framing for the S-CON-6 injector
 (docs/voice/connector-build-plan.md: "audio source = a PCM/WAV pipe first —
 deliberately dumb; the TTS engine and the live mic are just different writers

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Minimal Janus HTTP transport client, shared by the connector peers.
 
 Moved verbatim from the S-CON-4 recorder (deliberately small — build plan D5: a

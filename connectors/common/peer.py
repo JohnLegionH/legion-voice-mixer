@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """The connector peer session lifecycle, shared by recorder and injector.
 
 Everything Janus-shaped lives here: create/attach, the join (offer carried in

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Slice 0.7b (ledger O-88, design §11.10): fetch a sim-minted join capability before every join.
 
 Connector peers are NOT exempted from JS_JOIN_CAP_REQUIRED. The viewer never reaches the Janus API, so the connector

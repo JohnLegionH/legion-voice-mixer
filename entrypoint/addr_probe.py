@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """addr_probe: address-discovery probes for the mixer entrypoint (slice A.1), reused by the self-check (A.2).
 
 Used by entrypoint/public-address.sh. One subcommand per source. Each prints ONE line and exits 0 on

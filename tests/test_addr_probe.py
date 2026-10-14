@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Unit tests for entrypoint/addr_probe.py (slice A.1): STUN and DNS codecs, the participant sum, and
 both probes end to end against throwaway loopback UDP servers. There are no external network calls,
 so the image build can run this:

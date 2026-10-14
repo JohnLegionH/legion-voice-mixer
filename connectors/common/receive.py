@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Receive-side consumption of the room mixdown, shared by the recorder and the
 injector's RECORD=1 path. Moved from the S-CON-4 recorder unchanged."""
 

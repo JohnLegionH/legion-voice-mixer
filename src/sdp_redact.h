@@ -1,3 +1,7 @@
+/* Copyright (c) 2026 Legion Builds
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
+ */
 /* O-66: redact ICE credentials and the DTLS fingerprint from an SDP before it is logged.
  *
  * The values of a=ice-ufrag:, a=ice-pwd: and a=fingerprint: lines are replaced by

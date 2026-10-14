@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Unit tests for the WAV segment writer (S-CON-4, build plan: "rollover at
 SEGMENT_SECONDS, valid RIFF header on close"). pytest-style; a __main__ fallback
 runs them with plain python where pytest is not installed. Run from connectors/

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 # public-address.sh: public address discovery, nat_1_1_mapping verdict and change detection (slice A.1).
 #
 # Sourced by docker-entrypoint.sh and entrypoint/public-address-watch.sh. POSIX sh (the image's

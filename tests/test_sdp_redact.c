@@ -1,3 +1,7 @@
+/* Copyright (c) 2026 Legion Builds
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
+ */
 /* Unit tests for src/sdp_redact.h (O-66). libc only. */
 #include <stdio.h>
 #include <stdlib.h>

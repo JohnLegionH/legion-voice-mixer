@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Legion Builds
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """legion-voice-selfcheck: reachability self-check for the mixer container (slices A.2, A.2b, A.3).
 
   C1   the advertised address is public (the A.1 state file); CGNAT is its own FAIL
