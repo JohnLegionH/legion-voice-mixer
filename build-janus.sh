@@ -1,4 +1,12 @@
 #! /bin/bash
+# Adapted from os-webrtc-janus-docker by Robert Adams (https://github.com/Misterblue/os-webrtc-janus-docker,
+# commit 73d6410), which is licensed under the Mozilla Public License, v. 2.0. The upstream file carries no
+# per-file notice of its own; its licence text is in LICENSES/MPL-2.0.txt.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL
+# was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Adapted 2026 by Legion Builds. Changed: builds the local image from the pinned Janus submodule and the slvoice plugin.
 # DEVELOPERS ONLY. Build the container image locally from source, instead of
 # pulling the published one from GHCR. Operators do not need this — see the
 # README "Install" section.

@@ -1,0 +1,56 @@
+Legion voice mixer
+Copyright (c) 2026 Legion Builds
+Licensed under the GNU General Public License, version 3 only (see LICENSE).
+
+This project builds on the work of others. Each outside source, its holder and
+its licence are listed here. A file taken or adapted from an outside source
+keeps that source's notice, and carries "Adapted <year> by Legion Builds"
+beneath it.
+
+1. Janus Gateway
+   Holder:   Meetecho s.r.l. (author of the plugin used as the model:
+             Lorenzo Miniero <lorenzo@meetecho.com>)
+   Licence:  GNU General Public License v3, with an exception for linking
+             with OpenSSL (see COPYING in the Janus Gateway source).
+   Source:   https://github.com/meetecho/janus-gateway, tag v1.4.1, included
+             unmodified as the git submodule vendor/janus-gateway and built
+             into the container image.
+   Used by:  - src/janus_slvoice.c is adapted from the Janus AudioBridge
+               plugin (src/plugins/janus_audiobridge.c): the plugin
+               skeleton, request and JSON field names, and error numbers.
+               The file carries the AudioBridge notice and the "Adapted"
+               line.
+             - tests/golden/ holds byte-exact captures of configuration that
+               the container generates from Janus's sample configuration
+               files (conf/*.sample). The captures are compared byte for
+               byte, so they carry no header of their own. The samples have
+               no per-file notice.
+
+2. os-webrtc-janus-docker
+   Holder:   Robert Adams
+   Licence:  Mozilla Public License, version 2.0 (LICENSES/MPL-2.0.txt, a copy
+             of the licence file of the source at commit 73d6410).
+   Source:   https://github.com/Misterblue/os-webrtc-janus-docker, commit
+             73d6410.
+   Used by:  Dockerfile, build-janus.sh, docker-compose.yml and env.sample are
+             adapted from the files of the same names. They stay under the
+             MPL-2.0; each carries a notice naming the source. The source
+             files carry no per-file notice, so none could be reproduced.
+             The rest of the repository is GPL-3.0-only. The MPL-2.0 names
+             the GNU GPL version 2.0 "or any later versions" as a Secondary
+             License (section 1.12), so the combined work may be distributed
+             under the GPL (section 3.3).
+
+3. Second Life viewer (voice client)
+   Holder:   Linden Research, Inc.
+   Licence:  GNU Lesser General Public License, version 2.1 only.
+   Source:   https://github.com/secondlife/viewer, indra/newview/llvoicewebrtc.cpp
+   Used by:  The protocol behaviour and constants that src/janus_slvoice.c
+             follows (camera leash distance of 50 m, gain factor of 220).
+             No viewer code is copied; the file's header acknowledges the
+             source.
+
+4. Base image
+   The Dockerfile starts FROM shivanshtalwar0/januscoredeps (Docker Hub), as
+   os-webrtc-janus-docker does. It is pulled at build time, not copied into
+   this repository. Its licence has not been confirmed from here.

@@ -1,3 +1,21 @@
+/* This file is adapted from the AudioBridge plugin of Janus Gateway (src/plugins/janus_audiobridge.c,
+ * https://github.com/meetecho/janus-gateway, built here at tag v1.4.1). Its notice follows, unchanged:
+ *
+ * \author Lorenzo Miniero <lorenzo@meetecho.com>
+ * \copyright GNU General Public License v3
+ *
+ * Janus Gateway is distributed under the GNU General Public License v3 with an exception for linking with
+ * OpenSSL; see the COPYING file of Janus Gateway.
+ *
+ * Adapted 2026 by Legion Builds: the plugin skeleton (callback table, message queue and handler thread), the
+ * request names and JSON field names and the error numbers follow janus_audiobridge.c; the per-listener spatial
+ * mixer, the SLData channel and the rest of the plugin were written for this project. This file is distributed
+ * under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
+ *
+ * Also acknowledged, with no code copied: the behaviour and constants of the Second Life viewer's voice client
+ * (llvoicewebrtc.cpp, Copyright (C) 2023 Linden Research, Inc., LGPL-2.1) that the voice protocol documents
+ * describe (the camera leash distance of 50 m and the gain factor of 220).
+ */
 /*! \file    janus_slvoice.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3

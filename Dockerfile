@@ -1,3 +1,11 @@
+# Adapted from os-webrtc-janus-docker by Robert Adams (https://github.com/Misterblue/os-webrtc-janus-docker,
+# commit 73d6410), which is licensed under the Mozilla Public License, v. 2.0. The upstream file carries no
+# per-file notice of its own; its licence text is in LICENSES/MPL-2.0.txt.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL
+# was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Adapted 2026 by Legion Builds. Changed: Janus is built from a pinned submodule together with the slvoice plugin; the image's start-up scripts are added.
 # Container for the Legion SLVoice mixer: Janus Gateway + janus.plugin.slvoice.
 #
 # This mirrors Misterblue/os-webrtc-janus-docker so it is a drop-in replacement
