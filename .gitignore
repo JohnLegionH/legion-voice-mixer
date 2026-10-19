@@ -12,6 +12,7 @@ janus_slvoice.so
 tests/test_sldata
 tests/test_mix
 tests/test_visbatch
+tests/test_possync
 tests/test_roster
 tests/test_sdp_redact
 

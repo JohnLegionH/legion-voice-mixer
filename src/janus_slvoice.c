@@ -93,6 +93,7 @@
 #include "deferred.h"    /* join-window fix: per-room store of columns deferred for a not-yet-joined listener */
 #include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
 #include "visauth.h"     /* Phase 0: epochs, the listener rule rows and the knobs (unit-tested) */
+#include "possync.h"     /* vis_protocol 3: sim-reported participant positions, observed only (unit-tested) */
 #include "joincap.h"     /* Phase 0 slice 0.4: the sim-issued join capability (unit-tested) */
 #include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
 #include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
@@ -380,6 +381,9 @@ static slv_joincap_nonce_store slv_join_cap_nonces;
 /* Process-wide outcome counters (query_session): the gate belongs to the mixer, not to one room. Refusals are
  * counted whether or not they were enforced, which is what the 0.6 soak reads. */
 static volatile gint slv_join_cap_seen;        /* joins that carried a capability */
+/* vis_protocol 3: peer_pos refusals that name no room (an unparseable body has none, an unknown room has none to charge),
+ * shown in every room's positions block. */
+static volatile gint slv_pos_malformed_total, slv_pos_toobig_total, slv_pos_unknown_room_total;
 static volatile gint slv_join_cap_accepted;    /* verified, in context, fresh, unspent, current generation */
 static volatile gint slv_join_cap_enforced;    /* joins actually refused (knob on, declared room) */
 static volatile gint slv_join_cap_skewed;      /* accepted only because of the skew tolerance */
@@ -486,6 +490,11 @@ typedef struct janus_slvoice_room {
 	guint64 vis_stale_epoch_rejects;       /* batches and heartbeat entries answered stale_epoch */
 	guint64 vis_stale_generation_rejects;  /* batches whose policy_generation was not above vis_policy_gen */
 	guint64 vis_records_full;       /* arming refused because vis_records held SLV_VIS_MAX_RECORDS */
+
+	/* Sim-reported participant positions (vis_protocol 3, src/possync.h). Observed only: they are compared with what
+	 * each viewer claims and counted, and nothing in the mix reads them. Guarded by room->mutex. */
+	slv_pos_store pos_store;        /* agent UUID -> the sim's point, allowance and tolerance, with receipt time */
+	slv_pos_room_stats pos_stats;   /* request counters and the observe totals; have_batch gates all observing */
 
 	volatile gint destroyed;
 	janus_refcount ref;
@@ -619,6 +628,10 @@ typedef struct janus_slvoice_session {
 	/* Phase 0: whether this session stood in row 4 at the sender's last pass in a fail-closed room, so the sender
 	 * emits j/l when its standing changes (§4 transitions). Guarded by room->mutex. */
 	gboolean vis_ok_last;
+
+	/* What observing the sim's position of this participant counted (src/possync.h). Written by the room's tick
+	 * under session->mutex, read by query_session under the same lock; cleared when the session leaves its room. */
+	slv_pos_part_stats pos;
 
 	/* Diagnostics (guarded by mutex except where atomic) */
 	guint64 rtp_in_count;        /* RTP packets ingested */
@@ -893,6 +906,7 @@ static void janus_slvoice_reset_room_state_locked(janus_slvoice_session *s) {
 	memset(&s->snap_lp, 0, sizeof(s->snap_lp));
 	s->snap_lh = (slv_quat){ 0.0, 0.0, 0.0, 1.0 };
 	s->snap_valid = FALSE;
+	memset(&s->pos, 0, sizeof(s->pos));
 	memset(&s->last_data.sp, 0, sizeof(s->last_data.sp));
 	memset(&s->last_data.sh, 0, sizeof(s->last_data.sh));
 	memset(&s->last_data.lp, 0, sizeof(s->last_data.lp));
@@ -1792,6 +1806,24 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "last_data_fields_seen", json_string(fbuf));   /* O-64: persistent union */
 	slv_sldata_fields_str(session->last_msg_fields, fbuf, sizeof(fbuf));
 	json_object_set_new(info, "last_msg_fields_seen", json_string(fbuf));    /* O-64: latest message only */
+	/* vis_protocol 3, observe only: what the sim's position for this participant, compared with its own claim, would have
+	 * changed. All zero and state "none" until the room has accepted a peer_pos request. */
+	json_t *po = json_object();
+	json_object_set_new(po, "state", json_string(slv_pos_sim_state_str(session->pos.state)));
+	json_object_set_new(po, "age_ms", json_integer((json_int_t)session->pos.age_ms));
+	json_object_set_new(po, "sim_cm", json_pack("[III]", (json_int_t)session->pos.sim.x, (json_int_t)session->pos.sim.y,
+		(json_int_t)session->pos.sim.z));
+	json_object_set_new(po, "sim_speed_cms", json_integer((json_int_t)session->pos.sim.speed_cms));
+	json_object_set_new(po, "sim_tol_cm", json_integer((json_int_t)session->pos.sim.tol_cm));
+	json_object_set_new(po, "dev_cm", json_real(session->pos.dev_cm));
+	json_object_set_new(po, "ticks_observed", json_integer((json_int_t)session->pos.ticks_observed));
+	json_object_set_new(po, "would_clamp", json_integer((json_int_t)session->pos.would_clamp));
+	json_object_set_new(po, "would_clamp_max_dev_cm", json_real(session->pos.would_clamp_max_dev_cm));
+	json_object_set_new(po, "would_clamp_max_excess_cm", json_real(session->pos.would_clamp_max_excess_cm));
+	json_object_set_new(po, "would_use_sim", json_integer((json_int_t)session->pos.would_use_sim));
+	json_object_set_new(po, "no_sim", json_integer((json_int_t)session->pos.no_sim));
+	json_object_set_new(po, "no_sim_stale", json_integer((json_int_t)session->pos.no_sim_stale));
+	json_object_set_new(info, "pos_observe", po);
 	gint64 uptime = (janus_get_monotonic_time() - session->created_ts) / G_USEC_PER_SEC;
 	json_object_set_new(info, "session_uptime", json_integer((json_int_t)uptime));
 	janus_mutex_unlock(&session->mutex);
@@ -1926,6 +1958,40 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(jcap, "nonces_expired", json_integer((json_int_t)slv_join_cap_nonces.expired));
 		janus_mutex_unlock(&slv_join_cap_mutex);
 		json_object_set_new(vis, "join_cap", jcap);
+		/* vis_protocol 3, observe only (src/possync.h): the sim's positions for this room and what comparing them with the
+		 * viewers' claims would have changed. have_batch false means no sim has sent any, and every count is then zero. */
+		const slv_pos_room_stats *prs = &qroom->pos_stats;
+		json_t *pj = json_object();
+		char pepoch[17];
+		slv_vis_format_epoch(prs->epoch, pepoch);
+		json_object_set_new(pj, "mode", json_string("observe"));
+		json_object_set_new(pj, "stale_ms", json_integer(SLV_POS_STALE_MS));
+		json_object_set_new(pj, "have_batch", prs->have_batch ? json_true() : json_false());
+		json_object_set_new(pj, "last_seq", json_integer((json_int_t)prs->last_seq));
+		json_object_set_new(pj, "epoch", json_string(pepoch));
+		json_object_set_new(pj, "last_batch_age_ms", json_integer(prs->have_batch ? (json_int_t)((vnow - prs->last_us) / 1000) : -1));
+		json_object_set_new(pj, "store_size", json_integer(qroom->pos_store.count));
+		json_object_set_new(pj, "batches", json_integer((json_int_t)prs->batches));
+		json_object_set_new(pj, "full_batches", json_integer((json_int_t)prs->full_batches));
+		json_object_set_new(pj, "entries_applied", json_integer((json_int_t)prs->entries_applied));
+		json_object_set_new(pj, "entries_skipped", json_integer((json_int_t)prs->entries_skipped));
+		json_object_set_new(pj, "entries_dropped_full", json_integer((json_int_t)prs->entries_dropped_full));
+		json_object_set_new(pj, "enforce_requests", json_integer((json_int_t)prs->enforce_requests));
+		json_object_set_new(pj, "rejected_stale_epoch", json_integer((json_int_t)prs->rejected_stale_epoch));
+		json_object_set_new(pj, "rejected_stale_seq", json_integer((json_int_t)prs->rejected_stale_seq));
+		json_object_set_new(pj, "process_rejected_malformed", json_integer(g_atomic_int_get(&slv_pos_malformed_total)));
+		json_object_set_new(pj, "process_rejected_too_big", json_integer(g_atomic_int_get(&slv_pos_toobig_total)));
+		json_object_set_new(pj, "process_unknown_room", json_integer(g_atomic_int_get(&slv_pos_unknown_room_total)));
+		json_object_set_new(pj, "would_clamp_ticks", json_integer((json_int_t)prs->would_clamp_ticks));
+		json_object_set_new(pj, "would_clamp_max_dev_cm", json_real(prs->would_clamp_max_dev_cm));
+		json_object_set_new(pj, "would_clamp_max_excess_cm", json_real(prs->would_clamp_max_excess_cm));
+		json_object_set_new(pj, "would_use_sim_ticks", json_integer((json_int_t)prs->would_use_sim_ticks));
+		json_object_set_new(pj, "no_sim_ticks", json_integer((json_int_t)prs->no_sim_ticks));
+		json_object_set_new(pj, "no_sim_stale_ticks", json_integer((json_int_t)prs->no_sim_stale_ticks));
+		json_object_set_new(pj, "would_clamp_now", json_integer(prs->would_clamp_now));
+		json_object_set_new(pj, "would_use_sim_now", json_integer(prs->would_use_sim_now));
+		json_object_set_new(pj, "no_sim_now", json_integer(prs->no_sim_now));
+		json_object_set_new(vis, "positions", pj);
 		/* This session's own standing: its row (1..4) and, when armed, its record. */
 		json_object_set_new(info, "vis_row", json_integer(janus_slvoice_vis_row_locked(qroom, session->display, vnow)));
 		slv_vis_record *vrec = session->display != NULL ? g_hash_table_lookup(qroom->vis_records, session->display) : NULL;
@@ -2715,6 +2781,90 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 	return response;
 }
 
+/* "peer_pos" (vis_protocol 3, src/possync.h): where the sim has each participant of one room. OBSERVE ONLY: the points are
+ * stored and compared with the viewers' own claims by the tick, which counts and changes no audio. A room with no accepted
+ * request is observed not at all, so a sim that never sends one leaves the mixer exactly as it was. room->mutex is held
+ * across the authority check and the store update, as for peer_ctl_batch. The room's authority is only READ: a position
+ * request never adopts an epoch, advances the policy generation or arms a listener. */
+static json_t *janus_slvoice_handle_peer_pos(json_t *message) {
+	json_t *response = json_object();
+	char *buf = json_dumps(message, JSON_COMPACT);
+	slv_posbatch pb;
+	slv_pos_status st = slv_posbatch_parse(buf, buf ? strlen(buf) : 0, &pb);
+	if(buf != NULL)
+		free(buf);
+	if(st != SLV_POS_OK) {
+		g_atomic_int_inc(st == SLV_POS_TOOBIG ? &slv_pos_toobig_total : &slv_pos_malformed_total);
+		JANUS_LOG(LOG_WARN, "[%s] peer_pos rejected: %s\n", JANUS_SLVOICE_PACKAGE, slv_pos_status_str(st));
+		json_object_set_new(response, "slvoice", json_string("error"));
+		json_object_set_new(response, "reason", json_string(slv_pos_status_str(st)));
+		janus_slvoice_vis_reply_common(response);
+		return response;
+	}
+	janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)pb.room);
+	if(room == NULL) {
+		g_atomic_int_inc(&slv_pos_unknown_room_total);
+		JANUS_LOG(LOG_VERB, "[%s] peer_pos for unknown room %"PRId64"; dropped\n", JANUS_SLVOICE_PACKAGE, pb.room);
+		json_object_set_new(response, "slvoice", json_string("error"));
+		json_object_set_new(response, "reason", json_string("unknown_room"));
+		slv_posbatch_free(&pb);
+		janus_slvoice_vis_reply_common(response);
+		return response;
+	}
+	janus_mutex_lock(&room->mutex);
+	gint64 now = janus_get_monotonic_time();
+	slv_pos_room_stats *rs = &room->pos_stats;
+	const char *refusal = NULL;
+	if(pb.has_epoch && room->vis_auth_epoch != 0 && pb.room_epoch < room->vis_auth_epoch
+			&& !slv_vis_authority_stale(room->vis_auth_last_us, now, janus_slvoice_vis_stale_us())) {
+		refusal = "stale_epoch";   /* an older sim instance while the newer authority is fresh */
+		rs->rejected_stale_epoch++;
+	} else if(rs->have_batch && (pb.has_epoch ? pb.room_epoch : 0) == rs->epoch && pb.seq <= rs->last_seq) {
+		refusal = "stale_seq";     /* late or repeated: the room already holds a newer request of this instance */
+		rs->rejected_stale_seq++;
+	}
+	if(refusal != NULL) {
+		json_object_set_new(response, "slvoice", json_string("error"));
+		json_object_set_new(response, "reason", json_string(refusal));
+	} else {
+		uint64_t epoch = pb.has_epoch ? pb.room_epoch : 0;
+		gboolean first = !rs->have_batch;
+		if(!first && epoch != rs->epoch)
+			slv_pos_store_clear(&room->pos_store);   /* a different sim instance: its points replace the old one's */
+		int dropped = 0;
+		int stored = slv_pos_store_apply(&room->pos_store, &pb, now, &dropped);
+		rs->have_batch = 1;
+		rs->epoch = epoch;
+		rs->last_seq = pb.seq;
+		rs->last_us = now;
+		rs->batches++;
+		if(pb.full)
+			rs->full_batches++;
+		if(pb.enforce_requested)
+			rs->enforce_requests++;
+		rs->entries_applied += (guint64)stored;
+		rs->entries_skipped += (guint64)pb.n_skipped;
+		rs->entries_dropped_full += (guint64)dropped;
+		if(first)
+			JANUS_LOG(LOG_INFO, "[%s] room %"PRIu64": first peer_pos accepted (%d entr%s); positions are observed and counted, "
+				"never applied to the mix\n", JANUS_SLVOICE_PACKAGE, room->room_id, stored, stored == 1 ? "y" : "ies");
+		json_object_set_new(response, "slvoice", json_string("applied"));
+		json_object_set_new(response, "op", json_string("pos"));
+		json_object_set_new(response, "room", json_integer((json_int_t)pb.room));
+		json_object_set_new(response, "seq", json_integer((json_int_t)pb.seq));
+		json_object_set_new(response, "full", pb.full ? json_true() : json_false());
+		json_object_set_new(response, "entries", json_integer(stored));
+		json_object_set_new(response, "skipped", json_integer(pb.n_skipped));
+		json_object_set_new(response, "dropped", json_integer(dropped));
+		json_object_set_new(response, "pos_mode", json_string("observe"));
+	}
+	janus_mutex_unlock(&room->mutex);
+	janus_refcount_decrease(&room->ref);
+	slv_posbatch_free(&pb);
+	janus_slvoice_vis_reply_common(response);
+	return response;
+}
+
 json_t *janus_slvoice_handle_admin_message(json_t *message) {
 	const char *request_text = NULL;
 	if(message != NULL && json_is_object(message)) {
@@ -2725,6 +2875,9 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 
 	if(request_text != NULL && !strcmp(request_text, "peer_ctl_heartbeat"))
 		return janus_slvoice_handle_heartbeat(message);   /* Phase 0 §3 */
+
+	if(request_text != NULL && !strcmp(request_text, "peer_pos"))
+		return janus_slvoice_handle_peer_pos(message);   /* vis_protocol 3 */
 
 	json_t *response = json_object();
 
@@ -4067,6 +4220,19 @@ static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
 		s->snap_lp = slv_vec3_madd(s->snap_sp, slv_spatial.leash_dist / d, off);
 }
 
+/* Sim-reported positions, observe only (src/possync.h). Once the room has accepted a peer_pos request, compare this
+ * participant's claimed "sp" with the sim's point and count what correcting it would do. Reads s->last_data and the
+ * room's store; writes only s->pos and the room's counters, so no sample, snapshot or mix changes. A room that has
+ * never accepted a request returns at once. session->mutex and room->mutex held. */
+static void janus_slvoice_pos_observe_locked(janus_slvoice_room *room, janus_slvoice_session *s, gint64 now) {
+	if(!room->pos_stats.have_batch)
+		return;
+	const slv_pos_sim *sim = s->display != NULL ? slv_pos_store_find(&room->pos_store, s->display) : NULL;
+	double claim[3] = { s->last_data.sp.x, s->last_data.sp.y, s->last_data.sp.z };
+	slv_pos_observe(&s->pos, &room->pos_stats, sim, now, (s->last_data_fields & SLV_FIELD_SP) != 0,
+		(s->last_data_fields & SLV_FIELD_LP) != 0, claim);
+}
+
 /* Phase 3b item 2: per-listener distance cull with hysteresis. Returns TRUE if the
  * source `uuid`, at distance `d` from this listener (stored ×100 unit), must be
  * dropped from the mix. Maintains the per-listener hysteresis latch keyed by source
@@ -4174,6 +4340,9 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	gboolean check_reap = slv_join_media_timeout_s > 0 && (room->tick_seq % (1000 / SLV_TICK_MS)) == 0;
 	gint64 reap_after_us = (gint64)slv_join_media_timeout_s * G_USEC_PER_SEC;
 
+	if(room->pos_stats.have_batch)
+		slv_pos_room_tick_begin(&room->pos_stats);
+
 	/* Pass 1: decode each source once. */
 	for(int i = 0; i < count; i++) {
 		janus_slvoice_session *s = sess[i];
@@ -4182,6 +4351,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		audible[i] = (s->dec_samples > 0) ? 1 : 0;
 		srcbuf[i] = s->decbuf;   /* tick-owned; stable for the rest of this tick */
 		janus_slvoice_snapshot_geometry_locked(s);   /* Phase 3b: geometry + §7.1 leash (tick-owned) */
+		janus_slvoice_pos_observe_locked(room, s, t0);   /* vis_protocol 3: count only, no audio change */
 		if(check_reap && s->join_ts != 0 && !g_atomic_int_get(&s->media_seen)
 				&& !g_atomic_int_get(&s->destroyed) && t0 - s->join_ts >= reap_after_us) {
 			janus_refcount_increase(&s->ref);

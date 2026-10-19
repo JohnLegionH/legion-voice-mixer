@@ -24,8 +24,9 @@
 #include <string.h>
 #include <strings.h>
 
-/*! \brief The wire protocol a Phase 0 mixer advertises in every peer_ctl_batch and heartbeat reply (§3). */
-#define SLV_VIS_PROTOCOL 2
+/*! \brief The wire protocol a mixer advertises in every peer_ctl_batch and heartbeat reply (§3). 2: understands
+ * peer_ctl_heartbeat. 3: also understands peer_pos (src/possync.h), a sim's report of where each participant is. */
+#define SLV_VIS_PROTOCOL 3
 
 /*! \brief JS_VIS_STALE_MS default (§5). */
 #define SLV_VIS_STALE_MS_DEFAULT 8000

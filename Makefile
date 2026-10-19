@@ -55,7 +55,7 @@ LDLIBS  += $(PKG_LIBS)
 
 # Phase 2 adds the per-room N-minus-one mixer; the pure mixing math lives in
 # src/mixer/mix.c (Janus/Opus-free) so it is shared with the unit test below.
-SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/deferred.c src/joincap.c src/mixer/mix.c
+SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/joincap.c src/mixer/mix.c
 OBJS := $(SRCS:.c=.o)
 
 # Unit tests. Both are plain C binaries with NO Janus link:
@@ -67,6 +67,9 @@ TEST_MIX_BIN     := tests/test_mix
 TEST_MIX_SRCS    := tests/test_mix.c src/mixer/mix.c
 TEST_VISBATCH_BIN  := tests/test_visbatch
 TEST_VISBATCH_SRCS := tests/test_visbatch.c src/visbatch.c
+# test_possync: peer_pos parser, per-room store and the observe counters (jansson + libm; no Janus).
+TEST_POSSYNC_BIN  := tests/test_possync
+TEST_POSSYNC_SRCS := tests/test_possync.c src/possync.c
 # test_deferred: the per-room deferred visibility/mute store (libc only, no Janus/glib/jansson).
 TEST_DEFERRED_BIN  := tests/test_deferred
 TEST_DEFERRED_SRCS := tests/test_deferred.c src/deferred.c
@@ -83,7 +86,7 @@ TEST_REDACT_SRCS   := tests/test_sdp_redact.c
 # bench_tick.c #includes janus_slvoice.c to reach the static tick, so the plugin
 # .c is NOT listed here (it would double-define); the other pure .c deps are.
 BENCH_TICK_BIN     := tests/bench_tick
-BENCH_TICK_SRCS    := tests/bench_tick.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
+BENCH_TICK_SRCS    := tests/bench_tick.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/mixer/mix.c
 BENCH_CFLAGS       := $(CFLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -I$(JANUS_PREFIX)/include $(PKG_CFLAGS) $(EXTRA_CFLAGS)
 # --unresolved-symbols=ignore-all: janus_slvoice.c compiles in init (janus_config_*)
 # and negotiate (janus_sdp_*), which the harness NEVER calls; leaving them undefined
@@ -95,9 +98,9 @@ BENCH_LIBS         := $(PKG_LIBS) -pthread -Wl,--unresolved-symbols=ignore-all
 # janus_slvoice.c exactly like bench_tick, so it builds with the bench flags and links -- but
 # unlike bench_tick it IS a unit test and runs in `make test`.
 TEST_LIFECYCLE_BIN  := tests/test_room_lifecycle
-TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c src/deferred.c src/mixer/mix.c
+TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/mixer/mix.c
 TEST_VISAUTH_BIN  := tests/test_visauth
-TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/deferred.c src/joincap.c src/mixer/mix.c
+TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/joincap.c src/mixer/mix.c
 # test_joincap: slice 0.4's join capability (src/joincap.c). Links OpenSSL and libc only.
 TEST_JOINCAP_BIN  := tests/test_joincap
 TEST_JOINCAP_SRCS := tests/test_joincap.c src/joincap.c
@@ -131,10 +134,11 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
+	./$(TEST_POSSYNC_BIN)
 	./$(TEST_DEFERRED_BIN)
 	./$(TEST_ROSTER_BIN)
 	./$(TEST_AZIMUTH_BIN)
@@ -164,6 +168,9 @@ $(TEST_SLDATA_BIN): $(TEST_SLDATA_SRCS)
 
 $(TEST_VISBATCH_BIN): $(TEST_VISBATCH_SRCS)
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_VISBATCH_SRCS) $(TEST_LIBS)
+
+$(TEST_POSSYNC_BIN): $(TEST_POSSYNC_SRCS) src/possync.h src/visauth.h
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_POSSYNC_SRCS) $(TEST_LIBS)
 
 # test_deferred: libc only (deferred.c pulls no jansson/glib), like test_mix.
 $(TEST_DEFERRED_BIN): $(TEST_DEFERRED_SRCS)
@@ -195,4 +202,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(BENCH_TICK_BIN)

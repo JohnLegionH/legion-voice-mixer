@@ -662,8 +662,8 @@ static void test_heartbeat(void) {
 
 	json_t *r = heartbeat(E1, 3301, "{\"L\":1,\"S\":1}", FALSE);
 	json_t *rr = room_reply(r, 3301);
-	CHECK(!strcmp(str_of(r, "slvoice"), "heartbeat") && json_integer_value(json_object_get(r, "vis_protocol")) == 2
-		&& !strcmp(str_of(r, "mixer_instance"), slv_mixer_instance), "heartbeat reply: slvoice heartbeat, vis_protocol 2, mixer_instance");
+	CHECK(!strcmp(str_of(r, "slvoice"), "heartbeat") && json_integer_value(json_object_get(r, "vis_protocol")) == 3
+		&& !strcmp(str_of(r, "mixer_instance"), slv_mixer_instance), "heartbeat reply: slvoice heartbeat, vis_protocol 3, mixer_instance");
 	CHECK(is_status(rr, "ok") && !strcmp(str_of(rr, "authority_epoch"), E1) && json_integer_value(json_object_get(rr, "policy_generation")) == 1,
 		"heartbeat reply: status ok, authority_epoch, policy_generation echoes the highest applied");
 	drop(r);
@@ -698,7 +698,7 @@ static void test_heartbeat(void) {
 	CHECK(undeclared->vis_heartbeats == 1 && undeclared->vis_auth_epoch == E_LOWERV, "heartbeat: an undeclared room still tracks the authority");
 
 	r = admin("{\"request\":\"peer_ctl_heartbeat\",\"room_epoch\":\"xyz\",\"interval_ms\":1000,\"rooms\":{}}");
-	CHECK(!strcmp(str_of(r, "reason"), "malformed") && json_integer_value(json_object_get(r, "vis_protocol")) == 2,
+	CHECK(!strcmp(str_of(r, "reason"), "malformed") && json_integer_value(json_object_get(r, "vis_protocol")) == 3,
 		"heartbeat: a malformed epoch is rejected, still advertising vis_protocol");
 	drop(r);
 	r = admin("{\"request\":\"peer_ctl_heartbeat\",\"room_epoch\":\"" E_LOWER "\",\"interval_ms\":1375,\"rooms\":{}}");
@@ -882,24 +882,24 @@ static void test_replies(void) {
 	void *it = json_object_iter(r);
 	CHECK(it != NULL && !strcmp(json_object_iter_key(it), "slvoice") && !strcmp(str_of(r, "slvoice"), "applied"),
 		"unstamped: slvoice applied is still the first key");
-	CHECK(json_integer_value(json_object_get(r, "vis_protocol")) == 2 && !strcmp(str_of(r, "mixer_instance"), slv_mixer_instance)
+	CHECK(json_integer_value(json_object_get(r, "vis_protocol")) == 3 && !strcmp(str_of(r, "mixer_instance"), slv_mixer_instance)
 		&& json_object_get(r, "status") == NULL && json_object_get(r, "authority_epoch") == NULL,
-		"unstamped: vis_protocol 2 and mixer_instance advertised; no authority keys");
+		"unstamped: vis_protocol 3 and mixer_instance advertised; no authority keys");
 	drop(r);
 	CHECK(row_of(room, "L") == 1 && g_hash_table_size(room->vis_records) == 0, "unstamped: a batch without room_epoch arms no one");
 
 	r = admin("{\"request\":\"peer_ctl_batch\",\"op\":\"replace\",\"room\":999998,\"excl\":{\"L\":[]}}");
 	CHECK(!strcmp(str_of(r, "reason"), "unknown_room") && json_object_get(r, "status") == NULL
-		&& json_integer_value(json_object_get(r, "vis_protocol")) == 2, "unstamped unknown room: unknown_room, advertised, no status");
+		&& json_integer_value(json_object_get(r, "vis_protocol")) == 3, "unstamped unknown room: unknown_room, advertised, no status");
 	drop(r);
 	r = admin("{\"request\":\"peer_ctl_batch\",\"op\":\"replace\",\"room\":999998,\"excl\":{\"L\":[]},\"room_epoch\":\"" E1 "\",\"policy_generation\":1}");
 	CHECK(!strcmp(str_of(r, "reason"), "unknown_room") && is_status(r, "unknown_room"), "stamped unknown room: status unknown_room");
 	drop(r);
 	r = admin("{\"request\":\"peer_ctl_batch\",\"room\":3701}");
-	CHECK(!strcmp(str_of(r, "reason"), "malformed") && json_integer_value(json_object_get(r, "vis_protocol")) == 2, "malformed batch: advertised");
+	CHECK(!strcmp(str_of(r, "reason"), "malformed") && json_integer_value(json_object_get(r, "vis_protocol")) == 3, "malformed batch: advertised");
 	drop(r);
 	r = admin("{\"request\":\"peer_ctl_batch\",\"op\":\"add\",\"room\":3701}");
-	CHECK(!strcmp(str_of(r, "slvoice"), "empty") && json_integer_value(json_object_get(r, "vis_protocol")) == 2, "empty batch: advertised");
+	CHECK(!strcmp(str_of(r, "slvoice"), "empty") && json_integer_value(json_object_get(r, "vis_protocol")) == 3, "empty batch: advertised");
 	drop(r);
 	r = admin("{\"request\":\"bogus\"}");
 	CHECK(!strcmp(str_of(r, "reason"), "unknown_request") && json_object_get(r, "vis_protocol") == NULL, "an unknown request is answered as before");
@@ -1000,6 +1000,231 @@ static void test_feed_age_liveness(void) {
 	CHECK(!slv_vis_feed_live(1, 9000, 7250), "feed age: a narrower window makes it stale");
 }
 
+/* ======================================================================================================= */
+/* vis_protocol 3: peer_pos, the sim's position for each participant, OBSERVED only (src/possync.h). */
+
+#define PA "aaaaaaaa-0000-4000-8000-00000000000a"
+#define PB "bbbbbbbb-0000-4000-8000-00000000000b"
+#define PC "cccccccc-0000-4000-8000-00000000000c"
+#define PD "dddddddd-0000-4000-8000-00000000000d"
+#define E3 "0000018f00000003"
+#define E3V G_GUINT64_CONSTANT(0x0000018f00000003)
+
+/* A spatial room (geometry reaches the mix) with its tick thread stopped. */
+static janus_slvoice_room *new_spatial_room(guint64 id, gboolean declared) {
+	janus_slvoice_room *room = janus_slvoice_room_create(id, NULL, FALSE, 48000, TRUE, FALSE, declared, FALSE);
+	if(room == NULL) { fprintf(stderr, "test_visauth: room_create(%" PRIu64 ") failed\n", id); exit(2); }
+	janus_slvoice_room_stop(room);
+	janus_mutex_lock(&rooms_mutex);
+	guint64 *key = g_malloc(sizeof(guint64));
+	*key = id;
+	g_hash_table_insert(rooms, key, room);
+	janus_mutex_unlock(&rooms_mutex);
+	return room;
+}
+
+/* What the viewer last sent: sp (and lp at the same point when with_lp), in centimetres. */
+static void set_claim(janus_slvoice_session *s, double x, double y, double z, gboolean with_lp) {
+	janus_mutex_lock(&s->mutex);
+	s->last_data.sp = (slv_vec3){ x, y, z };
+	s->last_data_fields |= SLV_FIELD_SP;
+	if(with_lp) {
+		s->last_data.lp = (slv_vec3){ x, y, z };
+		s->last_data_fields |= SLV_FIELD_LP;
+	}
+	janus_mutex_unlock(&s->mutex);
+}
+
+static json_t *peer_pos(guint64 room, long long seq, gboolean full, const char *epoch, const char *pos_body) {
+	char ep[64] = "";
+	if(epoch != NULL)
+		g_snprintf(ep, sizeof(ep), ",\"room_epoch\":\"%s\"", epoch);
+	return admin("{\"request\":\"peer_pos\",\"room\":%" G_GUINT64_FORMAT ",\"seq\":%lld,\"full\":%s,\"mode\":\"observe\"%s,\"pos\":{%s}}",
+		room, seq, full ? "true" : "false", ep, pos_body);
+}
+
+static json_t *info_of(janus_slvoice_session *s) { return janus_slvoice_query_session(s->handle); }
+static json_int_t jint(json_t *o, const char *k) { return json_integer_value(json_object_get(o, k)); }
+
+static void test_peer_pos(void) {
+	slv_vis_fail_closed = FALSE;
+
+	/* ---- the envelope and the replies ---- */
+	janus_slvoice_room *probe = new_room(4001, FALSE);
+	json_t *r = peer_pos(4001, 100, TRUE, NULL, "\"" PA "\":[0,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "slvoice"), "applied") && !strcmp(str_of(r, "op"), "pos") && jint(r, "room") == 4001 && jint(r, "seq") == 100
+		&& jint(r, "entries") == 1 && jint(r, "skipped") == 0 && jint(r, "dropped") == 0 && !strcmp(str_of(r, "pos_mode"), "observe"),
+		"peer_pos: an applied reply names the op, room, seq and counts");
+	CHECK(jint(r, "vis_protocol") == 3 && !strcmp(str_of(r, "mixer_instance"), slv_mixer_instance),
+		"peer_pos: the reply advertises vis_protocol 3 and the mixer_instance");
+	drop(r);
+	r = admin("{\"request\":\"peer_ctl_batch\",\"op\":\"add\",\"room\":4001}");
+	CHECK(jint(r, "vis_protocol") == 3, "a peer_ctl_batch reply advertises vis_protocol 3 too");
+	drop(r);
+	r = peer_pos(4001, 100, TRUE, NULL, "\"" PA "\":[0,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "reason"), "stale_seq") && jint(r, "vis_protocol") == 3, "the same seq again is refused stale_seq");
+	drop(r);
+	r = peer_pos(4001, 99, FALSE, NULL, "\"" PA "\":[0,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "reason"), "stale_seq"), "a lower seq is refused stale_seq");
+	drop(r);
+	r = peer_pos(4001, 101, FALSE, NULL, "\"" PB "\":[5,5,5,5,5],\"bad\":[1,2,3,4,5]");
+	CHECK(!strcmp(str_of(r, "slvoice"), "applied") && jint(r, "entries") == 1 && jint(r, "skipped") == 1, "a bad entry is skipped and counted");
+	drop(r);
+	r = peer_pos(999997, 1, TRUE, NULL, "");
+	CHECK(!strcmp(str_of(r, "reason"), "unknown_room") && jint(r, "vis_protocol") == 3, "an unknown room is refused, still advertising");
+	drop(r);
+	r = admin("{\"request\":\"peer_pos\",\"room\":4001}");
+	CHECK(!strcmp(str_of(r, "reason"), "malformed") && jint(r, "vis_protocol") == 3, "a request without seq/full/pos is malformed");
+	drop(r);
+	{
+		GString *big = g_string_new("");
+		for(int i = 0; i < 129; i++)
+			g_string_append_printf(big, "%s\"%08x-0000-4000-8000-000000000000\":[%d,0,0,0,0]", i ? "," : "", (unsigned)(i + 1), i);
+		r = peer_pos(4001, 102, TRUE, NULL, big->str);
+		CHECK(!strcmp(str_of(r, "reason"), "too_big"), "129 entries are refused whole, too_big");
+		drop(r);
+		g_string_free(big, TRUE);
+	}
+	janus_mutex_lock(&probe->mutex);
+	CHECK(probe->pos_store.count == 2 && probe->pos_stats.batches == 2 && probe->pos_stats.last_seq == 101
+		&& probe->pos_stats.rejected_stale_seq == 2, "the refused requests changed nothing in the store");
+	janus_mutex_unlock(&probe->mutex);
+	json_t *pinfo = NULL;
+	{
+		janus_slvoice_session *q = new_session(PC);
+		join(probe, q, NULL);
+		pinfo = info_of(q);
+		json_t *pj = json_object_get(json_object_get(pinfo, "visibility"), "positions");
+		CHECK(pj != NULL && jint(pj, "batches") == 2 && jint(pj, "rejected_stale_seq") == 2 && jint(pj, "store_size") == 2
+			&& json_is_true(json_object_get(pj, "have_batch")) && jint(pj, "process_rejected_malformed") >= 1
+			&& jint(pj, "process_rejected_too_big") >= 1 && jint(pj, "process_unknown_room") >= 1,
+			"the room's positions block carries the request counters");
+		json_decref(pinfo);
+		free_session(q);
+	}
+
+	/* ---- the authority is only read ---- */
+	janus_slvoice_room *dec = new_room(4002, TRUE);
+	drop(arm(4002, E2, 4, PA, NULL));
+	guint64 ep0 = dec->vis_auth_epoch;
+	guint32 gen0 = dec->vis_policy_gen;
+	guint armed0 = g_hash_table_size(dec->vis_records);
+	r = peer_pos(4002, 10, TRUE, E1, "\"" PA "\":[0,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "reason"), "stale_epoch") && dec->pos_stats.rejected_stale_epoch == 1 && !dec->pos_stats.have_batch,
+		"an older epoch while the authority is fresh: stale_epoch, nothing stored");
+	drop(r);
+	r = peer_pos(4002, 10, TRUE, E2, "\"" PA "\":[0,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "slvoice"), "applied") && dec->pos_stats.epoch == E2V && dec->pos_stats.last_seq == 10, "the authority's epoch is accepted");
+	drop(r);
+	r = peer_pos(4002, 11, TRUE, E3, "\"" PB "\":[1,1,1,1,1]");
+	CHECK(!strcmp(str_of(r, "slvoice"), "applied") && dec->pos_stats.epoch == E3V
+		&& slv_pos_store_find(&dec->pos_store, PA) == NULL && slv_pos_store_find(&dec->pos_store, PB) != NULL,
+		"a newer epoch is a new sim instance: its points replace the old ones");
+	drop(r);
+	r = peer_pos(4002, 11, TRUE, E3, "\"" PB "\":[1,1,1,1,1]");
+	CHECK(!strcmp(str_of(r, "reason"), "stale_seq"), "and its own seq is checked");
+	drop(r);
+	CHECK(dec->vis_auth_epoch == ep0 && dec->vis_policy_gen == gen0 && g_hash_table_size(dec->vis_records) == armed0,
+		"peer_pos adopted no epoch, moved no policy generation and armed no one");
+
+	/* ---- observing changes nothing audible ---- */
+	janus_slvoice_room *plain = new_spatial_room(4003, FALSE);   /* never receives a peer_pos: an old sim */
+	janus_slvoice_room *seen = new_spatial_room(4004, FALSE);    /* receives positions that disagree with the claims */
+	janus_slvoice_session *la = new_session(PA), *sb = new_session(PB), *la2 = new_session(PA), *sb2 = new_session(PB);
+	janus_slvoice_session *nc = new_session(PC), *nd = new_session(PD);
+	join(plain, sb, NULL);
+	join(seen, sb2, NULL);
+	join(plain, la, NULL);
+	join(seen, la2, NULL);
+	join(seen, nc, NULL);
+	join(seen, nd, NULL);
+	set_claim(la, 0, 0, 0, TRUE);      set_claim(la2, 0, 0, 0, TRUE);
+	set_claim(sb, 1000, 0, 0, TRUE);   set_claim(sb2, 1000, 0, 0, TRUE);   /* 10 m from the listener */
+	set_claim(nd, 500, 0, 0, TRUE);                                        /* PD claims, the sim has nothing for it */
+	/* PC sends no position at all; the sim has one for it. */
+	tone_src tp = { sb, 0 }, ts = { sb2, 0 };
+	tone_prime(&tp);
+	tone_prime(&ts);
+	for(int k = 0; k < 10; k++) {
+		tone_feed(&tp, 1);
+		tone_feed(&ts, 1);
+		janus_slvoice_room_tick(plain);
+		janus_slvoice_room_tick(seen);
+		fake_now_us += TICK_US;
+	}
+	CHECK(la->pos.ticks_observed == 0 && la2->pos.ticks_observed == 0 && seen->pos_stats.would_clamp_ticks == 0,
+		"before any peer_pos, nothing is observed anywhere");
+	CHECK(la->last_mix_rms > 0.01 && la->last_mix_rms == la2->last_mix_rms, "and the two rooms mix alike (10 m: audible)");
+	pinfo = info_of(la2);
+	CHECK(jint(json_object_get(pinfo, "pos_observe"), "ticks_observed") == 0
+		&& !strcmp(str_of(json_object_get(pinfo, "pos_observe"), "state"), "none")
+		&& !json_is_true(json_object_get(json_object_get(json_object_get(pinfo, "visibility"), "positions"), "have_batch")),
+		"an old sim: handle_info shows the block, empty");
+	json_decref(pinfo);
+
+	/* The sim says: PA where it claims, PB half a kilometre from its claim, PC somewhere (it sent no position), PD unknown. */
+	r = peer_pos(4004, 1760000000001LL, TRUE, NULL,
+		"\"" PA "\":[0,0,0,800,500],\"" PB "\":[51000,0,0,800,500],\"" PC "\":[200,0,0,800,500]");
+	CHECK(!strcmp(str_of(r, "slvoice"), "applied") && jint(r, "entries") == 3, "the positions are accepted");
+	drop(r);
+	for(int k = 0; k < 20; k++) {
+		tone_feed(&tp, 1);
+		tone_feed(&ts, 1);
+		janus_slvoice_room_tick(plain);
+		janus_slvoice_room_tick(seen);
+		fake_now_us += TICK_US;
+	}
+	CHECK(la->last_mix_rms == la2->last_mix_rms && la->last_mix_rms_l == la2->last_mix_rms_l && la->last_mix_rms_r == la2->last_mix_rms_r
+		&& la->frames_encoded == la2->frames_encoded && la->frames_mixed == la2->frames_mixed,
+		"a source claimed 500 m from where the sim has it: the listener's mix is identical to the room with no positions");
+	CHECK(sb->snap_valid == sb2->snap_valid && sb->snap_sp.x == sb2->snap_sp.x && sb->snap_lp.x == sb2->snap_lp.x
+		&& sb->snap_sp.x == 1000.0, "and the geometry snapshots are untouched");
+	CHECK(la2->pos.would_clamp == 0 && la2->pos.state == SLV_POS_SIM_FRESH && la2->pos.dev_cm == 0.0, "PA matches the sim: no would-clamp");
+	CHECK(sb2->pos.would_clamp == 20 && sb2->pos.would_clamp_max_dev_cm == 50000.0 && sb2->pos.would_clamp_max_excess_cm > 49000.0,
+		"PB is 500 m from the sim's point: counted every tick, with the deviation");
+	CHECK(nc->pos.would_use_sim == 20 && nc->pos.would_clamp == 0, "PC sent no position and the sim has one: would-use-sim");
+	CHECK(nd->pos.no_sim == 20 && nd->pos.no_sim_stale == 0 && nd->pos.state == SLV_POS_SIM_NONE, "PD has no sim point: no-sim");
+	CHECK(la->pos.ticks_observed == 0 && sb->pos.ticks_observed == 0 && plain->pos_stats.would_clamp_ticks == 0,
+		"the room that never received positions counted nothing");
+	CHECK(seen->pos_stats.would_clamp_ticks == 20 && seen->pos_stats.would_use_sim_ticks == 20 && seen->pos_stats.no_sim_ticks == 20
+		&& seen->pos_stats.would_clamp_now == 1 && seen->pos_stats.would_use_sim_now == 1 && seen->pos_stats.no_sim_now == 1,
+		"the room's totals and its last-tick gauges agree");
+	pinfo = info_of(sb2);
+	{
+		json_t *po = json_object_get(pinfo, "pos_observe");
+		json_t *pj = json_object_get(json_object_get(pinfo, "visibility"), "positions");
+		CHECK(jint(po, "would_clamp") == 20 && json_real_value(json_object_get(po, "would_clamp_max_dev_cm")) == 50000.0
+			&& !strcmp(str_of(po, "state"), "fresh") && jint(po, "sim_speed_cms") == 800 && jint(po, "sim_tol_cm") == 500
+			&& json_integer_value(json_array_get(json_object_get(po, "sim_cm"), 0)) == 51000,
+			"handle_info shows the participant's counters and the sim point");
+		CHECK(jint(pj, "would_clamp_ticks") == 20 && jint(pj, "would_use_sim_ticks") == 20 && jint(pj, "no_sim_ticks") == 20
+			&& jint(pj, "would_clamp_now") == 1 && jint(pj, "store_size") == 3 && !strcmp(str_of(pj, "mode"), "observe"),
+			"handle_info shows the room's counters");
+	}
+	json_decref(pinfo);
+
+	/* ---- age: a sample that is not refreshed goes stale ---- */
+	fake_now_us += (gint64)(SLV_POS_STALE_MS + 500) * 1000;
+	for(int k = 0; k < 3; k++) {
+		janus_slvoice_room_tick(seen);
+		fake_now_us += TICK_US;
+	}
+	CHECK(la2->pos.state == SLV_POS_SIM_STALE && la2->pos.no_sim_stale == 3 && la2->pos.no_sim == 3,
+		"six seconds with no refresh: the sim point is stale, counted as no-sim");
+	CHECK(sb2->pos.would_clamp == 20, "a stale point is no longer compared with the claim");
+	r = peer_pos(4004, 1760000000002LL, FALSE, NULL, "\"" PA "\":[0,0,0,800,500]");
+	drop(r);
+	janus_slvoice_room_tick(seen);
+	CHECK(la2->pos.state == SLV_POS_SIM_FRESH, "a refresh makes it fresh again");
+
+	free_session(la);
+	free_session(sb);
+	free_session(la2);
+	free_session(sb2);
+	free_session(nc);
+	free_session(nd);
+}
+
 int main(void) {
 	rooms = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 	sessions = g_hash_table_new(NULL, NULL);
@@ -1021,6 +1246,7 @@ int main(void) {
 	test_shadow_mode();
 	test_prejoin_and_rejoin();
 	test_replies();
+	test_peer_pos();
 
 	gateway = NULL;
 	janus_slvoice_teardown();

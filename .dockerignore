@@ -29,6 +29,7 @@ env.sample
 tests/test_sldata
 tests/test_mix
 tests/test_visbatch
+tests/test_possync
 tests/test_roster
 
 # Not needed at build time
