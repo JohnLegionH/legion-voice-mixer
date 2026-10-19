@@ -672,6 +672,15 @@ class Admin:
             raise Fail(f"{request.get('request')} refused by the Admin API", data.get("error"))
         return data.get("response") or {}
 
+    async def peer_pos(self, room: int, seq: int, pos: dict, full: bool = True, epoch: str | None = None,
+                       mode: str = "observe") -> dict:
+        """The sim's peer_pos (PositionBatchSerializer.BuildRequest + the sink's room_epoch stamp): `pos` maps an agent UUID
+        to [x_cm, y_cm, z_cm, speed_cm_s, tolerance_cm], global centimetres."""
+        request = {"request": "peer_pos", "room": room, "seq": seq, "full": full, "mode": mode, "pos": pos}
+        if epoch is not None:
+            request["room_epoch"] = epoch
+        return await self.plugin_request(request)
+
     async def heartbeat(self, epoch: str, rooms: dict, interval_ms: int = 1000, stopping: bool = False,
                         feed_age_ms: int | None = None) -> dict:
         """The 0.2 sim's peer_ctl_heartbeat (VisAuthority.BuildHeartbeat): rooms is {room: {"policy_generation": g,
@@ -727,6 +736,57 @@ class BatchResender:
 
     def resume(self) -> None:
         self._running.set()
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:
+                pass
+            self._task = None
+
+
+class PosFeeder:
+    """Acts as the sim's position feed (vis_protocol 3): re-sends the full snapshot of one room's positions every
+    `period` seconds with a rising seq, as the sim's keep-alive does. `points` maps display -> (x, y, z) METRES,
+    the frame the harness peers send_geometry in; the wire carries centimetres."""
+
+    def __init__(self, admin: Admin, room: int, points: dict, speed_cms: int = 800, tol_cm: int = 500,
+                 period: float = 0.5, seq_base: int | None = None):
+        self._admin = admin
+        self._room = room
+        self.points = dict(points)
+        self._speed = speed_cms
+        self._tol = tol_cm
+        self._period = period
+        self._seq = (seq_base if seq_base is not None else int(time.time() * 1000))
+        self._task: asyncio.Task | None = None
+        self.sent = 0
+        self.last_response: dict | None = None
+        self.last_error: str | None = None
+
+    def body(self) -> dict:
+        return {display: [round(x * 100), round(y * 100), round(z * 100), self._speed, self._tol]
+                for display, (x, y, z) in self.points.items()}
+
+    async def send_once(self) -> dict:
+        self._seq += 1
+        self.last_response = await self._admin.peer_pos(self._room, self._seq, self.body())
+        self.sent += 1
+        return self.last_response
+
+    def start(self) -> "PosFeeder":
+        self._task = asyncio.create_task(self._loop(), name="pos-feeder")
+        return self
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self.send_once()
+            except Exception as e:
+                self.last_error = repr(e)
+            await asyncio.sleep(self._period)
 
     async def stop(self) -> None:
         if self._task is not None:

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from tests.integration.harness import (AUDIBLE_MIN_RATIO, MEDIA_SETTLE_S, POLL_STEP, POLL_TIMEOUT, BatchResender, Ctx, Fail,
-                                       Heartbeater, Skip, TestPeer, displays,
+                                       Heartbeater, PosFeeder, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
                                        wait_mixer_up, mint_cap)
 from tests.integration.source_oracle import expected_path, own_candidates, parse_pair, verdict
@@ -557,9 +557,9 @@ async def s15_shadow_mode(ctx: Ctx) -> None:
                          and i.get("vis_row") == 1, "never armed: would_silence_listeners 2, would_silence_pairs 2, A in row 1")
 
     old = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: []}, mute={a.display: []})
-    if old.get("slvoice") != "applied" or old.get("vis_protocol") != 2 or not re.fullmatch(r"[0-9a-f]{16}", old.get("mixer_instance") or "") \
+    if old.get("slvoice") != "applied" or old.get("vis_protocol") != 3 or not re.fullmatch(r"[0-9a-f]{16}", old.get("mixer_instance") or "") \
             or "status" in old:
-        raise Fail("an unstamped (old-sim) batch is applied; the reply advertises vis_protocol 2 and a mixer_instance, no status", old)
+        raise Fail("an unstamped (old-sim) batch is applied; the reply advertises vis_protocol 3 and a mixer_instance, no status", old)
 
     e1 = _epoch(1)
     armed = await ctx.admin.peer_ctl_batch(r, "replace", excl={a.display: [], b.display: []},
@@ -568,7 +568,7 @@ async def s15_shadow_mode(ctx: Ctx) -> None:
                  slvoice="applied", status="ok", authority_epoch=e1, policy_generation=1)
     hb = await ctx.admin.heartbeat(e1, {r: {"policy_generation": 1, "listeners": {a.display: 1, b.display: 1}}})
     room = (hb.get("rooms") or {}).get(str(r)) or {}
-    if hb.get("slvoice") != "heartbeat" or hb.get("vis_protocol") != 2 or hb.get("mixer_instance") != old.get("mixer_instance") \
+    if hb.get("slvoice") != "heartbeat" or hb.get("vis_protocol") != 3 or hb.get("mixer_instance") != old.get("mixer_instance") \
             or room.get("status") != "ok" or room.get("unarmed_listeners") or room.get("stale_listeners"):
         raise Fail("a matching heartbeat: status ok, nothing stale or unarmed, the same mixer_instance", hb)
     await ctx.until_info(a, lambda i: _vis(i).get("would_silence_listeners") == 0 and _vis(i).get("would_silence_pairs") == 0
@@ -2421,6 +2421,221 @@ async def s48_three_way_group_room_turn_taking(ctx: Ctx) -> None:
 
 
 
+# ---- S50-S54: the sim's positions (peer_pos, vis_protocol 3), OBSERVED only --------------------------------------------
+# The harness acts as the sim (PosFeeder). Nothing here may change what a listener hears: every audio assertion compares
+# a room that receives positions with one that does not, or asserts the level the claim alone would give.
+
+def _obs(info) -> dict:
+    """handle_info's pos_observe block: what the sim's position for this participant, against its claim, would change."""
+    return (info or {}).get("pos_observe") or {}
+
+
+def _room_pos(info) -> dict:
+    """handle_info's visibility.positions block: the room's request counters and observe totals."""
+    return ((info or {}).get("visibility") or {}).get("positions") or {}
+
+
+def _geometry_seen(i) -> bool:
+    return {"sp", "lp"} <= fields(i.get("last_data_fields_seen"))
+
+
+async def _levels(ctx: Ctx, peer, samples: int = 10, gap: float = 0.1) -> tuple:
+    """The median of `samples` reads of the listener's mixed-output level and its two channels."""
+    import statistics
+    rows = []
+    for _ in range(samples):
+        i = await ctx.info(peer) or {}
+        rows.append((i.get("last_mix_rms") or 0.0, i.get("last_mix_rms_l") or 0.0, i.get("last_mix_rms_r") or 0.0))
+        await asyncio.sleep(gap)
+    return tuple(statistics.median(col) for col in zip(*rows))
+
+
+def _same_mix(x: tuple, y: tuple) -> bool:
+    """Two median levels are the same mix: both audible, within 15 %, and panned to the same side."""
+    return (x[0] > 0.01 and y[0] > 0.01 and abs(x[0] - y[0]) <= 0.15 * max(x[0], y[0])
+            and (x[1] > x[2]) == (y[1] > y[2]))
+
+
+async def s50_positions_match_the_claims(ctx: Ctx) -> None:
+    """The sim reports each avatar exactly where it claims to be. peer_pos is accepted and advertises vis_protocol 3, every
+    participant is observed against a fresh sim point, and nothing is counted as a deviation."""
+    r = ctx.new_room()
+    a = await ctx.join("A", r)
+    b = await ctx.join("B", r)
+    await ctx.ready(a, b)
+    a.send_geometry(128.0, 128.0, 25.0)
+    b.send_geometry(128.0, 138.0, 25.0)
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    await ctx.until_info(b, _geometry_seen, "B's geometry reached the mixer")
+
+    feeder = PosFeeder(ctx.admin, r, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 138.0, 25.0)})
+    first = await feeder.send_once()
+    if (first.get("slvoice") != "applied" or first.get("op") != "pos" or first.get("entries") != 2
+            or first.get("skipped") != 0 or first.get("vis_protocol") != 3):
+        raise Fail("peer_pos is applied with both entries, and the reply advertises vis_protocol 3", first)
+    ctx.background.append(feeder)
+    feeder.start()
+
+    await ctx.until_info(b, lambda i: (_obs(i).get("ticks_observed") or 0) >= 50, "B observed for 50 ticks (a second)")
+    for peer in (a, b):
+        i = await ctx.info(peer)
+        po = _obs(i)
+        if po.get("state") != "fresh" or po.get("would_clamp") != 0 or not 0.0 <= (po.get("dev_cm") or 0.0) <= 1.0:
+            raise Fail(f"{peer.name}: a fresh sim point, no would-clamp, deviation within a centimetre", po)
+    ib = await ctx.info(b)
+    if _obs(ib).get("sim_cm") != [12800, 13800, 2500]:
+        raise Fail("B's sim point is the one the harness sent, in global centimetres", _obs(ib))
+    rp = _room_pos(ib)
+    if (not rp.get("have_batch") or rp.get("store_size") != 2 or rp.get("would_clamp_ticks") != 0
+            or rp.get("no_sim_ticks") != 0 or (rp.get("batches") or 0) < 2):
+        raise Fail("the room reports positions received, two stored, and no deviation counted", rp)
+    levels = await _levels(ctx, a)
+    if levels[0] <= 0.01:
+        raise Fail("B 10 m from A is still audible in A's mix", levels)
+
+
+async def s51_a_far_claim_is_counted_and_changes_no_audio(ctx: Ctx) -> None:
+    """A viewer claims a place far from where the sim has it. The mixer counts would-clamp with the deviation and changes
+    no audio: the listener hears what the claim alone would give, the same as in a room that receives no positions."""
+    r1, r2 = ctx.new_room(), ctx.new_room()
+    a = await ctx.join("A", r1)
+    b = await ctx.join("B", r1)
+    a2 = await ctx.join("A2", r2)
+    b2 = await ctx.join("B2", r2)
+    await ctx.ready(a, b, a2, b2)
+    for p, y in ((a, 128.0), (b, 138.0), (a2, 128.0), (b2, 138.0)):
+        p.send_geometry(128.0, y, 25.0)
+    for p in (a, b, a2, b2):
+        await ctx.until_info(p, _geometry_seen, f"{p.name}'s geometry reached the mixer")
+
+    # Phase 1: the claim puts B 10 m from A; the sim has B 200 m away.
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)})
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(b, lambda i: (_obs(i).get("would_clamp") or 0) >= 25, "B's far claim counted as would-clamp on 25 ticks")
+    po = _obs(await ctx.info(b))
+    if abs((po.get("would_clamp_max_dev_cm") or 0.0) - 20000.0) > 1.0 or (po.get("would_clamp_max_excess_cm") or 0.0) < 19000.0:
+        raise Fail("B is 200 m (20000 cm) from the sim's point and well past the tolerance", po)
+    ao = _obs(await ctx.info(a))
+    if ao.get("would_clamp") != 0:
+        raise Fail("A claims exactly where the sim has it: nothing counted", ao)
+    with_pos, without_pos = await _levels(ctx, a), await _levels(ctx, a2)
+    if not _same_mix(with_pos, without_pos):
+        raise Fail("A hears B at the level the claim alone gives: the same as the room that receives no positions",
+                   {"with_peer_pos": with_pos, "without": without_pos})
+
+    # Phase 2: the sim now has B close to A, and the claim moves B 110 m away (beyond the cull). Correcting the claim would
+    # make B audible; observing must not: both rooms stay silent, exactly 0.
+    feeder.points[b.display] = (128.0, 138.0, 25.0)
+    await feeder.send_once()
+    b.send_geometry(128.0, 238.0, 25.0)
+    b2.send_geometry(128.0, 238.0, 25.0)
+    await ctx.until_info(a, lambda i: i.get("last_mix_rms") == 0.0, "B at 110 m is culled for A although the sim has B near")
+    await ctx.until_info(a2, lambda i: i.get("last_mix_rms") == 0.0, "B2 at 110 m is culled for A2")
+    for _ in range(10):
+        if (await ctx.info(a)).get("last_mix_rms") != 0.0:
+            raise Fail("observing the sim's position never un-culls a source the claim puts beyond the cutoff")
+        await asyncio.sleep(0.1)
+    rp = _room_pos(await ctx.info(a))
+    if (rp.get("would_clamp_ticks") or 0) < 25 or (rp.get("would_clamp_max_dev_cm") or 0.0) < 19999.0:
+        raise Fail("the room's totals carry the would-clamp ticks and the largest deviation seen", rp)
+
+
+async def s52_a_viewer_with_no_position_would_use_the_sim(ctx: Ctx) -> None:
+    """A viewer that never sends a position, in a room whose sim reports one for it: would-use-sim is counted for that
+    viewer and not for the one that does send its position."""
+    r = ctx.new_room()
+    a = await ctx.join("A", r)
+    c = await ctx.join("C", r)
+    await ctx.ready(a, c)
+    a.send_geometry(128.0, 128.0, 25.0)
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    feeder = PosFeeder(ctx.admin, r, {a.display: (128.0, 128.0, 25.0), c.display: (128.0, 148.0, 25.0)})
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+
+    await ctx.until_info(c, lambda i: (_obs(i).get("would_use_sim") or 0) >= 25, "C's missing position counted on 25 ticks")
+    ic = await ctx.info(c)
+    if "sp" in fields(ic.get("last_data_fields_seen")):
+        raise Fail("C never sent a position (the premise of this scenario)", pick(ic))
+    po = _obs(ic)
+    if po.get("state") != "fresh" or po.get("would_clamp") != 0 or po.get("dev_cm") != -1.0:
+        raise Fail("C has a fresh sim point and no claim to compare: no would-clamp, no deviation", po)
+    ao = _obs(await ctx.info(a))
+    if ao.get("would_use_sim") != 0 or ao.get("would_clamp") != 0:
+        raise Fail("A sends its position and matches the sim: nothing counted for A", ao)
+    rp = _room_pos(ic)
+    if (rp.get("would_use_sim_ticks") or 0) < 25 or rp.get("would_use_sim_now") != 1:
+        raise Fail("the room counts one viewer without a position, on every tick", rp)
+
+
+async def s53_an_old_sim_changes_nothing(ctx: Ctx) -> None:
+    """A sim that never sends peer_pos: the mixer behaves as it did (S12's audible, culled and re-added), observes nothing,
+    and every reply still advertises vis_protocol 3."""
+    r = ctx.new_room()
+    a = await ctx.join("A", r)
+    b = await ctx.join("B", r)
+    await ctx.ready(a, b)
+    reply = await ctx.admin.peer_ctl_batch(r, "replace")
+    if reply.get("vis_protocol") != 3:
+        raise Fail("a peer_ctl_batch reply advertises vis_protocol 3 (the sim reads this to decide to send peer_pos)", reply)
+    a.send_geometry(128.0, 128.0, 25.0)
+    b.send_geometry(128.0, 138.0, 25.0)
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    await ctx.until_info(a, lambda i: (i.get("last_mix_rms") or 0.0) > 0.01, "B at 10 m is audible")
+    b.send_geometry(128.0, 238.0, 25.0)
+    await ctx.until_info(a, lambda i: i.get("last_mix_rms") == 0.0, "B at 110 m is culled")
+    b.send_geometry(128.0, 148.0, 25.0)
+    await ctx.until_info(a, lambda i: (i.get("last_mix_rms") or 0.0) > 0.01, "B back at 20 m is re-added")
+    for peer in (a, b):
+        i = await ctx.info(peer)
+        po, rp = _obs(i), _room_pos(i)
+        if (po.get("ticks_observed") != 0 or po.get("state") != "none" or po.get("would_clamp") != 0
+                or po.get("would_use_sim") != 0 or po.get("no_sim") != 0):
+            raise Fail(f"{peer.name}: nothing observed without a peer_pos", po)
+        if (rp.get("have_batch") or rp.get("batches") != 0 or rp.get("store_size") != 0 or rp.get("no_sim_ticks") != 0
+                or rp.get("would_clamp_ticks") != 0 or rp.get("would_use_sim_ticks") != 0):
+            raise Fail("the room reports no positions and counts nothing", rp)
+
+
+async def s54_a_full_room_of_110(ctx: Ctx) -> None:
+    """A room at its cap of 110 participants and one peer_pos naming all of them: 110 entries (about 9 KB) apply whole, every
+    participant is observed against a fresh point, 128 entries still apply and 129 are refused whole (too_big)."""
+    r = ctx.new_room()
+    peers: list = []
+    for start in range(0, 110, 11):
+        peers += await asyncio.gather(*(ctx.join_without_media(f"P{n}", r) for n in range(start, start + 11)))
+    await ctx.until_participants(r, lambda rows: len(rows) == 110, "110 participants in the room", timeout=20.0)
+
+    feeder = PosFeeder(ctx.admin, r, {p.display: (100.0 + (n % 11) * 5.0, 100.0 + (n // 11) * 5.0, 25.0) for n, p in enumerate(peers)})
+    reply = await feeder.send_once()
+    if (reply.get("slvoice") != "applied" or reply.get("entries") != 110 or reply.get("skipped") != 0
+            or reply.get("dropped") != 0 or reply.get("vis_protocol") != 3):
+        raise Fail("110 entries apply whole", reply)
+    for probe in (peers[0], peers[55], peers[109]):
+        await until(lambda probe=probe: ctx.admin.handle_info(probe),
+                    lambda i: i is not None and _obs(i).get("state") == "fresh" and (_obs(i).get("ticks_observed") or 0) > 0,
+                    f"{probe.name} observed against a fresh sim point", POLL_TIMEOUT, show=pick)
+    rp = _room_pos(await ctx.admin.handle_info(peers[0]))
+    if rp.get("store_size") != 110 or rp.get("entries_applied") != 110 or rp.get("no_sim_now") != 0:
+        raise Fail("the room holds 110 points and every participant has one", rp)
+
+    padded = {p.display: [0, 0, 0, 800, 500] for p in peers}
+    for _ in range(18):
+        padded[new_display()] = [0, 0, 0, 800, 500]
+    reply = await ctx.admin.peer_pos(r, feeder._seq + 1, padded)
+    if reply.get("slvoice") != "applied" or reply.get("entries") != 128:
+        raise Fail("128 entries (the cap) still apply", reply)
+    padded[new_display()] = [0, 0, 0, 800, 500]
+    reply = await ctx.admin.peer_pos(r, feeder._seq + 2, padded)
+    if reply.get("slvoice") != "error" or reply.get("reason") != "too_big" or reply.get("vis_protocol") != 3:
+        raise Fail("129 entries are refused whole, with the reason, still advertising vis_protocol 3", reply)
+    rp = _room_pos(await ctx.admin.handle_info(peers[0]))
+    if rp.get("store_size") != 128 or (rp.get("process_rejected_too_big") or 0) < 1:
+        raise Fail("the refused request changed nothing and was counted", rp)
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "O-42c presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "O-56", s2_crash_without_leave),
@@ -2502,4 +2717,14 @@ SCENARIOS = [
              "1.1a, Q2", s42_mod_mute_in_an_undeclared_room),
     Scenario("S48", "P1.2G: three peers take turns in an UNDECLARED sim_created group room",
              "P1.2G, 1.1a option (c)", s48_three_way_group_room_turn_taking),
+    Scenario("S50", "sim positions that match the claims: accepted, vis_protocol 3, observed, nothing counted",
+             "peer_pos, vis_protocol 3, observe only", s50_positions_match_the_claims),
+    Scenario("S51", "a far claim is counted as would-clamp with its deviation and changes no audio",
+             "peer_pos observe: would-clamp, audio identical to a room without positions", s51_a_far_claim_is_counted_and_changes_no_audio),
+    Scenario("S52", "a viewer with no position, where the sim has one: would-use-sim counted",
+             "peer_pos observe: would-use-sim", s52_a_viewer_with_no_position_would_use_the_sim),
+    Scenario("S53", "an old sim (no peer_pos): behaviour as before, nothing observed, vis_protocol 3 advertised",
+             "peer_pos skew: old sim, new mixer", s53_an_old_sim_changes_nothing),
+    Scenario("S54", "a full room of 110: one peer_pos of 110 entries applies whole; 128 apply, 129 are refused",
+             "peer_pos size limits at the room cap", s54_a_full_room_of_110),
 ]
