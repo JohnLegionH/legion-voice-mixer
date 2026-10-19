@@ -539,7 +539,7 @@ confirmed within the staleness window.
 
 **Shadow mode (`0`, the default): everything is tracked and nothing is refused.** Every batch applies exactly as
 before, and joins, the mix, presence, the roster and dots are unchanged. What does change:
-- every `peer_ctl_batch` reply carries `vis_protocol: 2` and `mixer_instance`, a random id per process, after its
+- every `peer_ctl_batch` reply carries `vis_protocol: 3` and `mixer_instance`, a random id per process, after its
   existing keys;
 - the plugin answers `peer_ctl_heartbeat` instead of `unknown_request`;
 - the room-create log line ends `vis_authority=true|false`;
@@ -552,9 +552,26 @@ before, and joins, the mix, presence, the roster and dots are unchanged. What do
 - they count only rooms created with `vis_authority`. In steady state they read 0; a joiner is counted until its
   arming lands.
 
+**Sim positions (`peer_pos`, `vis_protocol` 3), observe only.** A simulator that knows where each avatar is can send the
+mixer an admin request, `peer_pos`, naming per participant a global-centimetre point, a speed allowance (cm/s) and a
+tolerance (cm); the sim sends it only after a reply has advertised `vis_protocol` 3 or higher. The mixer stores the
+points per room and, on every mix tick, compares each point with the position the viewer claims in its own SLData
+(`sp`). It counts and changes nothing in the mix:
+- `would_clamp`: the claim is farther from the sim point than the tolerance plus the allowance times the point's age
+  (the mixer's own receive clock), with the largest deviation seen (`would_clamp_max_dev_cm`);
+- `would_use_sim`: the viewer sent no usable position (`sp` or `lp` missing) while a fresh sim point exists;
+- `no_sim`: no sim point, or one older than 6 s (`no_sim_stale` counts the old ones), while the room reports positions.
+
+A room that has never accepted a `peer_pos` is not observed at all, so a sim that never sends it leaves the mixer
+exactly as before. The counters are in `handle_info`: per participant in `plugin_specific.pos_observe` (with the sim
+point and its age), per room in `plugin_specific.visibility.positions` (with the request counters: `batches`,
+`rejected_stale_seq`, `rejected_stale_epoch`, `entries_skipped`, and the process-wide `process_rejected_malformed` and
+`process_rejected_too_big`). A request is refused whole when malformed, over 64 KB or over 128 entries, and a single
+malformed entry is skipped and counted. Enforcement (clamping the claim to the sim point) is not built.
+
 **Start-up lines.**
 - The entrypoint: `vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)`.
-- The plugin: `Visibility authority: vis_protocol 2, mixer_instance <16 hex digits>, JS_VIS_STALE_MS=8000 (minimum
+- The plugin: `Visibility authority: vis_protocol 3, mixer_instance <16 hex digits>, JS_VIS_STALE_MS=8000 (minimum
   7250)`, then `fail-closed DISABLED (shadow mode)` or `fail-closed ENABLED`.
 - With fail-closed on, each room created without `vis_authority` logs `fail-closed enabled but room <id> has no
   vis_authority: NOT enforced` once.

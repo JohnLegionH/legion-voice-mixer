@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from tests.integration.harness import (AUDIBLE_MIN_RATIO, MEDIA_SETTLE_S, POLL_STEP, POLL_TIMEOUT, BatchResender, Ctx, Fail,
-                                       Heartbeater, PosFeeder, Skip, TestPeer, displays,
+                                       Heartbeater, NoMediaPeer, PosFeeder, Skip, TestPeer, displays,
                                        fields, mixer_exec, mixer_logs, mixer_restart, mixer_target, new_display, pick, until,
                                        wait_mixer_up, mint_cap)
 from tests.integration.source_oracle import expected_path, own_candidates, parse_pair, verdict
@@ -2602,11 +2602,37 @@ async def s53_an_old_sim_changes_nothing(ctx: Ctx) -> None:
 
 async def s54_a_full_room_of_110(ctx: Ctx) -> None:
     """A room at its cap of 110 participants and one peer_pos naming all of them: 110 entries (about 9 KB) apply whole, every
-    participant is observed against a fresh point, 128 entries still apply and 129 are refused whole (too_big)."""
+    participant is observed against a fresh point, 128 entries still apply and 129 are refused whole (too_big).
+
+    Needs a wide scratch mixer: every join with an offer binds ports from the RTP range even when no media follows, so it
+    wants a JS_RTP_PORT_RANGE of several hundred ports and a JS_JOIN_MEDIA_TIMEOUT_S of 120 (the first joins must outlive the
+    last). On a mixer with the usual 20 ports it skips. The 110 long-polls need their own connection pool: the shared session
+    allows 100 connections."""
+    import aiohttp
+
+    class _CloseSession:
+        def __init__(self, session):
+            self._session = session
+
+        async def stop(self):
+            await self._session.close()
+
     r = ctx.new_room()
     peers: list = []
-    for start in range(0, 110, 11):
-        peers += await asyncio.gather(*(ctx.join_without_media(f"P{n}", r) for n in range(start, start + 11)))
+    offer = await NoMediaPeer.make_offer()   # one offer for every join: making 110 would dominate the run
+    pool = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0))
+    try:
+        for start in range(0, 110, 10):
+            peers += await asyncio.gather(*(ctx.join_without_media(f"P{n}", r, offer_sdp=offer, http=pool)
+                                            for n in range(start, start + 10)))
+    except RuntimeError as e:
+        if "490" in str(e):
+            raise Skip(f"only {len(peers)} of 110 participants could join: Janus ran out of RTP ports. A scratch mixer for this "
+                       "scenario needs a JS_RTP_PORT_RANGE of several hundred ports (a join with an offer binds ports even "
+                       "when no media follows), and a JS_JOIN_MEDIA_TIMEOUT_S above the time 110 joins take")
+        raise
+    finally:
+        ctx.background.append(_CloseSession(pool))   # after the peers, which stop on it
     await ctx.until_participants(r, lambda rows: len(rows) == 110, "110 participants in the room", timeout=20.0)
 
     feeder = PosFeeder(ctx.admin, r, {p.display: (100.0 + (n % 11) * 5.0, 100.0 + (n // 11) * 5.0, 25.0) for n, p in enumerate(peers)})

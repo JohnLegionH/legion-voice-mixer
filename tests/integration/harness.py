@@ -972,11 +972,14 @@ class NoMediaPeer(Control):
     connectivity check, so setup_media never fires and there is no PeerConnection to hang up."""
 
     def __init__(self, cfg: Config, http: aiohttp.ClientSession, name: str, room: int, display: str,
-                 join_cap: str | None = None, session_id: str | None = None):
+                 join_cap: str | None = None, session_id: str | None = None, offer_sdp: str | None = None):
         super().__init__(cfg, http)
         self.name = name
         self.room = room
         self.display = display
+        #: A stripped offer made once by make_offer and shared, for a scenario that needs many joins quickly (S54). None
+        #: makes this peer's own, as every other scenario does.
+        self.offer_sdp = offer_sdp
         #: What the sim would send on the join; both None is a pre-0.4 join.
         self.join_cap = join_cap
         self.session_id = session_id
@@ -986,18 +989,23 @@ class NoMediaPeer(Control):
     def ids(self) -> tuple:
         return (self._janus.session_id, self._janus.handle_id)
 
-    async def join(self) -> dict:
-        """The join reply, whatever it says: this peer is how a scenario reads a REFUSAL (error_code and the
-        `reason`), where TestPeer.start would raise."""
+    @staticmethod
+    async def make_offer() -> str:
+        """An audio + SLData offer with its ICE candidates stripped, so the peer connection can never come up."""
         pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # host candidates only; see TestPeer
         try:
             pc.addTransceiver("audio", direction="sendrecv")
             pc.createDataChannel("SLData")
             await pc.setLocalDescription(await pc.createOffer())
-            sdp = "\r\n".join(line for line in pc.localDescription.sdp.splitlines()
-                              if not line.startswith(("a=candidate:", "a=end-of-candidates"))) + "\r\n"
+            return "\r\n".join(line for line in pc.localDescription.sdp.splitlines()
+                               if not line.startswith(("a=candidate:", "a=end-of-candidates"))) + "\r\n"
         finally:
             await pc.close()
+
+    async def join(self) -> dict:
+        """The join reply, whatever it says: this peer is how a scenario reads a REFUSAL (error_code and the
+        `reason`), where TestPeer.start would raise."""
+        sdp = self.offer_sdp or await self.make_offer()
         body = {"request": "join", "room": self.room, "display": self.display}
         if self.join_cap is not None:
             body["join_cap"] = self.join_cap
@@ -1079,15 +1087,16 @@ class Ctx:
 
     async def join_without_media(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                                  join_cap: str | None = None, session_id: str | None = None,
-                                 expect_join: bool = True, bare: bool = False) -> NoMediaPeer:
+                                 expect_join: bool = True, bare: bool = False, offer_sdp: str | None = None,
+                                 http: aiohttp.ClientSession | None = None) -> NoMediaPeer:
         """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer).
         With expect_join False the reply is kept on the peer as `.join_reply` instead of raising, which is how a
         scenario reads a refusal's reason."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
         display = display or new_display()
         join_cap, session_id = self._auto_cap(room, display, join_cap, session_id, bare)
-        peer = await NoMediaPeer(self.cfg, self.http, name, room, display,
-                                 join_cap=join_cap, session_id=session_id).open()
+        peer = await NoMediaPeer(self.cfg, http or self.http, name, room, display,
+                                 join_cap=join_cap, session_id=session_id, offer_sdp=offer_sdp).open()
         self.background.append(peer)   # teardown stops it: detach + destroy its Janus session
         data = await peer.join()
         peer.join_reply = data
