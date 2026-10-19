@@ -2217,6 +2217,10 @@ async def s40b_one_authority_control(ctx: Ctx) -> None:
         print("      S43 NOTE: the control did NOT reach 3 armed listeners - read S40 as a harness measurement, not a mixer one")
 
 
+#: S45: how long to let the mix tick run after a row change before sampling last_mix_rms (several 20 ms ticks).
+MIX_AFTER_ROW_S = 0.1
+
+
 async def s45_heartbeat_with_a_stalled_feed(ctx: Ctx) -> None:
     """REGRESSION (V-1b, O-120): a sim whose heartbeat keeps arriving but whose FEEDER has stalled is not live.
 
@@ -2245,6 +2249,10 @@ async def s45_heartbeat_with_a_stalled_feed(ctx: Ctx) -> None:
     await ctx.until_info(l, lambda i: i.get("vis_row") != 4,
                          f"a heartbeat reporting feed_age_ms {stale_ms + 4000} does not keep L live",
                          timeout=max(5.0, stale_ms / 1000.0 + 4.0))
+    # vis_row changes on the tick that applies the stale row, but last_mix_rms is a sample of the mix the PREVIOUS
+    # tick produced. Sampling it on that same poll reads the last audible frame. Let the tick that follows the row
+    # run (the mix tick is 20 ms; this is several of them) and sample after it. The silence assertion stays strict.
+    await asyncio.sleep(MIX_AFTER_ROW_S)
     info = await ctx.info(l)
     v = _vis(info)
     if (v.get("heartbeats_feed_stale") or 0) <= before:
