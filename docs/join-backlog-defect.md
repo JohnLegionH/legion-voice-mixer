@@ -122,7 +122,7 @@ moment their data channel becomes writable, filtered by that listener's own excl
    first matches existing behaviour; the second is safer for moderation but adds a wait. Decide
    explicitly and record it.
 4. **`p->display` validity / duplicate displays.** Skip entries with `display == NULL`, and note the
-   duplicate-display handling already documented (`parcel-voice-semantics.md` §M) applies here too.
+   duplicate-display handling already handled by the roster code applies here too.
 
 ---
 
@@ -154,8 +154,7 @@ and **must be reverted before any viewer commit** — they are diagnostic only, 
 ## Notes on where this record lives
 
 This repo has **no defect-log convention** (no `KnownDefects.md`; `docs/` holds flat topical notes
-and briefs — `phase1-bringup.md`, `docker-notes.md`, `mixer-feed-protocol.md`, etc.). This file
+and briefs — `docker-notes.md`, `mixer-feed-protocol.md`, etc.). This file
 follows that flat convention rather than inventing a heavier structure. It is deliberately **not**
-in `docs/voice/` (the cross-repo-synced directory), because it is mixer-specific and its fix is
-mixer code; it can be folded into `parcel-voice-semantics.md`'s roster/visibility semantics later if
-a synced home is preferred.
+in `docs/voice/` (the design and protocol documents), because it is mixer-specific and its fix is
+mixer code.

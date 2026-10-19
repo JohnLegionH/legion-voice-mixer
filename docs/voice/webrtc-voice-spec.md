@@ -20,7 +20,7 @@
 >   identity. Recording needs an explicit operator opt-in.
 > - **Moderation:** per-parcel moderation mute and mute-everyone, enforced by the mixer.
 >
-> **Phase 0 is enforcing on Legion Grid since 2026-09-19.** The simulator is the authority for who may
+> **Phase 0 is enforcing on the reference grid.** The simulator is the authority for who may
 > hear whom: it arms every listener per room with an epoch and a generation and heartbeats that arming;
 > the mixer silences a listener or source it has not been told to carry (`JS_VIS_FAIL_CLOSED=1`); and a
 > join into such a room requires a sim-minted capability (`JS_JOIN_CAP_REQUIRED=1`). That changes the

@@ -6,7 +6,7 @@ The OpenSim region server is on the same LAN, or on the same PC.
 **You end with:** a self-check board you can compare line for line with the one below, an inbound proof recorded,
 and a first real session in the diagnostics. Anything that differs from the expected board is a real problem.
 
-**Measured on:** Legion Grid, 2026-09-15. Windows 11, Docker Desktop 28.3.0 (WSL2 backend), image `c7b57f56`.
+**Measured on:** a home-hosted grid, 2026-09-15. Windows 11, Docker Desktop 28.3.0 (WSL2 backend), image `c7b57f56`.
 A Linux home server differs in two places, both marked **Linux**.
 
 ---
@@ -17,17 +17,17 @@ A Linux home server differs in two places, both marked **Linux**.
   sees (search "what is my IP" from the LAN). If the router's WAN address starts with `100.64.`–`100.127.`, you are
   behind carrier-grade NAT: no forward can reach you, and the self-check's C1 will FAIL. Ask the ISP for a public
   IPv4, or see section 9.
-- **A DDNS name** that tracks the router's public address (e.g. `yourgrid.ddns.net`), kept current by the router or
+- **A DDNS name** that tracks the router's public address (e.g. `grid.example.org`), kept current by the router or
   a DDNS client.
 - **A fixed LAN address for the host** (a DHCP reservation on the router). This recipe calls it `HOST_LAN_IP`
-  (Legion Grid: `192.168.1.225`).
+  (for example `192.168.0.225`).
 - **Docker:** Docker Desktop with the WSL2 backend (Windows), or Docker Engine with the compose plugin (**Linux**).
 - The two files from the repo, `docker-compose.yml` and `env.sample`, in an empty directory.
 - **A host that will not confine the grid to its slow cores** (Windows 11 with a hybrid Intel CPU: 12th gen or later,
   with P-cores and E-cores). Under sustained heavy load on the host, the default **Balanced** power plan can confine
   **all** runnable work to the E-cores while the P-cores sit idle. The region server, Robust and the mixer's host all
-  stall together. Voice feeders miss their ticks, the watchdog fires, and armed listeners can be silenced. Legion Grid
-  measured it on an i7-12700KF: the four E-cores at 100%, eight P-cores idle, about 100 threads waiting, and delivered
+  stall together. Voice feeders miss their ticks, the watchdog fires, and armed listeners can be silenced. It was
+  measured on an i7-12700KF: the four E-cores at 100%, eight P-cores idle, about 100 threads waiting, and delivered
   CPU down from about 14.5 cores to about 4. It lasted 16 s to 7 min with the load unchanged. It is not the hypervisor
   and not thermal throttling. Both were measured and excluded (ledger O-138). Before you go live, do one of these:
   - a **power-plan step**: change the hybrid scheduling policy of the plan the host runs, or use a plan that does
@@ -52,7 +52,7 @@ NAT loopback (hairpin) on the router is not required: LAN viewers use the privat
 
 ## 3. Host firewall
 
-**Windows** (PowerShell as Administrator). This is the rule Legion Grid runs:
+**Windows** (PowerShell as Administrator). This is the rule to add:
 ```powershell
 New-NetFirewallRule -DisplayName "Legion Voice RTP" -Direction Inbound -Protocol UDP -LocalPort 10000-10200 -Action Allow
 ```
@@ -64,7 +64,7 @@ example:
 ```powershell
 New-NetFirewallRule -DisplayName "OpenSim UDP 9002" -Direction Inbound -Protocol UDP -LocalPort 9002 -Action Allow
 ```
-Legion Grid (2026-09-22): Ebony 9000 and Transylvania 9001 had rules and Elm 9002 did not, so Elm was never reachable
+Example (2026-09-22): regions on ports 9000 and 9001 had rules and the one on 9002 did not, so it was never reachable
 from off the host. It only worked from the host itself, which hides the gap from every local test. When you add a
 region, add its rule in the same step.
 
@@ -79,7 +79,7 @@ random string) and put the same values in the region server's `os-webrtc-janus` 
 
 | Variable | Value for this target | Why |
 |---|---|---|
-| `JS_PUBLIC_HOST` | your DDNS name, e.g. `yourgrid.ddns.net` | the start-up discovers the public address from it (STUN first) |
+| `JS_PUBLIC_HOST` | your DDNS name, e.g. `grid.example.org` | the start-up discovers the public address from it (STUN first) |
 | `JS_PUBLIC_IP` | `HOST_LAN_IP` | kept after the discovered address, so LAN viewers get a LAN candidate |
 | `JS_PUBLIC_IP_DISCOVERY` | `auto` (default) | STUN, then DNS via the resolver below, then the container resolver |
 | `JS_STUN_SERVER` | `stun.l.google.com:19302` (default) | |
@@ -94,9 +94,9 @@ random string) and put the same values in the region server's `os-webrtc-janus` 
 | `ALLOW_INSECURE_DEV` | `false` (default) | never on a reachable host |
 | `JS_RTP_PORT_RANGE` | `10000-10200` | must equal the router forward and the firewall rule |
 | `JS_SERVER_NAME` | any name | shown by `/voice/info` |
-| `JS_HTTP_PORT` | `14223` (Legion Grid uses `24223`) | any free port; the region server's `JanusGatewayURI` must match |
+| `JS_HTTP_PORT` | `14223` | any free port; the region server's `JanusGatewayURI` must match |
 | `JS_HTTP_BASEPATH` | `/voice` (default) | |
-| `JS_ADMIN_PORT` | `14225` (Legion Grid uses `24225`) | the region server's `JanusGatewayAdminURI` must match |
+| `JS_ADMIN_PORT` | `14225` | the region server's `JanusGatewayAdminURI` must match |
 | `JS_ADMIN_BIND` | `HOST_LAN_IP` | publishes the admin port on the LAN address only (the start-up WARNs when unset) |
 | `JS_ADMIN_BASEPATH` | `/voiceAdmin` (default) | |
 | `JS_WS_ENABLED` | `false` | the region server uses HTTP only; this narrows |
@@ -132,7 +132,7 @@ Keep the shipped **published ports**. On Docker Desktop that is the only working
 is also the recommended one (`docs/docker-notes.md` → "Source addresses (A.6)").
 
 **What the network mode means for you.** On **Docker Desktop**, every viewer's packets reach Janus from the Docker
-gateway (measured: `172.23.0.1`), not from the viewer's address. Media is unaffected, but the session diagnostics can
+gateway (measured: `172.30.0.1`), not from the viewer's address. Media is unaffected, but the session diagnostics can
 never tell a relayed viewer from a direct one, and show `undetermined`. On a **Linux** home server the viewer's address
 arrives and the diagnostics show `direct`.
 
@@ -158,13 +158,13 @@ Not seen on Linux hosts, but never measured there across a restart.
 docker compose logs janus | grep '^\[selfcheck\]'
 ```
 
-This is Legion Grid's board from 2026-09-15, abridged to the status lines and the key observations:
+This is a home-hosted grid's board from 2026-09-15, abridged to the status lines and the key observations:
 
 ```
 [selfcheck] C1  PASS         advertised address is public
-[selfcheck]     observed: nat_1_1_mapping 174.82.163.190,192.168.1.225; public: 174.82.163.190 (discovered by stun)
+[selfcheck]     observed: nat_1_1_mapping 198.51.100.77,192.168.0.225; public: 198.51.100.77 (discovered by stun)
 [selfcheck] C2a WARN         media path, outbound: UDP mapping from the RTP range (information)
-[selfcheck]     observed: container-initiated UDP is source-port remapped; ... local 10000 -> 174.82.163.190:63888; ...
+[selfcheck]     observed: container-initiated UDP is source-port remapped; ... local 10000 -> 198.51.100.77:63888; ...
 [selfcheck] C2b INCONCLUSIVE media path, inbound: UDP from outside reaches the RTP range
 [selfcheck] C3  PASS         RTP port range is bindable and matches Janus
 [selfcheck] C4  PASS         signalling: HTTP transport answers
@@ -206,12 +206,12 @@ your network**. The token and port below are examples; use the ones it prints.
   3. Keep the page open for 20 s. It uses the browser's own WebRTC to send ICE connectivity checks carrying the
      probe to the port. Nothing is installed and nothing is loaded from anywhere.
 
-  **Status:** verified on Legion Grid with desktop Chrome, which got `PASS: the probe arrived on UDP 10000`. **Not
+  **Status:** verified on a home-hosted grid with desktop Chrome, which got `PASS: the probe arrived on UDP 10000`. **Not
   yet tried on a real phone:** whether Android Chrome or iOS Safari open a pasted `data:` link is untested. If yours
   refuses it, use one of the command forms from any machine off your network.
 
 **Success:** `[selfcheck-listen] PASS: the probe arrived on UDP 10000 from <source> at <time>`, and the receipt is
-recorded. On Docker Desktop the source is always `172.23.0.1` (section 5), which is expected.
+recorded. On Docker Desktop the source is always `172.30.0.1` (section 5), which is expected.
 
 **Send it from outside.** A device on your own Wi-Fi can reach the public address through router hairpin and pass
 without proving the forward. Then run the self-check again:

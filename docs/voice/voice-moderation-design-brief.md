@@ -6,7 +6,7 @@ build, not any release as of 7.2.4. Open Question 1 unanswered; Open Question 2 
 answered by the verification run.
 **Date:** 2026-08-21.
 **Basis:** CC recon 2026-08-21 against `tranquillity-develop` at `392c0efc1d` (*test(voice):
-engine coverage for the §E TaxFree ban path*) and `D:\phoenix-firestorm` (read-only
+engine coverage for the §E TaxFree ban path*) and the Firestorm viewer source (read-only
 reference); SL viewer release notes 26.1.0 and 26.2.0.
 **Target:** parity with the voice moderation LL shipped in viewer 26.1, Dec 2025.
 
@@ -253,7 +253,7 @@ behaviour, orthogonal to this work, and not introduced by the moderation slice.
 
 **The blocked note's diagnosis was wrong.** It concluded the submenu existed in the file and
 was hidden at runtime by a gate returning false, and six rounds of analysis interrogated that
-gate. Every one of those conclusions was correct about the source tree at `D:\phoenix-firestorm`
+gate. Every one of those conclusions was correct about the source tree of the Firestorm viewer
 and irrelevant to the running viewer, which did not contain the feature at all.
 
 **The tell was an absence.** Copy Mention URI and Mention User in Chat have no hiding path in

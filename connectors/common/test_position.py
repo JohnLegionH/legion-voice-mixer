@@ -72,7 +72,7 @@ def _run(coro):
 
 BASE = {"janus_url": "http://janus.test/voice", "api_secret": "", "room": 1234, "display": "npc", "log_level": "INFO"}
 P1 = (25612800, 25612800, 2200)   # (256000 + 128, 256000 + 128, 22) m, a standard region at grid (1000, 1000)
-P2 = (25759800, 25876700, 2500)   # Elm-like: a var region at grid (1004, 1008), Position (574, 719, 25)
+P2 = (25759800, 25876700, 2500)   # a large var region at grid (1004, 1008), Position (574, 719, 25)
 
 
 def test_the_encoder_matches_the_harness_encoder_byte_for_byte():

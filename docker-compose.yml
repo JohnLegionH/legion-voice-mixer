@@ -47,7 +47,7 @@ services:
     # pre-6m publish (docs/docker-notes.md → "Configuration compatibility rule").
     # JS_ADMIN_BIND = the host address the Admin API is published on; unset means
     # all interfaces (the entrypoint WARNs). To narrow, set it to the address in
-    # the sim's JanusGatewayAdminURI (e.g. 192.168.1.225). JS_WS_ENABLED=false
+    # the sim's JanusGatewayAdminURI (e.g. 192.168.0.225). JS_WS_ENABLED=false
     # stops Janus loading the WebSockets transport (the WS mapping then answers
     # nothing; delete that line to unpublish it too).
     ports:

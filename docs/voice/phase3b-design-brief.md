@@ -31,7 +31,7 @@ rewritten.
 **Authority:** `docs/voice/webrtc-voice-spec.md` §5 (`:97`), §6 (`:110`), §7.1
 (`:125`); `docs/voice/mixer-feed-protocol.md` §6 (`:420`–`:436`).
 **Verified against:** `legion-voice-mixer @ c03de3a`, `tranquillity-develop @
-f8fcb34653`, `D:\phoenix-firestorm` (read-only reference).
+f8fcb34653`, the Firestorm viewer source (read-only reference).
 
 ## Purpose
 
@@ -235,7 +235,7 @@ inaudible in casual testing and would silently undo 3a. Re-run the
 ## Open question — non-blocking
 
 **Do neighbour-room handles carry `sp`?** `query_session` exposes
-`last_data_fields_seen` per handle, so this is one read on a Transylvania handle with
+`last_data_fields_seen` per handle, so this is one read on a handle in a neighbouring region with
 avatars online. **The answer does not change this slice:** even if neighbour handles
 carry `sp`, it is in the *neighbour region's* coordinate frame, so cross-region
 spatialisation needs a region-offset transform regardless. This is a second

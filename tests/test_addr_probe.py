@@ -85,12 +85,12 @@ class Stun(unittest.TestCase):
         self.assertEqual(req[8:], TXID)
 
     def test_xor_mapped_address(self):
-        reply = stun_success(TXID, [xor_mapped("174.82.163.190", 65234)])
-        self.assertEqual(addr_probe.parse_stun_response(reply, TXID), "174.82.163.190")
+        reply = stun_success(TXID, [xor_mapped("198.51.100.77", 65234)])
+        self.assertEqual(addr_probe.parse_stun_response(reply, TXID), "198.51.100.77")
 
     def test_mapped_port(self):
-        reply = stun_success(TXID, [xor_mapped("174.82.163.190", 10050)])
-        self.assertEqual(addr_probe.parse_stun_mapped(reply, TXID), ("174.82.163.190", 10050))
+        reply = stun_success(TXID, [xor_mapped("198.51.100.77", 10050)])
+        self.assertEqual(addr_probe.parse_stun_mapped(reply, TXID), ("198.51.100.77", 10050))
         reply = stun_success(TXID, [mapped("198.51.100.4", 20000)])
         self.assertEqual(addr_probe.parse_stun_mapped(reply, TXID), ("198.51.100.4", 20000))
 
@@ -120,9 +120,9 @@ class Stun(unittest.TestCase):
 
 class Dns(unittest.TestCase):
     def test_query_shape(self):
-        q = addr_probe.build_dns_query("legiongrid.ddns.net", 0x1234)
+        q = addr_probe.build_dns_query("grid.example.org", 0x1234)
         self.assertEqual(q[:12], bytes.fromhex("123401000001000000000000"))
-        self.assertEqual(q[12:], dns_name("legiongrid.ddns.net") + b"\x00\x01\x00\x01")
+        self.assertEqual(q[12:], dns_name("grid.example.org") + b"\x00\x01\x00\x01")
 
     def test_bad_names(self):
         for bad in ("", "a..b", "x" * 64 + ".net"):
@@ -130,8 +130,8 @@ class Dns(unittest.TestCase):
                 addr_probe.build_dns_query(bad, 1)
 
     def test_a_record(self):
-        reply = dns_reply(7, "legiongrid.ddns.net", [rr_a("174.82.163.190")])
-        self.assertEqual(addr_probe.parse_dns_response(reply, 7), "174.82.163.190")
+        reply = dns_reply(7, "grid.example.org", [rr_a("198.51.100.77")])
+        self.assertEqual(addr_probe.parse_dns_response(reply, 7), "198.51.100.77")
 
     def test_cname_then_a(self):
         reply = dns_reply(7, "voice.example.test", [rr_cname("edge.example.test"), rr_a("203.0.113.7")])
@@ -352,11 +352,11 @@ class EndToEnd(unittest.TestCase):
     def test_dns_probe(self):
         def answer(query):
             tid = struct.unpack(">H", query[:2])[0]
-            return dns_reply(tid, "legiongrid.ddns.net", [rr_a("174.82.163.190")])
+            return dns_reply(tid, "grid.example.org", [rr_a("198.51.100.77")])
         server = LoopbackServer(answer)
         try:
-            self.assertEqual(addr_probe.dns_probe("legiongrid.ddns.net", "127.0.0.1:%d" % server.port, 2.0),
-                             "174.82.163.190")
+            self.assertEqual(addr_probe.dns_probe("grid.example.org", "127.0.0.1:%d" % server.port, 2.0),
+                             "198.51.100.77")
         finally:
             server.close()
 

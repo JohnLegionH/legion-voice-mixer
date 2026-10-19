@@ -102,7 +102,7 @@ class Base(unittest.TestCase):
                          '\tice_ignore_list = "vmnet"\n}\n' % (rtp, nat))
         return path
 
-    def inbound(self, port=10000, age_s=60, advertised=("174.82.163.190",), now=None, **extra):
+    def inbound(self, port=10000, age_s=60, advertised=("198.51.100.77",), now=None, **extra):
         now = time.time() if now is None else now
         path = os.path.join(self.dir, "selfcheck-inbound.json")
         record = {"schema": 1, "result": PASS, "time": selfcheck.iso(now - age_s), "epoch": int(now - age_s),
@@ -115,9 +115,9 @@ class Base(unittest.TestCase):
 
 class C1(Base):
     def test_public_pass(self):
-        r = selfcheck.check_c1(self.state(["174.82.163.190", "192.168.1.225"]))
+        r = selfcheck.check_c1(self.state(["198.51.100.77", "192.168.0.225"]))
         self.assertEqual(r["status"], PASS)
-        self.assertIn("public: 174.82.163.190 (discovered by stun)", r["observed"])
+        self.assertIn("public: 198.51.100.77 (discovered by stun)", r["observed"])
         self.assertIsNone(r["remediation"])
 
     def test_cgnat_is_its_own_fail(self):
@@ -127,9 +127,9 @@ class C1(Base):
         self.assertIn("TURN", r["remediation"])
 
     def test_private_fail(self):
-        r = selfcheck.check_c1(self.state(["192.168.1.225"]))
+        r = selfcheck.check_c1(self.state(["192.168.0.225"]))
         self.assertEqual(r["status"], FAIL)
-        self.assertIn("has no public address (192.168.1.225 private)", r["observed"])
+        self.assertIn("has no public address (192.168.0.225 private)", r["observed"])
 
     def test_empty_mapping_fail(self):
         self.assertEqual(selfcheck.check_c1(self.state([]))["status"], FAIL)
@@ -138,7 +138,7 @@ class C1(Base):
         self.assertEqual(selfcheck.check_c1(os.path.join(self.dir, "absent.json"))["status"], INCONCLUSIVE)
 
     def test_confirmed_change_warns(self):
-        path = self.state(["174.82.163.190"], running_address="174.82.163.190", observed_address="198.51.100.4",
+        path = self.state(["198.51.100.77"], running_address="198.51.100.77", observed_address="198.51.100.4",
                           agreeing_checks=2)
         self.assertEqual(selfcheck.check_c1(path)["status"], WARN)
 
@@ -202,7 +202,7 @@ class C2a(Base):
 
 class C2b(Base):
     RANGE = "10000-10200"
-    PUBLIC = ["174.82.163.190"]
+    PUBLIC = ["198.51.100.77"]
 
     def run_c2b(self, path, now=None, max_age_h=168, public=None):
         return selfcheck.check_c2b(path, self.RANGE, max_age_h, self.PUBLIC if public is None else public, now)
@@ -251,7 +251,7 @@ class Listen(Base):
         super(Listen, self).setUp()
         self.lo, self.hi = free_udp_range(11)
         self.cfg = {"rtp_range": "%d-%d" % (self.lo, self.hi), "bind_host": "127.0.0.1",
-                    "state_file": self.state(["174.82.163.190", "192.168.1.225"]),
+                    "state_file": self.state(["198.51.100.77", "192.168.0.225"]),
                     "inbound_file": os.path.join(self.dir, "run", "selfcheck-inbound.json"),
                     "inbound_max_age_h": 168.0}
 
@@ -272,15 +272,15 @@ class Listen(Base):
         code = selfcheck.listen(self.cfg, None, 5.0, out, token=self.TOKEN)
         text = out.getvalue()
         self.assertEqual(code, 0, text)
-        self.assertIn("  bash -c 'echo %s > /dev/udp/174.82.163.190/%d'" % (self.TOKEN, self.lo), text)
+        self.assertIn("  bash -c 'echo %s > /dev/udp/198.51.100.77/%d'" % (self.TOKEN, self.lo), text)
         self.assertIn("  python3 -c 'import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM)"
-                      ".sendto(b\"%s\", (\"174.82.163.190\", %d))'" % (self.TOKEN, self.lo), text)
-        self.assertIn("  echo %s | timeout 3 nc -u -w1 174.82.163.190 %d" % (self.TOKEN, self.lo), text)
+                      ".sendto(b\"%s\", (\"198.51.100.77\", %d))'" % (self.TOKEN, self.lo), text)
+        self.assertIn("  echo %s | timeout 3 nc -u -w1 198.51.100.77 %d" % (self.TOKEN, self.lo), text)
         self.assertIn("busybox nc -u -w1 can hang", text)
         self.assertIn("PASS: the probe arrived on UDP %d from 127.0.0.1:" % self.lo, text)
         record = read_json(self.cfg["inbound_file"])
         self.assertEqual((record["result"], record["port"]), (PASS, self.lo))
-        r = selfcheck.check_c2b(self.cfg["inbound_file"], self.cfg["rtp_range"], 168, ["174.82.163.190"])
+        r = selfcheck.check_c2b(self.cfg["inbound_file"], self.cfg["rtp_range"], 168, ["198.51.100.77"])
         self.assertEqual(r["status"], PASS, r["observed"])
 
     def test_the_phone_page_link_carries_the_probe_and_a_browser_check_is_a_receipt(self):
@@ -301,7 +301,7 @@ class Listen(Base):
         self.assertTrue(link.startswith("data:text/html;charset=utf-8,"))
         page = urllib.parse.unquote(link.split(",", 1)[1])
         self.assertIn("a=ice-ufrag:%s" % ufrag, page)
-        self.assertIn("a=candidate:1 1 udp 2130706431 174.82.163.190 %d typ host" % self.lo, page)
+        self.assertIn("a=candidate:1 1 udp 2130706431 198.51.100.77 %d typ host" % self.lo, page)
         self.assertIn("new RTCPeerConnection()", page)
         self.assertNotIn("http", page.replace("http-equiv", ""))   # nothing is loaded from anywhere
         self.assertEqual(read_json(self.cfg["inbound_file"])["result"], PASS)
@@ -402,7 +402,7 @@ class C5(Base):
 
 class C6(Base):
     USER, PWD, KEY = "turn-user-SECRET-u9", "turn-pwd-SECRET-p9", "rest-key-SECRET-k9"
-    PUBLIC_C1 = selfcheck.result("C1", PASS, "public", facts={"public": ["174.82.163.190"], "cgnat": False})
+    PUBLIC_C1 = selfcheck.result("C1", PASS, "public", facts={"public": ["198.51.100.77"], "cgnat": False})
     CGNAT_C1 = selfcheck.result("C1", FAIL, "cgnat", "remedy", facts={"public": [], "cgnat": True})
     PRIVATE_C1 = selfcheck.result("C1", FAIL, "private", "remedy", facts={"public": [], "cgnat": False})
     UNKNOWN_C1 = selfcheck.result("C1", INCONCLUSIVE, "unknown", "remedy", facts={"public": [], "cgnat": False})
@@ -425,7 +425,7 @@ class C6(Base):
     def test_no_turn_public_server_pass(self):
         r = self.run_c6(self.jcfg(), self.PUBLIC_C1)
         self.assertEqual(r["status"], PASS, r["observed"])
-        self.assertIn("publicly reachable per C1 (174.82.163.190)", r["observed"])
+        self.assertIn("publicly reachable per C1 (198.51.100.77)", r["observed"])
         self.assertTrue(any("viewer-side TURN" in n and "(A.4)" in n for n in r["notes"]), r["notes"])
 
     def test_no_turn_cgnat_server_warn(self):
@@ -513,18 +513,18 @@ class C6(Base):
 
 
 class Candidates(Base):
-    LIVE_LOCAL = ["1 1 udp 2015363327 174.82.163.190 10028 typ host", "1 1 udp 2015363327 172.23.0.2 10028 typ host",
-                  "1 1 udp 2015363327 192.168.1.225 10028 typ host"]
-    LIVE_REMOTE = ["a3ea 1 udp 2130706431 192.168.1.225 64602 typ host",
-                   "5253 1 udp 1694498815 174.82.163.190 64602 typ srflx raddr 192.168.1.225 rport 64602",
-                   "remote1 1 udp 1862270975 172.23.0.1 36103 typ prflx raddr 172.23.0.1 rport 36103\r\n"]
+    LIVE_LOCAL = ["1 1 udp 2015363327 198.51.100.77 10028 typ host", "1 1 udp 2015363327 172.30.0.2 10028 typ host",
+                  "1 1 udp 2015363327 192.168.0.225 10028 typ host"]
+    LIVE_REMOTE = ["a3ea 1 udp 2130706431 192.168.0.225 64602 typ host",
+                   "5253 1 udp 1694498815 198.51.100.77 64602 typ srflx raddr 192.168.0.225 rport 64602",
+                   "remote1 1 udp 1862270975 172.30.0.1 36103 typ prflx raddr 172.30.0.1 rport 36103\r\n"]
 
     def admin(self, secret="admin-s3cret"):
         slvoice = {"plugin": "janus.plugin.slvoice", "plugin_specific": {"display": "c7888d9f-66d0", "room": 903},
                    "webrtc": {"ice": {"local-candidates": self.LIVE_LOCAL + [
-                       "2 1 udp 16777215 172.23.0.4 49170 typ relay raddr 172.23.0.2 rport 10028"],
+                       "2 1 udp 16777215 172.30.0.4 49170 typ relay raddr 172.30.0.2 rport 10028"],
                        "remote-candidates": self.LIVE_REMOTE,
-                       "selected-pair": "174.82.163.190:10028 [host,udp] <-> 172.23.0.1:36103 [prflx,udp]"}}}
+                       "selected-pair": "198.51.100.77:10028 [host,udp] <-> 172.30.0.1:36103 [prflx,udp]"}}}
         other = {"plugin": "janus.plugin.echotest", "webrtc": {"ice": {"local-candidates": self.LIVE_LOCAL}}}
         return self.track(fakes.FakeJanusAdmin({1385: {2868: slvoice, 2869: other}}, secret=secret))
 
@@ -641,8 +641,8 @@ class WholeRun(Base):
         --listen, C2b is INCONCLUSIVE (exit 2); with an outside receipt the worst status is C2a's WARN (exit 0)."""
         lo, hi = free_udp_range(21)
         janus = self.track(fakes.FakeJanusHTTP())
-        stun = self.track(fakes.FakeStun(lambda ip, port: ("174.82.163.190", 50000 + (port % 1000))))
-        cfg = self.cfg(lo, hi, stun, janus.port, fakes.closed_tcp_port(), ["174.82.163.190", "192.168.1.225"])
+        stun = self.track(fakes.FakeStun(lambda ip, port: ("198.51.100.77", 50000 + (port % 1000))))
+        cfg = self.cfg(lo, hi, stun, janus.port, fakes.closed_tcp_port(), ["198.51.100.77", "192.168.0.225"])
 
         before = selfcheck.run_checks(cfg, selfcheck.Budget(10))
         status = dict((r["id"], r["status"]) for r in before)
@@ -651,7 +651,7 @@ class WholeRun(Base):
         self.assertNotIn(status["C6"], (WARN, FAIL))
         self.assertEqual(selfcheck.exit_code_for(before), 2)
 
-        cfg["inbound_file"] = self.inbound(port=lo, advertised=["174.82.163.190"])
+        cfg["inbound_file"] = self.inbound(port=lo, advertised=["198.51.100.77"])
         after = selfcheck.run_checks(cfg, selfcheck.Budget(10))
         report = selfcheck.build_report(after, "on-demand", "now", 1.0, 10)
         self.assertEqual((report["verdict"], report["exit_code"], report["summary"]["fail"]), (WARN, 0, 0))

@@ -13,7 +13,7 @@ not repeated here.
 
 | | |
 |---|---|
-| Tree | `D:\tranquillity-develop` |
+| Tree | `tranquillity-develop` |
 | Branch | `feature/membership-tiers` |
 | Commit | `0bdeb0bf08cb1f5c9921f28b0293a5d82eba9cea` (`0bdeb0bf08`) |
 | Commit date | 2026-08-12 17:57:42 -0500 |

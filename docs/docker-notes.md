@@ -101,8 +101,8 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   JS_ADMIN_SECRET only — firewall the port or set JS_ADMIN_BIND to the address the
   regionserver uses.` To narrow, set `JS_ADMIN_BIND` to the host address in the
   sim's `JanusGatewayAdminURI`. The sim uses that address even when it runs on the
-  same host (Legion Grid: `http://192.168.1.225:24225/voiceAdmin` →
-  `JS_ADMIN_BIND=192.168.1.225`), and on a production server it is a different host.
+  same host (for example `http://192.168.0.225:24225/voiceAdmin` →
+  `JS_ADMIN_BIND=192.168.0.225`), and on a production server it is a different host.
   So `127.0.0.1` cuts the sim off: its visibility/moderation `peer_ctl_batch` calls
   are refused. That was the slice-6m regression that hotfix 6m-1 reverted. The HTTP
   signalling port stays on all interfaces: the sim and the connectors use it, and
@@ -677,8 +677,8 @@ its knobs have no "before".
 | `JS_JOIN_CAP_REQUIRED` | `0` (shadow) | the plugin join was ungated: anything holding `JS_API_SECRET` could join any room as any avatar (ledger O-46). `0` keeps that exactly, and verifies and counts any capability that arrives. `1` requires a valid sim-issued capability to join a room created with `vis_authority`, and changes nothing in any other room. Environment only: no generated config changes either way | slice 0.4 |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | n/a (no capability). The HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, deliberately **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start | slice 0.4 |
 
-**Live state on Legion Grid, 2026-09-19 (slice 0.9b):** `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1`,
-both set in the mixer's `.env` and in force since 15:54:43Z. Rollback for either is the same: remove the line and
+**Example deployment (slice 0.9b):** `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1`,
+both set in the mixer's `.env`. Rollback for either is the same: remove the line and
 recreate the container; the sim needs no change.
 
 | `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
@@ -829,7 +829,7 @@ operator knobs.
 For outside testers, the server must advertise a reachable public address in its
 ICE candidates (`nat_1_1_mapping`). Two knobs support this:
 
-- **`JS_PUBLIC_HOST`**: a DNS/DDNS hostname (e.g. `legiongrid.ddns.net`). `JS_PUBLIC_IP` may
+- **`JS_PUBLIC_HOST`**: a DNS/DDNS hostname (e.g. `grid.example.org`). `JS_PUBLIC_IP` may
   also hold one when `JS_PUBLIC_HOST` is unset. `nat_1_1_mapping` needs an **IP literal**, so the
   entrypoint **discovers the name's public address at start** (slice A.1).
 
@@ -841,17 +841,17 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
   2. **DNS against `JS_PUBLIC_IP_DNS_RESOLVER`** (default `1.1.1.1`), sent straight to that
      resolver.
   3. **The container resolver,** last. A router that hairpins its own DDNS name, or a
-     split-horizon/hosts pin, answers it with the LAN address. Legion Grid: `legiongrid.ddns.net`
-     → `192.168.1.225`, which is why the pre-A.1 resolution produced a private-only mapping.
+     split-horizon/hosts pin, answers it with the LAN address. For example `grid.example.org`
+     → `192.168.0.225`, which is why the pre-A.1 resolution produced a private-only mapping.
 
   **Winner.** The first public answer wins. If no source gives a public answer, the first answer of
   any kind is used and the verdict says so. The start log reads:
 
   ```
-  [entrypoint] INFO: discovery source stun (stun.l.google.com:19302) -> 174.82.163.190 (public)
-  [entrypoint] INFO: discovery source dns (resolver 1.1.1.1) -> 174.82.163.190 (public)
-  [entrypoint] INFO: discovery source container (container resolver) -> 192.168.1.225 (private)
-  [entrypoint] INFO: discovery winner: stun -> 174.82.163.190
+  [entrypoint] INFO: discovery source stun (stun.l.google.com:19302) -> 198.51.100.77 (public)
+  [entrypoint] INFO: discovery source dns (resolver 1.1.1.1) -> 198.51.100.77 (public)
+  [entrypoint] INFO: discovery source container (container resolver) -> 192.168.0.225 (private)
+  [entrypoint] INFO: discovery winner: stun -> 198.51.100.77
   ```
 
   **Other modes.** `stun` and `dns` use that source only. `static` uses the container resolver
@@ -959,25 +959,25 @@ Janus's selected pair is compared with the addresses the peer holds. The Linux c
 
 | Case | Janus's selected pair (local <-> remote) | Source address | Diagnostics path |
 |---|---|---|---|
-| (a) published ports, **Docker Desktop 28.3.0 on Windows (WSL2)**, peer on the host | `174.82.163.190:10074 [prflx,udp] <-> 172.23.0.1:60319 [prflx,udp]` | **rewritten** to the Docker network gateway | `undetermined` |
+| (a) published ports, **Docker Desktop 28.3.0 on Windows (WSL2)**, peer on the host | `198.51.100.77:10074 [prflx,udp] <-> 172.30.0.1:60319 [prflx,udp]` | **rewritten** to the Docker network gateway | `undetermined` |
 | (a) published ports, **Linux dockerd 28.3.0**, userland proxy on (default) | `172.31.66.10:10005 [prflx,udp] <-> 172.31.66.20:35374 [host,udp]` | **preserved** | `direct` |
 | (b) published ports, Linux dockerd, `userland-proxy: false` | `172.31.66.10:10001 [prflx,udp] <-> 172.31.66.20:40854 [host,udp]` | **preserved** | `direct` |
 | (c) `network_mode: host`, Linux dockerd | `172.31.66.10:10019 [host,udp] <-> 172.31.66.20:44865 [host,udp]` | **preserved** | `direct` |
 
-The Docker Desktop row ran against the live Legion Grid mixer (image `1e40da39`); the classifier reads prflx on the
+The Docker Desktop row ran against a production mixer (image `1e40da39`); the classifier reads prflx on the
 peer's side as `undetermined` in both images. An earlier pass of the three Linux cases with the A.5 image found the
 same pairs' shape (prflx/host, prflx/host, host/host), which that image's classifier still called `undetermined` for
 (a) and (b). That underclaim is why A.6 changed the classifier.
 
 **What this means:**
 - **It is not a container limitation. It is Docker Desktop's.** Docker Desktop forwards a published port from
-  Windows into its VM with its own proxy, and every viewer then reaches Janus from `172.23.0.1`. A Linux host's
+  Windows into its VM with its own proxy, and every viewer then reaches Janus from `172.30.0.1`. A Linux host's
   published ports use DNAT, and the viewer's own address arrives. Janus's *local* side still reads prflx there,
   because the DNAT changes Janus's address, not the peer's; the classifier reads the peer's side (A.6).
 - **Product limitation on Docker Desktop:** no per-viewer address reaches the mixer, so the diagnostics path is
   always `undetermined` and relay cannot be told from direct. Media works regardless.
 - **Not measured:** (b) and (c) on Docker Desktop. Each needs an engine restart, which would have stopped the
-  Legion Grid databases on the same engine. A viewer on the *same* Linux host as the mixer (loopback or hairpin,
+  other databases on the same engine. A viewer on the *same* Linux host as the mixer (loopback or hairpin,
   where the userland proxy is involved) was not measured either.
 
 **Costs of each mode:**

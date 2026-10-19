@@ -190,7 +190,6 @@ vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
 ## `docs/` is the authority
 
 - `docs/voice/webrtc-voice-spec.md` — the Second Life WebRTC voice protocol spec.
-- `docs/voice/parcel-voice-semantics.md` — OpenSim parcel/estate/presence voice semantics.
 - `docs/voice/current-architecture.md` — current OpenSim C# voice implementation
   (incl. the **§3 message table** that fixes the wire shapes this plugin accepts).
 - `docs/protocol-compat.md` — the audiobridge-superset compatibility constraint
@@ -198,22 +197,18 @@ vendor/janus-gateway      Janus submodule, pinned @ v1.4.1
 - `docs/docker-notes.md` — image/config-precedence details, the configuration
   compatibility rule and knob register, and divergences from
   `Misterblue/os-webrtc-janus-docker`.
-- `docs/RELEASES.md` — every deployed release with its O-items, behaviour changes
-  on upgrade and one-time migrations.
+- `docs/RELEASES.md` — release notes: behaviour changes on upgrade and one-time
+  migrations.
 - `docs/sldata-extensions.md` — the data-channel SLData field set, per-source
   mute/gain, and the slvoice `echo` diagnostic extension.
 - `docs/voice-mute-wiring.md` — how the moderation mute channel is wired.
-- `docs/phase1-bringup.md` — the original in-world bring-up runbook (CHECK 1
-  session holds, CHECK 2 echo, CHECK 3 two-party mix); still the reference for
-  diagnosing a single viewer.
 - `tests/integration/README.md` — the two-peer integration harness and its
   scenarios.
 
-> The OpenSim C# surveys and the voice programme ledger live in `docs/voice/`
-> (mirrored from the sim tree); the other docs are maintained here. The plugin
-> was reconciled against them: message shapes/error codes against
-> `current-architecture.md` §3, and the SLData field set / Opus fmtp against
-> `webrtc-voice-spec.md` §9/§6/§4.2.
+> The design and protocol documents live in `docs/voice/`. Internal records are kept
+> outside this repository. The plugin was reconciled against them: message
+> shapes/error codes against `current-architecture.md` §3, and the SLData field set /
+> Opus fmtp against `webrtc-voice-spec.md` §9/§6/§4.2.
 
 ## License
 

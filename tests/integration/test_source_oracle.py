@@ -20,7 +20,7 @@ OFFER = "\r\n".join([
     "m=audio 9 UDP/TLS/RTP/SAVPF 96",
     "a=candidate:1 1 udp 2130706431 10.1.0.95 51000 typ host",
     "a=candidate:2 1 udp 2130706431 172.17.0.1 51001 typ host",
-    "a=candidate:3 1 udp 2130706431 172.18.0.1 51002 typ host",
+    "a=candidate:3 1 udp 2130706431 172.28.0.1 51002 typ host",
     "a=candidate:4 1 udp 1694498815 203.0.113.9 62000 typ srflx raddr 10.1.0.95 rport 51000",
     "a=end-of-candidates",
     "",
@@ -38,10 +38,10 @@ class Verdict(unittest.TestCase):
     def test_parses_the_offer_with_ports(self):
         self.assertEqual([(c["address"], c["port"], c["type"]) for c in self.own],
                          [("10.1.0.95", 51000, "host"), ("172.17.0.1", 51001, "host"),
-                          ("172.18.0.1", 51002, "host"), ("203.0.113.9", 62000, "srflx")])
+                          ("172.28.0.1", 51002, "host"), ("203.0.113.9", 62000, "srflx")])
 
     def test_preserved_ip_and_port(self):
-        truth = verdict(self.own, pair("172.18.0.1:51002"))
+        truth = verdict(self.own, pair("172.28.0.1:51002"))
         self.assertEqual((truth["verdict"], truth["branch"]), ("preserved", "own-endpoint"))
         self.assertTrue(truth["remote_endpoint_is_peers_own"])
         self.assertEqual(expected_path(truth), "direct")
@@ -53,7 +53,7 @@ class Verdict(unittest.TestCase):
 
     def test_gateway_ip_owned_by_the_peer_with_a_foreign_port(self):
         # The CI case: docker-proxy re-sends from the bridge gateway, one of A's own addresses, on its own port.
-        truth = verdict(self.own, pair("172.18.0.1:33673"))
+        truth = verdict(self.own, pair("172.28.0.1:33673"))
         self.assertEqual((truth["verdict"], truth["branch"]), ("rewritten", "own-address-foreign-port"))
         self.assertTrue(truth["remote_address_is_peers_own"])
         self.assertFalse(truth["remote_endpoint_is_peers_own"])
@@ -61,7 +61,7 @@ class Verdict(unittest.TestCase):
 
     def test_own_port_on_another_of_the_peers_addresses_is_foreign(self):
         # the right port on the wrong interface is still not an endpoint A signalled
-        truth = verdict(self.own, pair("172.18.0.1:51000"))
+        truth = verdict(self.own, pair("172.28.0.1:51000"))
         self.assertEqual(truth["verdict"], "rewritten")
 
     def test_foreign_ip(self):
@@ -86,8 +86,8 @@ class Retarget(unittest.TestCase):
         "v=0",
         "c=IN IP4 127.0.0.1",
         "a=candidate:1 1 udp 2015363327 127.0.0.1 10097 typ host",
-        "a=candidate:2 1 udp 2015363071 172.18.0.2 10097 typ host",
-        "a=candidate:3 1 udp 2015362815 172.18.0.2 10098 typ host",
+        "a=candidate:2 1 udp 2015363071 172.28.0.2 10097 typ host",
+        "a=candidate:3 1 udp 2015362815 172.28.0.2 10098 typ host",
         "a=end-of-candidates",
         "",
     ])
@@ -107,7 +107,7 @@ class Retarget(unittest.TestCase):
         self.assertEqual(out.count("a=candidate:"), 2)
 
     def test_trickle_candidate_without_the_a_prefix(self):
-        self.assertEqual(retarget_candidate("candidate:9 1 udp 1 172.18.0.2 10099 typ host", "10.1.0.95"),
+        self.assertEqual(retarget_candidate("candidate:9 1 udp 1 172.28.0.2 10099 typ host", "10.1.0.95"),
                          "candidate:9 1 udp 1 10.1.0.95 10099 typ host")
 
 

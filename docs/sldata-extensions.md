@@ -194,7 +194,7 @@ a normal viewer hears itself without any special client:
 - or plugin jcfg: `general.echo_autostart = true`
 
 Default is **off**. The runtime `{"echo":true}`/`{"echo":false}` toggle still
-works regardless of this setting. See `docs/phase1-bringup.md`.
+works regardless of this setting.
 
 ## What's implemented (1.1.0) and what is not
 
@@ -227,4 +227,4 @@ batch `{ "<uuid>": {"p":<level*128>,"v":<VAD>} }`.
 **Not implemented:**
 - HRTF, ITD, distance tiers and azimuth binning.
 - The `diag` state member pushed on the **data channel** (§4.1). Diagnostics are
-  exposed via `query_session` / the admin API (see `docs/phase1-bringup.md`).
+  exposed via `query_session` / the admin API.

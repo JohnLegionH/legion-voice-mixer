@@ -86,10 +86,10 @@ class Feed(object):
         return self.send(16, {"ice": state, "stream_id": 1, "component_id": 1}, 1)
 
     def lcand(self, typ):
-        return self.send(16, {"local-candidate": "1 1 udp 2015363327 172.23.0.2 10097 typ %s" % typ}, 2)
+        return self.send(16, {"local-candidate": "1 1 udp 2015363327 172.30.0.2 10097 typ %s" % typ}, 2)
 
     def pair(self, lt, rt):
-        return self.send(16, {"selected-pair": "174.82.163.190:10097 [%s,udp] <-> 172.23.0.1:57573 [%s,udp]" % (lt, rt)}, 4)
+        return self.send(16, {"selected-pair": "198.51.100.77:10097 [%s,udp] <-> 172.30.0.1:57573 [%s,udp]" % (lt, rt)}, 4)
 
     def dtls(self, state):
         return self.send(16, {"dtls": state, "retransmissions": 0}, 5)
@@ -247,7 +247,7 @@ class StoreTests(unittest.TestCase):
         self.feed(82).attach().joined().ice("gathering")
         self.assertIn("were not observed", status_of(self.store, 82)["outcome"]["hints"][0])
         self.store.apply_handle_info(82, {"plugin": PLUGIN, "webrtc": {"ice": {"local-candidates": [
-            "1 1 udp 1 172.23.0.2 10097 typ host"]}}, "plugin_specific": {"rtp_in_count": 0}})
+            "1 1 udp 1 172.30.0.2 10097 typ host"]}}, "plugin_specific": {"rtp_in_count": 0}})
         self.feed(82).reaped().left().detached()
         v = status_of(self.store, 82)
         self.assertEqual((v["remote_candidates_observed"], v["remote_candidates"]["host"]), (True, 0))
@@ -450,7 +450,7 @@ class SecretTests(CliBase):
             "plugin_specific": {"display": AGENT_A, "room": ROOM, "rtp_in_count": 5, "api_secret": "S3CRET-api"},
             "webrtc": {"ice": {"remote-candidates": ["candidate:1 1 udp 1 198.51.100.4 6000 typ srflx raddr 0.0.0.0 "
                                                       "rport 0 generation 0 ufrag S3CRET-ufrag network-id 1"],
-                               "local-candidates": ["1 1 udp 1 172.23.0.2 10097 typ host"]},
+                               "local-candidates": ["1 1 udp 1 172.30.0.2 10097 typ host"]},
                        "dtls": {"fingerprint": "S3CRET-icepwd"}}})
         f.pair("host", "srflx").dtls("connected").up()
         live_view = ice_diag.view(self.store.live[91])
@@ -506,8 +506,8 @@ class CollectorTests(unittest.TestCase):
             601: {"plugin": PLUGIN, "plugin_specific": {"display": AGENT_A, "room": ROOM, "rtp_in_count": 12,
                                                         "rtp_out_count": 9, "datachannel_open": True},
                   "webrtc": {"ice": {"remote-candidates": ["candidate:1 1 udp 1 203.0.113.9 50000 typ relay",
-                                                           "candidate:2 1 udp 1 192.168.1.5 50001 typ host"],
-                                     "selected-pair": "172.23.0.2:10097 [host,udp] <-> 192.168.1.5:50001 [host,udp]"}}},
+                                                           "candidate:2 1 udp 1 192.168.0.5 50001 typ host"],
+                                     "selected-pair": "172.30.0.2:10097 [host,udp] <-> 192.168.0.5:50001 [host,udp]"}}},
             602: {"plugin": "janus.plugin.echotest"}}})
         try:
             ice_diag.poll_once(self.store, admin.url, admin.secret)

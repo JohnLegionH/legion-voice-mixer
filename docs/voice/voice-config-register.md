@@ -4,7 +4,7 @@ The sim-side counterpart of the mixer's "Configuration compatibility rule" and
 "Knob register" (`legion-voice-mixer/docs/docker-notes.md`), for the ini keys the
 `os-webrtc-janus` addon reads. Written 2026-09-14 (mixer slice 8b) from the tree at
 `feature/ais-v3` `c8bc0a7cfa`; every file:line below was checked by grep. The live
-column is `D:\legiongrid\regionserver\config\OpenSim.ini` on that date.
+column is a production `OpenSim.ini` on that date.
 Updated 2026-09-14 for fix V-1 (`3283c939f1`); the RM, JS, Ex and Ini line numbers were re-checked at
 that commit.
 

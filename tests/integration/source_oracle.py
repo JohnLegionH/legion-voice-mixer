@@ -9,7 +9,7 @@ Pure functions, no aiortc or aiohttp, so tests/integration/test_source_oracle.py
 signalled: a host candidate (a local socket) or a srflx candidate (that socket's NAT mapping). An IP the peer owns
 is not enough. On a single host a published-port proxy re-sends from the Docker network gateway, which is also one
 of the peer's own interface addresses, but from an ephemeral port no candidate carries (CI run 36252361452:
-172.18.0.1:33673 against A's 172.18.0.1 host candidate). That source was rewritten.
+172.28.0.1:33673 against A's 172.28.0.1 host candidate). That source was rewritten.
 """
 
 from __future__ import annotations

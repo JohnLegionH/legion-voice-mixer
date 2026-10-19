@@ -78,7 +78,7 @@ at `LOG_VERB`. The admin reply is `{"slvoice":"applied", …}` regardless (`:134
 
 **Why the default matters.** With `LandData.cs`'s default word, a freshly created region's
 initial parcel has `AllowVoiceChat` set and `UseEstateVoiceChan` clear — exactly the
-triggering state. On this grid Elm's parcel reads `0x2800204B`, the untouched default. This is
+triggering state. On the reference grid an untouched parcel reads `0x2800204B`, the untouched default. This is
 a default-configuration defect with grid-wide reach, which is why the constraint above
 forbids fixing it by touching flags.
 
