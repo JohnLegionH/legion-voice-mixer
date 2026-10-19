@@ -51,6 +51,20 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_ADMIN_SECRET:=}"
 # O-65: dev-only escape hatch for starting with an empty secret.
 : "${ALLOW_INSECURE_DEV:=false}"
+# Secret strength: a non-empty API, admin or join-capability secret shorter than 32 characters is warned about at
+# start. JS_WEAK_SECRET_FATAL=true makes that fatal instead. Off by default: the config an install already runs
+# is not refused for a short secret unless the operator asks for that.
+: "${JS_WEAK_SECRET_FATAL:=false}"
+# Janus's own HTTPS for the API and admin transports. Off unless both JS_TLS_CERT and JS_TLS_KEY (PEM files inside
+# the container) are set. The plain-http listeners stay as they were unless JS_HTTP_PLAIN / JS_ADMIN_HTTP_PLAIN
+# say otherwise: true (the default), loopback (plain http only inside the container, which is what the
+# startup self-check and the ICE diagnostics use) or false (no plain listener).
+: "${JS_TLS_CERT:=}"
+: "${JS_TLS_KEY:=}"
+: "${JS_HTTPS_PORT:=14224}"
+: "${JS_ADMIN_HTTPS_PORT:=14226}"
+: "${JS_HTTP_PLAIN:=true}"
+: "${JS_ADMIN_HTTP_PLAIN:=true}"
 # O-54: seconds a non-permanent mixer room may stay empty before the plugin destroys it
 # (0 disables). The plugin reads it from the process environment, so it is exported here.
 : "${JS_EMPTY_ROOM_GRACE_S:=60}"
@@ -128,6 +142,9 @@ uint_or_default() {
 
 if is_true "$JS_WS_ENABLED"; then JS_WS_ENABLED=true; else JS_WS_ENABLED=false; fi
 if is_true "$ALLOW_INSECURE_DEV"; then ALLOW_INSECURE_DEV=true; else ALLOW_INSECURE_DEV=false; fi
+if is_true "$JS_WEAK_SECRET_FATAL"; then JS_WEAK_SECRET_FATAL=true; else JS_WEAK_SECRET_FATAL=false; fi
+JS_HTTP_PLAIN=$(printf '%s' "$JS_HTTP_PLAIN" | tr '[:upper:]' '[:lower:]')
+JS_ADMIN_HTTP_PLAIN=$(printf '%s' "$JS_ADMIN_HTTP_PLAIN" | tr '[:upper:]' '[:lower:]')
 JS_PUBLIC_IP_DISCOVERY=$(printf '%s' "$JS_PUBLIC_IP_DISCOVERY" | tr '[:upper:]' '[:lower:]')
 JS_PUBLIC_IP_CHANGE_ACTION=$(printf '%s' "$JS_PUBLIC_IP_CHANGE_ACTION" | tr '[:upper:]' '[:lower:]')
 JS_PUBLIC_IP_REFRESH_S=$(uint_or_default JS_PUBLIC_IP_REFRESH_S "$JS_PUBLIC_IP_REFRESH_S" 300)
@@ -185,7 +202,12 @@ case "$JS_ADMIN_BIND" in
 esac
 echo "[entrypoint] INFO: websockets transport enabled=${JS_WS_ENABLED} port=${JS_WS_PORT} (JS_WS_ENABLED)"
 echo "[entrypoint] INFO: http port=${JS_HTTP_PORT} base_path=${JS_HTTP_BASEPATH} rtp=${JS_RTP_PORT_RANGE}"
-echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV}"
+echo "[entrypoint] INFO: secrets api_secret=$(secret_state "$JS_API_SECRET") admin_secret=$(secret_state "$JS_ADMIN_SECRET") allow_insecure_dev=${ALLOW_INSECURE_DEV} weak_secret_fatal=${JS_WEAK_SECRET_FATAL}"
+if [ -n "${JS_TLS_CERT}${JS_TLS_KEY}" ]; then
+	echo "[entrypoint] INFO: tls=on https_port=${JS_HTTPS_PORT} admin_https_port=${JS_ADMIN_HTTPS_PORT} cert=${JS_TLS_CERT:-<unset>} key=${JS_TLS_KEY:-<unset>} plain_http=${JS_HTTP_PLAIN} admin_plain_http=${JS_ADMIN_HTTP_PLAIN} (JS_TLS_CERT, JS_TLS_KEY, JS_HTTP_PLAIN, JS_ADMIN_HTTP_PLAIN)"
+else
+	echo "[entrypoint] INFO: tls=off plain_http=${JS_HTTP_PLAIN} admin_plain_http=${JS_ADMIN_HTTP_PLAIN} (JS_TLS_CERT and JS_TLS_KEY unset: the API and admin API are plain http; a mixer on another host needs TLS or a private network, docs/docker-notes.md, \"TLS for the API and admin API\")"
+fi
 echo "[entrypoint] INFO: public address public_host=${JS_PUBLIC_HOST:-<none>} public_ip=${JS_PUBLIC_IP:-<none>} nat_extra_ips=${JS_NAT_EXTRA_IPS:-<none>} keep_private_host=${JS_KEEP_PRIVATE_HOST:-<auto>}"
 echo "[entrypoint] INFO: address discovery=${JS_PUBLIC_IP_DISCOVERY} stun_server=${JS_STUN_SERVER} dns_resolver=${JS_PUBLIC_IP_DNS_RESOLVER} refresh_s=${JS_PUBLIC_IP_REFRESH_S} change_action=${JS_PUBLIC_IP_CHANGE_ACTION} restart_max_wait_s=${JS_PUBLIC_IP_RESTART_MAX_WAIT_S}"
 echo "[entrypoint] INFO: selfcheck=${JS_SELFCHECK} timeout_s=${JS_SELFCHECK_TIMEOUT_S} inbound_max_age_h=${JS_SELFCHECK_INBOUND_MAX_AGE_H} (JS_SELFCHECK; on demand: legion-voice-selfcheck [--json], inbound proof: legion-voice-selfcheck --listen)"
@@ -242,6 +264,67 @@ if [ -n "$missing" ]; then
 		echo "[entrypoint] FATAL: ${missing} empty; refusing to start. Set ${set_hint} in .env, or set ALLOW_INSECURE_DEV=true in .env to start without them (dev only: the API is then open). See docs/docker-notes.md, \"Behaviour changes on upgrade\"." >&2
 		exit 1
 	fi
+fi
+
+# ---- Secret strength ----
+# The API, admin and join-capability secrets should be at least 32 characters, as the connector secret already must
+# be. A shorter non-empty one is named in a WARNING (the name only: never the value, never its length); an empty one
+# is handled above (API, admin) or means the feature is unused (join capability). JS_WEAK_SECRET_FATAL=true refuses
+# to start instead.
+weak=""
+for knob in JS_API_SECRET JS_ADMIN_SECRET JS_JOIN_CAP_SECRET; do
+	eval "knob_value=\${$knob}"
+	if [ -n "$knob_value" ] && [ "${#knob_value}" -lt 32 ]; then weak="${weak:+$weak, }$knob"; fi
+done
+knob_value=""
+if [ -n "$weak" ]; then
+	if [ "$JS_WEAK_SECRET_FATAL" = true ]; then
+		echo "[entrypoint] FATAL: ${weak} shorter than 32 characters and JS_WEAK_SECRET_FATAL=true; refusing to start. Use a random secret of at least 32 characters (for example: openssl rand -hex 32), and set the same value on the regionserver. See docs/docker-notes.md, \"Secret strength\"." >&2
+		exit 1
+	fi
+	echo "[entrypoint] WARNING: ${weak} shorter than 32 characters. A short secret can be guessed; use a random one of at least 32 characters (for example: openssl rand -hex 32) and set the same value on the regionserver. Set JS_WEAK_SECRET_FATAL=true to refuse to start with one. See docs/docker-notes.md, \"Secret strength\"." >&2
+fi
+
+# ---- TLS for the API and admin API: validate ----
+# Both files or neither. With TLS on, a missing or unreadable file stops the start rather than serving plain http
+# in its place. Messages name the knob and the path the operator gave, never file contents.
+tls_fatal() {
+	echo "[entrypoint] FATAL: $1; refusing to start. See docs/docker-notes.md, \"TLS for the API and admin API\"." >&2
+	exit 1
+}
+case "$JS_HTTP_PLAIN" in true|loopback|false) ;; *) tls_fatal "JS_HTTP_PLAIN='${JS_HTTP_PLAIN}' is not one of true, loopback, false" ;; esac
+case "$JS_ADMIN_HTTP_PLAIN" in true|loopback|false) ;; *) tls_fatal "JS_ADMIN_HTTP_PLAIN='${JS_ADMIN_HTTP_PLAIN}' is not one of true, loopback, false" ;; esac
+TLS_ON=false
+if [ -n "$JS_TLS_CERT" ] || [ -n "$JS_TLS_KEY" ]; then
+	[ -n "$JS_TLS_CERT" ] || tls_fatal "JS_TLS_KEY is set without JS_TLS_CERT; TLS needs both the certificate and the key"
+	[ -n "$JS_TLS_KEY" ]  || tls_fatal "JS_TLS_CERT is set without JS_TLS_KEY; TLS needs both the certificate and the key"
+	for knob in JS_TLS_CERT JS_TLS_KEY; do
+		eval "knob_value=\${$knob}"
+		case "$knob_value" in
+			*'"'*|*'\'*) tls_fatal "${knob} contains a double quote or a backslash, which the Janus config cannot hold as written" ;;
+		esac
+		if [ ! -f "$knob_value" ]; then tls_fatal "${knob}='${knob_value}' does not exist or is not a file"; fi
+		if [ ! -r "$knob_value" ]; then tls_fatal "${knob}='${knob_value}' is not readable by the mixer"; fi
+	done
+	for knob in JS_HTTPS_PORT JS_ADMIN_HTTPS_PORT; do
+		eval "knob_value=\${$knob}"
+		case "$knob_value" in ''|*[!0-9]*) tls_fatal "${knob}='${knob_value}' is not a port number" ;; esac
+		if [ "$knob_value" -lt 1 ] || [ "$knob_value" -gt 65535 ]; then tls_fatal "${knob}=${knob_value} is not a port number"; fi
+	done
+	knob_value=""
+	if [ "$JS_HTTPS_PORT" = "$JS_ADMIN_HTTPS_PORT" ]; then
+		tls_fatal "JS_HTTPS_PORT and JS_ADMIN_HTTPS_PORT are both ${JS_HTTPS_PORT}"
+	fi
+	if [ "$JS_HTTPS_PORT" = "$JS_HTTP_PORT" ] || [ "$JS_HTTPS_PORT" = "$JS_ADMIN_PORT" ] \
+		|| [ "$JS_ADMIN_HTTPS_PORT" = "$JS_HTTP_PORT" ] || [ "$JS_ADMIN_HTTPS_PORT" = "$JS_ADMIN_PORT" ]; then
+		tls_fatal "an https port (JS_HTTPS_PORT=${JS_HTTPS_PORT}, JS_ADMIN_HTTPS_PORT=${JS_ADMIN_HTTPS_PORT}) equals a plain http port (JS_HTTP_PORT=${JS_HTTP_PORT}, JS_ADMIN_PORT=${JS_ADMIN_PORT})"
+	fi
+	TLS_ON=true
+elif [ "$JS_HTTP_PLAIN" = false ] || [ "$JS_ADMIN_HTTP_PLAIN" = false ]; then
+	tls_fatal "JS_HTTP_PLAIN or JS_ADMIN_HTTP_PLAIN is false but TLS is off (JS_TLS_CERT and JS_TLS_KEY unset), which would leave no way to reach that API"
+fi
+if [ "$TLS_ON" = true ] && { [ "$JS_ADMIN_HTTP_PLAIN" = false ] || [ "$JS_HTTP_PLAIN" = false ]; } && { [ "$JS_SELFCHECK" = on ] || [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; }; then
+	echo "[entrypoint] WARNING: a plain http listener is off, and the startup self-check and the ICE diagnostics reach Janus over plain http on loopback; they will report it unreachable. Use JS_HTTP_PLAIN=loopback and JS_ADMIN_HTTP_PLAIN=loopback to keep them working, or set JS_SELFCHECK=off and JS_ICE_DIAG_HISTORY=0." >&2
 fi
 
 # ---- TURN for the mixer: validate (slice A.3) ----
@@ -499,6 +582,27 @@ set_kv "$HTTP_JCFG" base_path       "\"${JS_HTTP_BASEPATH}\""
 set_kv "$HTTP_JCFG" admin_http      true
 set_kv "$HTTP_JCFG" admin_port      "${JS_ADMIN_PORT}"
 set_kv "$HTTP_JCFG" admin_base_path "\"${JS_ADMIN_BASEPATH}\""
+
+# Plain http narrowing and Janus's own HTTPS (opt-in; with every knob at its default none of these lines runs, and the
+# generated http transport config is what it was before they existed). The certificate and key are one pair that
+# Janus uses for both the API and the admin listener.
+case "$JS_HTTP_PLAIN" in
+	loopback) set_kv "$HTTP_JCFG" ip '"127.0.0.1"' ;;
+	false)    set_kv "$HTTP_JCFG" http false ;;
+esac
+case "$JS_ADMIN_HTTP_PLAIN" in
+	loopback) set_kv "$HTTP_JCFG" admin_ip '"127.0.0.1"' ;;
+	false)    set_kv "$HTTP_JCFG" admin_http false ;;
+esac
+if [ "$TLS_ON" = true ]; then
+	set_kv "$HTTP_JCFG" https              true
+	set_kv "$HTTP_JCFG" secure_port        "${JS_HTTPS_PORT}"
+	set_kv "$HTTP_JCFG" admin_https        true
+	set_kv "$HTTP_JCFG" admin_secure_port  "${JS_ADMIN_HTTPS_PORT}"
+	set_kv "$HTTP_JCFG" cert_pem           "\"${JS_TLS_CERT}\""
+	set_kv "$HTTP_JCFG" cert_key           "\"${JS_TLS_KEY}\""
+	echo "[entrypoint] tls: https on port ${JS_HTTPS_PORT}${JS_HTTP_BASEPATH}, admin https on port ${JS_ADMIN_HTTPS_PORT}${JS_ADMIN_BASEPATH}, plain http=${JS_HTTP_PLAIN} admin plain http=${JS_ADMIN_HTTP_PLAIN}"
+fi
 
 # WebSockets signalling transport (on by default, as before O-55; JS_WS_ENABLED=false
 # narrows). `ws` anchors to line start so it never collides with `wss`/`admin_ws`/

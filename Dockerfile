@@ -52,10 +52,28 @@ RUN cd /root/janus-gateway \
         --prefix=/opt/janus \
         --disable-rabbitmq \
         --disable-mqtt \
-        --disable-linux-sockets \
+        --disable-unix-sockets \
+        --disable-nanomsg \
+        --disable-plugin-audiobridge \
+        --disable-plugin-echotest \
+        --disable-plugin-nosip \
+        --disable-plugin-recordplay \
+        --disable-plugin-sip \
+        --disable-plugin-streaming \
+        --disable-plugin-textroom \
+        --disable-plugin-videocall \
+        --disable-plugin-videoroom \
     && make \
     && make install \
-    && make configs
+    && make configs \
+    && test -z "$(ls /opt/janus/lib/janus/plugins)" \
+    && test -z "$(ls /opt/janus/lib/janus/transports | grep -E 'nanomsg|pfunix')"
+# The configure flags above leave no stock Janus plugin, so the image carries janus.plugin.slvoice only (the lua and
+# duktape plugins are opt-in in Janus and stay off); the two `test -z` checks fail the build if one comes back.
+# Transports: HTTP carries the sim's signalling and the admin API. WebSockets stays built because it is on by default
+# (JS_WS_ENABLED=false switches it off). Nothing uses nanomsg or Unix-socket signalling, so they are not built (the
+# line this replaces, --disable-linux-sockets, is not a Janus option, so the Unix-socket transport was built before).
+# See docs/docker-notes.md, "Plugins and transports".
 
 # --- Build and install the slvoice plugin out-of-tree against installed Janus ---
 # The SLData parser unit tests (`make test`) run here too, so a test failure

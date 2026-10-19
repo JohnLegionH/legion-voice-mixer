@@ -167,6 +167,116 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   end against loopback UDP servers. The image build runs both suites against the baked scripts and
   templates; a failure fails the build.
 
+### Plugins and transports
+
+The image carries one Janus plugin, `janus.plugin.slvoice`. Every stock Janus plugin is
+switched off at build time (`--disable-plugin-*` for audiobridge, echotest, nosip,
+recordplay, sip, streaming, textroom, videocall and videoroom), so none is built, installed
+or loadable. The Lua and Duktape plugins are opt-in in Janus and were never built. The
+Dockerfile fails the build if a stock plugin or a removed transport turns up in the result.
+
+Transports:
+
+| Transport | In the image | Why |
+|---|---|---|
+| HTTP (`libjanus_http`) | yes | the sim's signalling (`/voice`) and the admin API (`/voiceAdmin`); also what the connectors, the self-check and the ICE diagnostics call |
+| WebSockets (`libjanus_websockets`) | yes, **on by default** | kept so an existing install changes nothing; the sim does not use it. `JS_WS_ENABLED=false` stops Janus loading it |
+| nanomsg (`libjanus_nanomsg`) | no | nothing in the mixer or the sim speaks nanomsg |
+| Unix sockets (`libjanus_pfunix`) | no | nothing uses it; the previous Dockerfile passed `--disable-linux-sockets`, which is not a Janus option, so it was built after all |
+| RabbitMQ, MQTT | no | already off before this change |
+
+Janus's event-handler modules are separate from plugins and transports and are unchanged: the
+entrypoint's `events: { disable }` line keeps all but the sample handler (used by the ICE
+diagnostics) from loading when events are on.
+
+**Switching WebSockets off.** Set `JS_WS_ENABLED=false` in `.env` and recreate the container.
+The entrypoint writes `ws = false` and adds the transport to `transports: { disable }`. The WS
+port mapping in `docker-compose.yml` then answers nothing; delete that line to stop publishing it.
+
+**What the image loads.** At start Janus logs one `Loading plugin '...'` line per plugin it
+loads; a healthy start shows exactly `janus.plugin.slvoice`. `GET <base_path>/info`
+lists it under `plugins`, and the transports under `transports`.
+
+**Upgrade note.** A deployment that attached to `janus.plugin.audiobridge` (an A/B bring-up
+against the stock plugin) no longer can on this image; run an earlier image for that.
+
+### TLS for the API and admin API
+
+The sim reaches the mixer over Janus's HTTP API (`/voice`) and admin API (`/voiceAdmin`), and
+every request carries a secret (`JS_API_SECRET`, `JS_ADMIN_SECRET`). Over plain http those
+secrets cross the network in clear. **A mixer on a different host from the regionserver needs
+TLS or a private network** (a LAN, a VPN, or a host-only bridge) between the two. On one host
+over loopback, plain http is acceptable.
+
+Janus can serve https itself. Off by default; with the knobs unset the generated Janus config
+is byte-identical to the previous release's.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JS_TLS_CERT` | *(unset)* | path **inside the container** to a PEM certificate (include the intermediate chain in the file) |
+| `JS_TLS_KEY` | *(unset)* | path inside the container to the PEM private key |
+| `JS_HTTPS_PORT` | `14224` | https port of the API transport |
+| `JS_ADMIN_HTTPS_PORT` | `14226` | https port of the admin API transport |
+| `JS_HTTP_PLAIN` | `true` | the plain-http API listener: `true` (as before), `loopback` (127.0.0.1 inside the container only) or `false` (off) |
+| `JS_ADMIN_HTTP_PLAIN` | `true` | the same for the plain-http admin listener |
+
+- **Both files or neither.** One without the other, a path that does not exist or is not a
+  file, or a file the container's user cannot read stops the start with a `FATAL` naming the
+  knob and the path. TLS never falls back to plain http silently. A port that is not a number,
+  or that equals another listener's port, is `FATAL` too.
+- **One pair serves both listeners.** Janus uses a single certificate and key for the API and
+  the admin API; the https ports differ.
+- **Plain http stays on until you turn it off.** Setting the certificate does not remove the
+  plain listeners, so the sim can move over at its own pace. When the sim uses https, set
+  `JS_HTTP_PLAIN=loopback` and `JS_ADMIN_HTTP_PLAIN=loopback`: plain http then answers inside the
+  container only, which is where the startup self-check and the ICE diagnostics reach Janus, and
+  nothing outside can use it. `false` removes the plain listener entirely; the entrypoint warns
+  when that leaves the self-check or the diagnostics with nothing to call (set `JS_SELFCHECK=off`
+  and `JS_ICE_DIAG_HISTORY=0`, or use `loopback`). `false` with TLS off is refused: it would leave
+  no way to reach the API. A mounted `janus.transport.http.jcfg` (see the precedence rules)
+  still wins over all of this.
+- **Mount the files and publish the ports.** Neither the files nor the ports are in the image:
+
+  ```yaml
+  services:
+    janus:
+      volumes:
+        - ./tls:/opt/janus/tls:ro        # cert.pem and key.pem
+      ports:
+        - "14224:14224/tcp"              # API over https
+        - "14226:14226/tcp"              # admin API over https
+  ```
+
+  with `JS_TLS_CERT=/opt/janus/tls/cert.pem` and `JS_TLS_KEY=/opt/janus/tls/key.pem` in `.env`.
+  The key must be readable by the user the container runs as (root by default). The compose file
+  publishes no https ports until you add them, so an install that sets nothing publishes what it
+  did before.
+- **Pointing the regionserver at https.** In the regionserver's voice module settings, change
+  `JanusGatewayURI` and `JanusGatewayAdminURI` to `https://HOST:14224/voice` and
+  `https://HOST:14226/voiceAdmin`, keeping the base paths and the `APIToken` / `AdminAPIToken`
+  values. `HOST` must be the name the certificate was issued for. Whether the regionserver
+  validates the certificate (a public CA, a private CA, or a self-signed certificate it has to be
+  told to trust) is the region module's concern: see the region module docs.
+- **Checking it.** `curl --cacert cert.pem https://HOST:14224/voice/info` answers with the
+  server info; `curl http://HOST:14223/voice/info` answers only while plain http is on.
+- The WebSockets transport has no TLS knob here; it is not used by the sim (see "Plugins and
+  transports").
+
+### Secret strength
+
+`JS_API_SECRET`, `JS_ADMIN_SECRET` and `JS_JOIN_CAP_SECRET` should each be at least 32
+characters. A join capability is an HMAC over a known structure, so anyone who sees one can test
+candidate keys offline, and a short secret falls. Generate one with `openssl rand -hex 32`
+and set the same value on the regionserver.
+
+- A non-empty secret shorter than 32 characters gives a start-up `WARNING` that names the
+  variable (`JS_API_SECRET`, `JS_ADMIN_SECRET`, `JS_JOIN_CAP_SECRET`). It never prints the value or its
+  length, and the start goes on.
+- `JS_WEAK_SECRET_FATAL=true` makes the same finding `FATAL`: the container refuses to start.
+  Default `false`, so an install that changes nothing starts as before.
+- An empty `JS_API_SECRET` or `JS_ADMIN_SECRET` is handled by the existing empty-secret check, and an
+  empty `JS_JOIN_CAP_SECRET` means join capabilities are not in use; neither counts as weak here.
+
 ### Startup self-check (A.2)
 
 A.1 proves what the mixer advertises. The self-check tests what it can find out from inside the
@@ -467,6 +577,10 @@ it (`docs/voice/nonspatial-phase0-design.md` §11).
 |---|---|---|
 | `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join any room **a simulator created** - from slice 1.4 that means any room whose create carried `"sim_created": true` (spatial and `multiagent` alike), plus any room created with `vis_authority`. A room nobody marked - the harness's, a static room from the config file, or one a pre-1.4 simulator created - is never gated. The knob has never shipped in a tagged release, so `0` is byte-identical to every published image |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key, shared with the sim. Not `JS_API_SECRET`. With `JS_JOIN_CAP_REQUIRED=1` and no key the container refuses to start |
+| `JS_TLS_CERT`, `JS_TLS_KEY` | *(unset)*: plain http only; the generated `janus.transport.http.jcfg` is byte-identical | the API and admin API could only be served over plain http. Both set turns on Janus's https for both listeners; a missing or unreadable file refuses to start ("TLS for the API and admin API") | this release |
+| `JS_HTTPS_PORT`, `JS_ADMIN_HTTPS_PORT` | `14224`, `14226` | n/a (used only with `JS_TLS_CERT` and `JS_TLS_KEY`) | this release |
+| `JS_HTTP_PLAIN`, `JS_ADMIN_HTTP_PLAIN` | `true` | the plain-http listeners were always on. `loopback` and `false` are opt-in narrowing | this release |
+| `JS_WEAK_SECRET_FATAL` | `false` | no strength check. The default adds a start-up WARNING for a non-empty API, admin or join-capability secret under 32 characters; `true` refuses to start instead | this release |
 
 **The viewer never holds one.** The viewer talks to the region's capability URL; the sim's own Janus session
 performs the join, so the capability travels sim → mixer only.
@@ -580,6 +694,13 @@ operator knobs.
 
 ## Behaviour changes on upgrade
 
+- **Stock Janus plugins and the nanomsg and Unix-socket transports are no longer built**
+  - The image loads `janus.plugin.slvoice` only. A deployment that used the stock audiobridge, echotest, streaming or
+    any other stock plugin through this image must stay on the previous image for that.
+  - The sim uses slvoice over HTTP only, so nothing changes for it. WebSockets stays on by default.
+  - New opt-in knobs: `JS_TLS_CERT` / `JS_TLS_KEY` (https), `JS_HTTP_PLAIN` / `JS_ADMIN_HTTP_PLAIN`,
+    `JS_WEAK_SECRET_FATAL`. With none set, the generated Janus config is byte-identical.
+  - New start-up WARNING when a non-empty API, admin or join-capability secret is under 32 characters.
 - **Slice A.6: source addresses and recipes**
   - **Path classifier:** the diagnostics path follows the peer's side of the selected pair. host or srflx there reads
     `direct` even when Janus's side is prflx (a published port's DNAT). Docker Desktop is unchanged: `undetermined`.
@@ -890,8 +1011,8 @@ same pairs' shape (prflx/host, prflx/host, host/host), which that image's classi
 
 3. **Adds `janus.plugin.slvoice`** — built out-of-tree and installed into
    `/opt/janus/lib/janus/plugins/`, with `janus.plugin.slvoice.jcfg` in the
-   config dir. `janus.plugin.audiobridge` remains available (from `make configs`)
-   for A/B bring-up — see `protocol-compat.md`.
+   config dir. The stock plugins are not built ("Plugins and transports"); the
+   protocol is a superset of audiobridge's — see `protocol-compat.md`.
 
 4. **Secrets/config via `.env`**, not a committed `secrets` file. Variables are
    `JS_API_SECRET` / `JS_ADMIN_SECRET` (mapping to OpenSim `APIToken` /
@@ -934,5 +1055,6 @@ Point `os-webrtc-janus.ini` at this server: `JanusGatewayURI` =
 `http://THIS_HOST:14225/<JS_ADMIN_BASEPATH>`, with `APIToken` / `AdminAPIToken`
 equal to `JS_API_SECRET` / `JS_ADMIN_SECRET`. The defaults (`/voice`,
 `/voiceAdmin`) already match the os-webrtc-janus convention, so a stock OpenSim
-`[JanusWebRtcVoice]` config connects with zero edits. A/B against audiobridge
-needs no container change — the C# side chooses the plugin package it attaches to.
+`[JanusWebRtcVoice]` config connects with zero edits. The stock audiobridge plugin is
+not in this image ("Plugins and transports"), so an A/B comparison against it needs an
+earlier image.
