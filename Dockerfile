@@ -117,7 +117,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-v
 #  - address probe: STUN/DNS codecs, the participant poll;
 #  - self-check (A.2): every check's branches, the VPS shape, exit codes, the time bound;
 #  - ICE diagnostics (A.5): retention, the ring bound, the relay/direct caveat, no secrets or SDP, the CLI views;
-#  - entrypoint (O-55/O-65, the nat_1_1_mapping verdict, A.1 discovery and re-check, A.2 launch, A.5 events and the
+#  - entrypoint (the nat_1_1_mapping verdict, A.1 discovery and re-check, A.2 launch, A.5 events and the
 #    debug-level guard): the baked scripts against the image's own templates, in a scratch dir with a stub Janus
 #    and a stub probe.
 RUN ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_addr_probe.py \

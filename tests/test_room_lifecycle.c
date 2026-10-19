@@ -5,9 +5,9 @@
 /*! \file    tests/test_room_lifecycle.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Unit tests for the mixer room lifecycle (slice 5): O-68 reset_room_state,
- *           O-54 empty-room grace destroy, O-56 hangup_media leaves the room, and the
- *           O-67 shared global teardown.
+ * \brief    Unit tests for the mixer room lifecycle: reset_room_state,
+ *           empty-room grace destroy, hangup_media leaving the room, and the
+ *           shared global teardown.
  *
  * \details  Reaches the plugin's static room/session functions the way tests/bench_tick.c
  * does: by #including the plugin source and defining the Janus core symbols the .so leaves
@@ -17,7 +17,7 @@
  * sessions never set webrtc_up, so the tick's pass 2 (encode/relay) skips them. Built and run
  * by `make test`, so a failure fails the image build.
  *
- * NOT covered here: O-67's room_start / init thread-creation failure (no seam to make
+ * NOT covered here: room_start / init thread-creation failure (no seam to make
  * g_thread_try_new fail), and the join arm clearing empty_since (it needs negotiate). Both are
  * covered by code review and the live check only.
  */
@@ -136,7 +136,7 @@ static gint64 empty_since_of(janus_slvoice_room *room) {
 	return since;
 }
 
-/* O-68: room-scoped state is cleared, viewer-personal state is kept. */
+/* Room-scoped state is cleared, viewer-personal state is kept. */
 static void test_reset_room_state(void) {
 	janus_slvoice_session *s = make_session();
 	g_hash_table_add(s->excluded, g_strdup("src-a"));
@@ -187,7 +187,7 @@ static void test_reset_room_state(void) {
 	free_session(s);
 }
 
-/* O-54: grace clock, sweep, permanent/occupied exemptions, the shared teardown, the 0 knob. */
+/* Grace clock, sweep, permanent/occupied exemptions, the shared teardown, the 0 knob. */
 static void test_grace_destroy(void) {
 	gint64 grace = (gint64)slv_empty_room_grace_s * G_USEC_PER_SEC;
 	CHECK(slv_empty_room_grace_s == SLV_EMPTY_ROOM_GRACE_S && SLV_EMPTY_ROOM_GRACE_S == 60, "compiled grace default is 60 s");
@@ -223,7 +223,7 @@ static void test_grace_destroy(void) {
 	CHECK(sweep(osince + grace - 1) == 0 && room_present(1003), "the emptied room is kept inside the grace");
 	CHECK(sweep(osince + grace) == 1 && !room_present(1003), "the emptied room is destroyed at the grace");
 
-	/* The explicit "destroy" request's path: evicts a straggler and resets it (O-68 at :1955). */
+	/* The explicit "destroy" request's path: evicts a straggler and resets it. */
 	janus_slvoice_room *d = add_room(1004, FALSE);
 	janus_slvoice_session *b = make_session();
 	join_room(d, b, 8);
@@ -253,7 +253,7 @@ static void test_grace_destroy(void) {
 	free_session(b);
 }
 
-/* Slice 0.8i (O-98, F2): a create answered 486 re-arms an EMPTY room's grace clock, so the join the sim sends right
+/* A create answered 486 re-arms an EMPTY room's grace clock, so the join the sim sends right
  * after its create cannot lose the room to a sweep landing in between. Occupied and permanent rooms are untouched, and
  * a room nobody joins is still reclaimed, one grace after its last create. */
 static void test_create_existing_rearms_grace(void) {
@@ -288,7 +288,7 @@ static void test_create_existing_rearms_grace(void) {
 	free_session(a);
 }
 
-/* O-56: a downed PeerConnection leaves the room, frees media, resets jitter-buffer priming. */
+/* A downed PeerConnection leaves the room, frees media, resets jitter-buffer priming. */
 static void test_hangup_leaves_room(void) {
 	janus_slvoice_room *h = add_room(1006, FALSE);
 	janus_slvoice_session *s = make_session();
@@ -334,7 +334,7 @@ static void test_hangup_leaves_room(void) {
 	g_free(handle);
 }
 
-/* O-80: a non-spatial room is a flat mix (no cull, falloff or pan); a spatial room keeps all three. */
+/* A non-spatial room is a flat mix (no cull, falloff or pan); a spatial room keeps all three. */
 static void test_spatial_pair(void) {
 	janus_slvoice_room *flat = add_room_ex(1101, FALSE, FALSE);
 	janus_slvoice_room *spat = add_room_ex(1102, FALSE, TRUE);
@@ -370,7 +370,7 @@ static void test_spatial_pair(void) {
 	/* flat and spat stay in rooms; the global teardown in main frees them. */
 }
 
-/* O-83: absent spatial_audio means spatial; only an explicit false narrows to a flat mix. */
+/* Absent spatial_audio means spatial; only an explicit false narrows to a flat mix. */
 static void test_spatial_default(void) {
 	CHECK(janus_slvoice_spatial_from_json(NULL), "create without spatial_audio: spatial");
 	json_t *t = json_true(), *f = json_false(), *s = json_string("false"), *n = json_null();
@@ -397,7 +397,7 @@ static gboolean dot_v(json_t *batch, const char *key) {
 	return e != NULL && json_is_true(json_object_get(e, "v"));
 }
 
-/* SC-87: each listener's dot batch matches what it hears; culled and muted are checked separately. */
+/* Each listener's dot batch matches what it hears; culled and muted are checked separately. */
 static void test_dot_batch_filter(void) {
 	janus_slvoice_room *room = add_room_ex(1201, FALSE, TRUE);
 	janus_slvoice_room_stop(room);   /* freeze tick_seq: this test sets it */
@@ -459,7 +459,7 @@ static void test_dot_batch_filter(void) {
 	free_session(far);
 }
 
-/* SC-96: a recording tap is marked on its participant row; any other row keeps the audiobridge shape. */
+/* A recording tap is marked on its participant row; any other row keeps the audiobridge shape. */
 static void test_recorder_row(void) {
 	janus_slvoice_session *s = make_session();
 	s->display = g_strdup("rec-display");
@@ -487,7 +487,7 @@ int main(void) {
 	test_dot_batch_filter();
 	test_recorder_row();
 
-	/* O-67: the shared global teardown (destroy() and a failed init) with no worker threads
+	/* The shared global teardown (destroy() and a failed init) with no worker threads
 	 * started and rooms still live (1002 permanent, 1006 empty) leaves nothing behind. */
 	janus_slvoice_teardown();
 	CHECK(rooms == NULL && sessions == NULL && messages == NULL

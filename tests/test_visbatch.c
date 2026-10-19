@@ -208,7 +208,7 @@ static void test_mute_absent(void) {
 	slv_visbatch_free(&b);
 }
 
-/* Phase 0 (nonspatial-phase0-design.md §1): the authority stamp parses, and the channels parse exactly as they do
+/* Phase 0: the authority stamp parses, and the channels parse exactly as they do
  * without it. This is also what an old mixer's parser sees: it ignores unknown keys, so a stamped batch applies there
  * as the unstamped one would. */
 static void test_authority_stamp(void) {

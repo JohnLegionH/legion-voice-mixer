@@ -33,7 +33,7 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_ADMIN_PORT:=14225}"
 : "${JS_ADMIN_BASEPATH:=/voiceAdmin}"
 : "${JS_WS_PORT:=8188}"
-# O-55 knobs. Defaults reproduce the behaviour before the knobs existed (WS on,
+# Narrowing knobs. Defaults reproduce the behaviour before the knobs existed (WS on,
 # admin published on all interfaces); narrowing is opt-in. See "Configuration
 # compatibility rule" in docs/docker-notes.md.
 : "${JS_WS_ENABLED:=true}"
@@ -49,7 +49,7 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_NAT_EXTRA_IPS:=}"
 : "${JS_API_SECRET:=}"
 : "${JS_ADMIN_SECRET:=}"
-# O-65: dev-only escape hatch for starting with an empty secret.
+# Dev-only escape hatch for starting with an empty secret.
 : "${ALLOW_INSECURE_DEV:=false}"
 # Secret strength: a non-empty API, admin or join-capability secret shorter than 32 characters is warned about at
 # start. JS_WEAK_SECRET_FATAL=true makes that fatal instead. Off by default: the config an install already runs
@@ -65,28 +65,28 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 : "${JS_ADMIN_HTTPS_PORT:=14226}"
 : "${JS_HTTP_PLAIN:=true}"
 : "${JS_ADMIN_HTTP_PLAIN:=true}"
-# O-54: seconds a non-permanent mixer room may stay empty before the plugin destroys it
+# Seconds a non-permanent mixer room may stay empty before the plugin destroys it
 # (0 disables). The plugin reads it from the process environment, so it is exported here.
 : "${JS_EMPTY_ROOM_GRACE_S:=60}"
 export JS_EMPTY_ROOM_GRACE_S
-# O-75: seconds a joined participant may go without its PeerConnection coming up before the plugin reaps
+# Seconds a joined participant may go without its PeerConnection coming up before the plugin reaps
 # it (0 disables). Read by the plugin from the process environment, so exported like the grace.
 : "${JS_JOIN_MEDIA_TIMEOUT_S:=30}"
 export JS_JOIN_MEDIA_TIMEOUT_S
-# Phase 0 slice 0.3 (docs/voice/nonspatial-phase0-design.md §6.1): the visibility authority knobs, read by the plugin
+# The visibility authority knobs, read by the plugin
 # from the process environment. 0 is shadow mode: the plugin tracks and counts arming, epochs and staleness, and audio
-# is unchanged. 1 silences unarmed or stale listeners in rooms the sim declared (vis_authority). Do not set 1 while
-# ledger O-88 (connector and recorder arming) is open. JS_VIS_STALE_MS is the staleness window; the plugin raises a
+# is unchanged. 1 silences unarmed or stale listeners in rooms the sim declared (vis_authority). Do not set 1 unless
+# connector peers and recorder taps are armed by the sim (an unarmed one would be silent). JS_VIS_STALE_MS is the staleness window; the plugin raises a
 # value below 7250 to 7250 (§5). Neither changes any generated config file.
 : "${JS_VIS_FAIL_CLOSED:=0}"
 export JS_VIS_FAIL_CLOSED
 : "${JS_VIS_STALE_MS:=8000}"
 export JS_VIS_STALE_MS
-# Phase 0 slice 0.4 (docs/voice/nonspatial-phase0-design.md §11): the sim-issued join capability. 0 is shadow: a
+# The sim-issued join capability. 0 is shadow: a
 # capability that arrives is verified and counted, and no join is ever refused for it. 1 requires a valid one to
 # join a room the sim created with vis_authority, and nowhere else. JS_JOIN_CAP_SECRET is the HMAC key shared with
 # the sim's [JanusWebRtcVoice] JoinCapabilitySecret, deliberately NOT JS_API_SECRET. Neither changes any generated
-# config file. Do not set JS_JOIN_CAP_REQUIRED=1 while ledger O-88/O-46's connector question is open.
+# config file. Do not set JS_JOIN_CAP_REQUIRED=1 while connector peers and recorder taps mint no capability (their joins would be refused).
 : "${JS_JOIN_CAP_REQUIRED:=0}"
 export JS_JOIN_CAP_REQUIRED
 : "${JS_JOIN_CAP_SECRET:=}"
@@ -235,7 +235,7 @@ esac
 echo "[entrypoint] INFO: join_cap_required=${JS_JOIN_CAP_REQUIRED} join_cap_secret=$(secret_state "$JS_JOIN_CAP_SECRET"): ${cap_mode} (JS_JOIN_CAP_REQUIRED, JS_JOIN_CAP_SECRET)"
 # Never enforce a security control with no key: with the requirement on and no secret the plugin could verify
 # nothing, so every join to a declared room would be refused for no security gain. Fail closed on the config
-# instead, the way O-65 does for the API secrets.
+# instead, the way empty API secrets are refused below.
 case "$(printf '%s' "$JS_JOIN_CAP_REQUIRED" | tr '[:upper:]' '[:lower:]')" in
 	1|true|yes|on)
 		if [ "$(secret_state "$JS_JOIN_CAP_SECRET")" = EMPTY ]; then
@@ -244,7 +244,7 @@ case "$(printf '%s' "$JS_JOIN_CAP_REQUIRED" | tr '[:upper:]' '[:lower:]')" in
 		fi ;;
 esac
 
-# ---- O-65: fail closed on empty secrets -----------------------------------
+# ---- Fail closed on empty secrets -----------------------------------
 # A blank secret was always an open API: an empty JS_API_SECRET leaves the Janus
 # API open to anyone who can reach the HTTP port, and an empty JS_ADMIN_SECRET
 # leaves the stock template's well-known admin_secret in force. Kept as a
@@ -604,7 +604,7 @@ if [ "$TLS_ON" = true ]; then
 	echo "[entrypoint] tls: https on port ${JS_HTTPS_PORT}${JS_HTTP_BASEPATH}, admin https on port ${JS_ADMIN_HTTPS_PORT}${JS_ADMIN_BASEPATH}, plain http=${JS_HTTP_PLAIN} admin plain http=${JS_ADMIN_HTTP_PLAIN}"
 fi
 
-# WebSockets signalling transport (on by default, as before O-55; JS_WS_ENABLED=false
+# WebSockets signalling transport (on by default, as before the knob existed; JS_WS_ENABLED=false
 # narrows). `ws` anchors to line start so it never collides with `wss`/`admin_ws`/
 # `admin_wss`; `ws_port` likewise never matches `admin_ws_port`. The container's
 # internal WS port tracks JS_WS_PORT so the port mapping in docker-compose.yml

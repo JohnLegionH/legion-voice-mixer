@@ -32,7 +32,7 @@ log = logging.getLogger("recorder")
 
 
 def env_config() -> dict:
-    require_recording_opt_in("recorder")   # SC-96: before anything else, so no config can bypass it
+    require_recording_opt_in("recorder")   # Before anything else, so no config can bypass it
     cfg = base_env("recorder")
     cfg["out_dir"] = os.environ.get("OUT_DIR", "/recordings")
     cfg["segment_seconds"] = int(os.environ.get("SEGMENT_SECONDS", "600"))
@@ -52,11 +52,11 @@ class Recorder(ConnectorPeer):
     # with no track — the silent-participant shape (never active, audible=0).
 
     def join_extra(self) -> dict:
-        # SC-96: declare the tap at join so the mixer marks and logs it as a recorder.
+        # Declare the tap at join so the mixer marks and logs it as a recorder.
         return {"recorder": True}
 
     def on_identity(self, display: str, room: int) -> None:
-        # Slice 0.7b: segments are named for the display actually joined with, which a capability grant may change.
+        # Segments are named for the display actually joined with, which a capability grant may change.
         if display != self._writer_display:
             self._writer = WavSegmentWriter(self._cfg["out_dir"], display, self._cfg["segment_seconds"])
             self._writer_display = display
@@ -67,7 +67,7 @@ class Recorder(ConnectorPeer):
             consume_audio(track, self._writer, self._stopping, log))
 
     def on_teardown(self) -> None:
-        # One attempt ends; the peer may join again (slice 0.8f). Finalise the current segment, so a gap in the
+        # One attempt ends; the peer may join again. Finalise the current segment, so a gap in the
         # room's audio is a gap between files rather than silence spliced inside one.
         if self._track_task:
             self._track_task.cancel()

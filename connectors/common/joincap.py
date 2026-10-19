@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Slice 0.7b (ledger O-88, design §11.10): fetch a sim-minted join capability before every join.
+"""Fetch a sim-minted join capability before every join.
 
 Connector peers are NOT exempted from JS_JOIN_CAP_REQUIRED. The viewer never reaches the Janus API, so the connector
 peers are the mixer's only non-sim clients, which is exactly the party the capability checks. A peer configured with
@@ -52,7 +52,7 @@ async def fetch_once(http: aiohttp.ClientSession, url: str, secret: str) -> dict
         raise CapabilityUnavailable("malformed 200 body") from None
     if not grant["join_cap"] or not grant["session_id"] or not grant["display"]:
         raise CapabilityUnavailable("malformed 200 body")
-    # Slice 0.8h (O-62): the sim's optional position, GLOBAL centimetres as integers - the viewer's own SLData frame.
+    # The sim's optional position, GLOBAL centimetres as integers - the viewer's own SLData frame.
     # Absent is normal (a pre-0.8h sim, or a record the sim cannot place): the peer is then mixed non-spatially. A
     # malformed one is a malformed grant, like every other field here: a sim sending a broken position is a bug.
     pos = body.get("position")

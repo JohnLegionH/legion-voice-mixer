@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for the SC-96 recording opt-in gate (common/config.py). pytest-style; a __main__
+"""Unit tests for the recording opt-in gate (common/config.py). pytest-style; a __main__
 fallback runs them with plain python where pytest is not installed. Run from connectors/
 (so the shared common/ package resolves): `python -m pytest common/` or
 `python -m common.test_config`."""
@@ -42,7 +42,7 @@ def test_yes_allows():
         assert f"{RECORDING_OPT_IN_ENV}={value}" in printed
 
 
-# ---- slice 0.7b: CONNECTOR_CAP_URL / CONNECTOR_CAP_SECRET, both or neither ----
+# ---- CONNECTOR_CAP_URL / CONNECTOR_CAP_SECRET, both or neither ----
 
 def _cap(environ):
     try:

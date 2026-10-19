@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for entrypoint/ice_diag.py and the --sessions / --session views of selfcheck.py (slice A.5, SC-126):
+"""Unit tests for entrypoint/ice_diag.py and the --sessions / --session views of selfcheck.py (slice A.5):
   - a failed session is retained and reportable after it ends (reaped, ICE failed, hung up or ended before media);
   - the ring buffer keeps the newest JS_ICE_DIAG_HISTORY ended sessions and never evicts a live one;
   - relay vs direct carries the prflx caveat and is never decided from a prflx pair;

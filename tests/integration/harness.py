@@ -108,16 +108,16 @@ class Config:
     turn_user: str = ""
     turn_pwd: str = ""
     #: a mixer started with `docker run` rather than compose (a scratch mixer): EVERY log read, exec and restart (S4, S5,
-    #: S10, S14, S17, S20, S26, S27, S29, S31, S32) addresses this container name (O-94); empty = the compose service `janus`
+    #: S10, S14, S17, S20, S26, S27, S29, S31, S32) addresses this container name; empty = the compose service `janus`
     container: str = ""
-    #: slice 0.4: the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
+    #: The mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
     #: Empty = S22-S24 skip (they cannot mint what the mixer would accept).
     join_cap_secret: str = ""
-    #: slice 0.5 (§9 27): the JS_VIS_STALE_MS this mixer was STARTED with, when that is below the §5 minimum.
+    #: The JS_VIS_STALE_MS this mixer was STARTED with, when that is below the §5 minimum.
     #: S31 needs a mixer deliberately started under the clamp; 0 = it skips, because a correctly configured
     #: mixer cannot show the clamp.
     stale_ms_started_with: int = 0
-    #: slice 0.5: turn Skip into Fail. Only for the "behaviour absent" proof runs against an older image, where
+    #: Turn Skip into Fail. Only for the "behaviour absent" proof runs against an older image, where
     #: a scenario that merely skips proves nothing. Never for a reporting run.
     prove_fail: bool = False
     #: --media-address: the IPv4 every TestPeer sends media to, in place of the addresses in Janus's candidates
@@ -160,7 +160,7 @@ def pick(info):
     return {k: info[k] for k in ORACLE_KEYS if k in info}
 
 
-#: Slice 0.4: the epoch field of a capability minted for a room the sim never armed.
+#: The epoch field of a capability minted for a room the sim never armed.
 NO_EPOCH = "0" * 16
 
 
@@ -177,7 +177,7 @@ def mint_cap(secret: str, agent: str, session: str, room: int, epoch: str = NO_E
 
 
 def read_secret_file(path: str) -> str:
-    """Slice 0.8e: the capability key, from a file rather than a command line. Either a bare value or a dotenv file
+    """The capability key, from a file rather than a command line. Either a bare value or a dotenv file
     carrying JS_JOIN_CAP_SECRET=... . Every error names the FILE, never a byte of its content."""
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -315,17 +315,17 @@ class TestPeer(ConnectorPeer):
     tone, viewer SLData, and crash() -- the PeerConnection dies and the peer tells Janus nothing more
     (no leave, no detach), as a crashed or unplugged viewer would.
 
-    Slice 0.8f: rejoin is off. A scenario reads the outcome of ONE join (a refusal, a hangup), so this peer makes one
-    attempt and stops, as every connector peer did before O-99. S37 drives the real injector, with rejoin on."""
+    Rejoin is off. A scenario reads the outcome of ONE join (a refusal, a hangup), so this peer makes one
+    attempt and stops, as every connector peer once did. S37 drives the real injector, with rejoin on."""
 
     rejoin = False
-    #: slice 0.8h: a test peer sends its own geometry (send_geometry), so the connector's no-position warning is noise
+    #: A test peer sends its own geometry (send_geometry), so the connector's no-position warning is noise
     position_warning = False
 
     def __init__(self, cfg: Config, name: str, room: int, display: str,
                  join_cap: str | None = None, session_id: str | None = None, recorder: bool = False,
                  connector_cap: dict | None = None):
-        # Slice 0.7b: connector_cap = {"cap_url", "cap_secret", "cap_backoff"} runs ConnectorPeer's own capability
+        # Connector_cap = {"cap_url", "cap_secret", "cap_backoff"} runs ConnectorPeer's own capability
         # fetch (connectors/common/joincap.py) before the join, exactly as a configured recorder or injector does.
         # ice_servers=[]: HOST CANDIDATES ONLY. aiortc's default gathers through a public STUN server,
         # which costs a MEASURED 5026 ms inside setLocalDescription against 45 ms without it, on every
@@ -340,10 +340,10 @@ class TestPeer(ConnectorPeer):
         self.room = room
         self.display = display
         self.media_address = cfg.media_address
-        #: Phase 0 slice 0.4: what the sim would send on the join; None sends neither key, as a pre-0.4 sim does.
+        #: What the sim would send on the join; None sends neither key, as a pre-0.4 sim does.
         self.join_cap = join_cap
         self.session_id = session_id
-        #: Phase 0 slice 0.5 (§9 24): join as a recording tap ("recorder": true, SC-96). The mixer reads it at
+        #: Join as a recording tap ("recorder": true). The mixer reads it at
         #: join (janus_slvoice.c:3095) and reports it in query_session; §9 24 asserts a recorder in a declared
         #: room is silent until armed, like any other participant.
         self.recorder = recorder
@@ -353,7 +353,7 @@ class TestPeer(ConnectorPeer):
         #: has no roster field, so this event is the only place that view exists.
         self.joined_event: dict | None = None
         self.crashed = False
-        #: SC-87: every {p, v} this peer received for each source display, in arrival order.
+        #: Every {p, v} this peer received for each source display, in arrival order.
         self.dots: dict[str, list] = {}
         #: Phase 0: every presence notice this peer received, (display, "j" | "l"), in arrival order.
         self.presence: list = []
@@ -365,8 +365,8 @@ class TestPeer(ConnectorPeer):
         return f"{self.name}(display={self.display[:8]}, room={self.room}, session={sid}, handle={hid})"
 
     def join_extra(self) -> dict:
-        """Slice 0.4: the join capability and the viewer-session id the sim sends, when this peer has them.
-        Slice 0.5: "recorder" for a recording tap (§9 24)."""
+        """The join capability and the viewer-session id the sim sends, when this peer has them.
+        "recorder" for a recording tap (§9 24)."""
         extra = {}
         if self.join_cap is not None:
             extra["join_cap"] = self.join_cap
@@ -642,7 +642,7 @@ class Admin:
             return None
         return ((data.get("info") or {}).get("webrtc") or {}).get("ice") or {}
 
-    #: slice 0.8e: the epoch this harness last addressed a room with, so an auto-minted capability can carry it.
+    #: The epoch this harness last addressed a room with, so an auto-minted capability can carry it.
     #: A room the scenario has not armed keeps NO_EPOCH, which every mixer since 0.4 admits.
     room_epochs: dict = {}
 
@@ -658,7 +658,7 @@ class Admin:
         if op == "replace" or mute:
             request["mute"] = mute or {}
         if epoch is not None:
-            Admin.room_epochs[room] = epoch   # slice 0.8e: what an auto-minted capability for this room carries
+            Admin.room_epochs[room] = epoch   # What an auto-minted capability for this room carries
             request["room_epoch"] = epoch
             request["policy_generation"] = generation
             if base is not None:
@@ -686,7 +686,7 @@ class Admin:
         """The 0.2 sim's peer_ctl_heartbeat (VisAuthority.BuildHeartbeat): rooms is {room: {"policy_generation": g,
         "listeners": {display: generation}}}.
 
-        Slice V-1b (O-120): `feed_age_ms` is how old the sim says its own visibility feed was when it built the
+        `feed_age_ms` is how old the sim says its own visibility feed was when it built the
         body. None omits the key, which is what a pre-V1b sim sends and what every scenario written before this
         slice therefore exercises."""
         request = {"request": "peer_ctl_heartbeat", "room_epoch": epoch, "interval_ms": interval_ms,
@@ -799,7 +799,7 @@ class PosFeeder:
 
 
 class Heartbeater:
-    """The sim's heartbeat (nonspatial-phase0-design.md §3) for one room: one peer_ctl_heartbeat every `period` seconds
+    """The sim's heartbeat for one room: one peer_ctl_heartbeat every `period` seconds
     naming `listeners` ({display: generation}, mutable while running). `last_sent` is the monotonic time the latest
     heartbeat's reply arrived, the mixer's latest confirmation."""
 
@@ -810,11 +810,11 @@ class Heartbeater:
         self._room = room
         self.listeners = dict(listeners)
         self.generation = generation
-        #: Slice 0.7d: the highest policy_generation this sender has had applied to the room, sent as "as_of" (the 0.7d
+        #: The highest policy_generation this sender has had applied to the room, sent as "as_of" (the 0.7d
         #: sim sends it). None omits the key, as a pre-0.7d sim does.
         self.as_of = as_of
-        #: Slice V-1b (O-120): the feed age this sender reports, mutable while running so a scenario can make a
-        #: healthy sim "stall" without stopping its heartbeat -- which is the whole shape O-120 describes.
+        #: The feed age this sender reports, mutable while running so a scenario can make a
+        #: healthy sim "stall" without stopping its heartbeat -- which is the whole shape of a starved feeder.
         self.feed_age_ms = feed_age_ms
         self._period = period
         self._running = asyncio.Event()
@@ -824,7 +824,7 @@ class Heartbeater:
         self.last_sent = 0.0
         self.last_reply: dict | None = None
         self.last_error: str | None = None
-        #: O-95 capture: one entry per heartbeat, (monotonic sent, monotonic replied, listeners sent, this room's reply).
+        #: Capture: one entry per heartbeat, (monotonic sent, monotonic replied, listeners sent, this room's reply).
         self.history: list = []
 
     def start(self) -> "Heartbeater":
@@ -878,7 +878,7 @@ class Control:
     def __init__(self, cfg: Config, http: aiohttp.ClientSession):
         self._janus = JanusHttp(cfg.janus_url, cfg.api_secret, http)
         self._events: dict = {}
-        #: slice 0.8e: rooms this handle created WITH vis_authority (the gated ones)
+        #: Rooms this handle created WITH vis_authority (the gated ones)
         self.declared: set = set()
         self._task: asyncio.Task | None = None
 
@@ -916,10 +916,10 @@ class Control:
                           sim_created: bool = False) -> None:
         """create; 486 (already there) is fine. vis_authority: the 0.2 sim's declaration (AudioBridgeCreateRoomReq).
 
-        Slice 0.8e: a declared room is remembered, because that is exactly where the mixer gates a join once
+        A declared room is remembered, because that is exactly where the mixer gates a join once
         JS_JOIN_CAP_REQUIRED is on, and so exactly where an ordinary join must carry a capability.
 
-        Slice 1.4: `sim_created` is the sim's marker (JanusMessages.AudioBridgeCreateRoomReq). From 1.4 the mixer
+        `sim_created` is the sim's marker (JanusMessages.AudioBridgeCreateRoomReq). From 1.4 the mixer
         gates a join on THIS rather than on the declaration, so a marked room - declared or not - is remembered as
         gated too. A room created without it keeps the pre-1.4 rule, which is how an old sim behaves under a new
         mixer (S44)."""
@@ -965,7 +965,7 @@ class Control:
 
 
 class NoMediaPeer(Control):
-    """A participant whose PeerConnection never comes up (O-75, S10). It creates its Janus session,
+    """A participant whose PeerConnection never comes up (S10). It creates its Janus session,
     attaches, and joins with a real aiortc offer whose ICE candidates are stripped. It never trickles a
     candidate or end-of-candidates, and never applies the answer. Afterwards it only long-polls (which
     keeps the Janus session alive, as the sim's long-poll does for a viewer). Janus never gets a
@@ -977,7 +977,7 @@ class NoMediaPeer(Control):
         self.name = name
         self.room = room
         self.display = display
-        #: Phase 0 slice 0.4: what the sim would send on the join; both None is a pre-0.4 join.
+        #: What the sim would send on the join; both None is a pre-0.4 join.
         self.join_cap = join_cap
         self.session_id = session_id
         self.crashed = False
@@ -988,7 +988,7 @@ class NoMediaPeer(Control):
 
     async def join(self) -> dict:
         """The join reply, whatever it says: this peer is how a scenario reads a REFUSAL (error_code and the
-        slice 0.4 `reason`), where TestPeer.start would raise."""
+        `reason`), where TestPeer.start would raise."""
         pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # host candidates only; see TestPeer
         try:
             pc.addTransceiver("audio", direction="sendrecv")
@@ -1040,7 +1040,7 @@ class Ctx:
         return room
 
     def _auto_cap(self, room: int, display: str, join_cap, session_id, bare: bool):
-        """Slice 0.8e: what an ORDINARY join carries into a declared room. With no key configured, or for a room
+        """What an ORDINARY join carries into a declared room. With no key configured, or for a room
         nobody declared, or when the scenario is driving the capability itself (it passed one, or asked for a bare
         join), this changes nothing at all - the join goes out exactly as it did before 0.8e."""
         if bare or join_cap is not None or session_id is not None or not self.cfg.join_cap_secret:
@@ -1055,9 +1055,9 @@ class Ctx:
                    join_cap: str | None = None, session_id: str | None = None,
                    recorder: bool = False, bare: bool = False, sim_created: bool = False,
                    gated: bool = False) -> TestPeer:
-        """create (486 = already there) then join, the sim's order. Slice 0.4: join_cap / session_id are what the
-        sim would send; both None is a pre-0.4 join. Slice 0.5: recorder joins as a recording tap (§9 24).
-        Slice 0.8e: an ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
+        """create (486 = already there) then join, the sim's order. Join_cap / session_id are what the
+        sim would send; both None is a pre-0.4 join. Recorder joins as a recording tap (§9 24).
+        An ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
         given, so a board can run against a mixer with JS_JOIN_CAP_REQUIRED on. `bare=True` keeps a join
         capability-less on purpose, which is what the capability scenarios themselves test."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority,
@@ -1080,8 +1080,8 @@ class Ctx:
     async def join_without_media(self, name: str, room: int, display: str | None = None, vis_authority: bool = False,
                                  join_cap: str | None = None, session_id: str | None = None,
                                  expect_join: bool = True, bare: bool = False) -> NoMediaPeer:
-        """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer). Slice 0.4:
-        with expect_join False the reply is kept on the peer as `.join_reply` instead of raising, which is how a
+        """create (486 = already there) then a join whose PeerConnection never comes up (NoMediaPeer).
+        With expect_join False the reply is kept on the peer as `.join_reply` instead of raising, which is how a
         scenario reads a refusal's reason."""
         await self.control.create_room(room, f"integration {self.name}", vis_authority=vis_authority)
         display = display or new_display()
@@ -1165,7 +1165,7 @@ async def wait_mixer_up(cfg: Config, http: aiohttp.ClientSession, timeout: float
     answering. Returns the seconds it took.
 
     One 200 is not enough. A restarted container's published-port forwarding has been observed answering and
-    then going away again seconds later (O-113): a board's S20 passed this wait, joined a peer, and then lost
+    then going away again seconds later: a board's S20 passed this wait, joined a peer, and then lost
     the mixer for the remaining 24 scenarios. The container was healthy throughout -- `docker exec ... curl
     127.0.0.1` answered 200 while the same request to localhost did not -- so this is the host-side hop, not
     the mixer. Requiring `settled` consecutive probes means a scenario only continues once forwarding has
@@ -1203,7 +1203,7 @@ async def mixer_restart(cfg: Config) -> subprocess.CompletedProcess:
 
 def mixer_target(cfg: Config) -> str:
     """What the harness's docker reads and writes address, for Fail details: the named container, or the compose service.
-    O-94: every log read, exec and restart goes through mixer_logs / mixer_exec / mixer_restart, never compose directly,
+    Every log read, exec and restart goes through mixer_logs / mixer_exec / mixer_restart, never compose directly,
     so a run against a scratch container (--container) never reads the live grid mixer."""
     return f"container {cfg.container}" if cfg.container else "compose service janus"
 

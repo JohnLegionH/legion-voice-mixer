@@ -89,7 +89,7 @@ int slv_mix_nminus1_stereo(float *out, size_t n,
 typedef int (*slv_mix_chunk_fn)(void *ctx, float *out, int cap, int want);
 
 /*! \brief Fill one mix frame from a source whose packets may be shorter than the frame
- * (O-81: a viewer may send 10 ms packets into a 20 ms tick).
+ * (a viewer may send 10 ms packets into a 20 ms tick).
  *
  * Calls \p chunk up to \p max_chunks times, appending each chunk to \p out, until
  * \p frame samples per channel are present. If the source runs out part-way, the
@@ -125,7 +125,7 @@ double slv_mix_rms(const float *buf, size_t n);
  * \p threshold. Not the encode-skip decision (see \ref slv_mix_encode_skip). */
 int slv_mix_is_silent(const float *buf, size_t n, double threshold);
 
-/*! \brief Encode-skip decision for one listener's finished frame (O-82): non-zero
+/*! \brief Encode-skip decision for one listener's finished frame: non-zero
  * when nothing was summed (\p summed <= 0) or every sample is exactly zero.
  *
  * There is deliberately no level threshold. Distance falloff drives a single

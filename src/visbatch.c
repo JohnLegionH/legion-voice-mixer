@@ -179,7 +179,7 @@ slv_visbatch_status slv_visbatch_parse(const char *buf, size_t len, slv_visbatch
 	}
 	out->room = (int64_t)json_integer_value(jroom);
 
-	/* Phase 0 authority stamp (optional; nonspatial-phase0-design.md §1). Checked before any allocation,
+	/* Phase 0 authority stamp (optional). Checked before any allocation,
 	 * so a malformed stamp returns with nothing to free. */
 	json_t *jepoch = json_object_get(b, "room_epoch");
 	if(jepoch != NULL) {

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 # docker-entrypoint.sh tests:
-#   - O-55 WS default, O-65 fail-closed secrets, the nat_1_1_mapping verdict, JS_NAT_EXTRA_IPS;
+#   - WS default, fail-closed secrets, the nat_1_1_mapping verdict, JS_NAT_EXTRA_IPS;
 #   - A.1 address discovery, state file and periodic re-check;
 #   - A.5 Janus events for the ICE diagnostics collector, and the debug-level warning for TURN REST credentials.
 # No Docker: the entrypoint runs against a scratch config dir and a stub Janus binary via its JANUS_*
@@ -125,7 +125,7 @@ hasstate() { grep -Fq -- "$1" "$CONF/state/public-address.json" 2>/dev/null; }
 # The state file is valid JSON (checked only where python3 exists, as in the image).
 json_ok() { if command -v python3 >/dev/null 2>&1; then python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1"; else [ -s "$1" ]; fi; }
 
-# ---- O-65: fail closed on empty secrets ----
+# ---- Fail closed on empty secrets ----
 run_ep JS_API_SECRET= JS_ADMIN_SECRET=
 check "empty secrets -> exit 1" '[ "$RC" -eq 1 ]'
 check "empty secrets -> FATAL names both" 'has "FATAL: JS_API_SECRET and JS_ADMIN_SECRET empty"'
@@ -435,7 +435,7 @@ check "A.2 JS_SELFCHECK_TIMEOUT_S=0 -> WARNING, and 20" 'has "JS_SELFCHECK_TIMEO
 run_ep JS_SELFCHECK=on JS_SELFCHECK_TIMEOUT_S=1 SLV_SELFCHECK_CMD="$SCSLOW"
 check "A.2 a self-check that overruns is stopped by the backstop (bound + 5 s)" 'has "[selfcheck] ===== legion-voice self-check was stopped after 6 s" && has STUB-JANUS-RAN'
 
-# ---- O-55: defaults reproduce pre-6m behaviour; narrowing is opt-in ----
+# ---- Defaults reproduce pre-6m behaviour; narrowing is opt-in ----
 run_ep
 check "no JS_ADMIN_BIND -> 0.0.0.0 + WARN" 'has "INFO: admin API bind=0.0.0.0 port=14225" && has "WARNING: admin API is reachable on all interfaces; protected by JS_ADMIN_SECRET only"'
 check "no JS_WS_ENABLED -> ws on" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = true" ] && [ "$(cfg janus.transport.websockets.jcfg ws_port)" = "ws_port = 8188" ] && ! section janus.jcfg transports | grep -Eq "^[[:space:]]*disable" && has "INFO: websockets transport enabled=true port=8188" && has " ws=8188 "'

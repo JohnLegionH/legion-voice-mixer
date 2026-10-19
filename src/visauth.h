@@ -6,7 +6,7 @@
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
  * \brief    Phase 0 visibility authority: epoch parsing, the epoch adoption rule, the listener rule rows,
- *           and the two knobs (docs/voice/nonspatial-phase0-design.md §1, §4, §5, §6.1).
+ *           and the two knobs.
  *
  * \details  Header-only and libc-only, like roster.h, so both the plugin and the dependency-free
  * visbatch.c parser use it, and tests/test_visauth.c exercises it directly. It holds the pure rules;
@@ -127,7 +127,7 @@ static inline int slv_vis_row(int armed, uint64_t record_epoch, uint64_t auth_ep
 	return 4;
 }
 
-/*! \brief Slice V-1b (O-120): does a heartbeat carrying this feed age count as LIVE?
+/*! \brief Does a heartbeat carrying this feed age count as LIVE?
  *
  * The sim's heartbeat runs on its own timer, so it keeps arriving while the sim's visibility feeder is starved.
  * `feed_age_ms` is how old the sim says its own feed was when it BUILT the body; a heartbeat older than the

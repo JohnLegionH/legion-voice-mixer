@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Where the Janus API secret travels (ledger O-101), pinned by test.
+"""Where the Janus API secret travels, pinned by test.
 
-The finding of slice 0.10a: every POST this repo makes already carries `apisecret` in the JSON body, and the
+The finding: every POST this repo makes already carries `apisecret` in the JSON body, and the
 ONLY requests that put it in a URL are the long-poll GETs - because Janus offers no other way. Its HTTP
 transport reads the secret for a GET with
     MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "apisecret")

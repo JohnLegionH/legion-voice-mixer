@@ -57,7 +57,7 @@ def env_config() -> dict:
         "segment_seconds": int(os.environ.get("SEGMENT_SECONDS", "600")),
     })
     if cfg["record"]:
-        require_recording_opt_in("injector")   # SC-96: RECORD=1 is a recording tap too
+        require_recording_opt_in("injector")   # RECORD=1 is a recording tap too
     return cfg
 
 
@@ -213,17 +213,17 @@ class Injector(ConnectorPeer):
         self.shutdown_note = ", close wav" if cfg["record"] else ""
 
     def on_identity(self, display: str, room: int) -> None:
-        # Slice 0.7b: RECORD=1 segments are named for the display actually joined with (a capability grant may change it).
+        # RECORD=1 segments are named for the display actually joined with (a capability grant may change it).
         if self._writer is not None and display != self._writer_display:
             self._writer = WavSegmentWriter(self._cfg["out_dir"], display, self._cfg["segment_seconds"])
             self._writer_display = display
 
     def join_extra(self) -> dict:
-        # SC-96: with RECORD=1 this peer is a recording tap; the mixer marks and logs it.
+        # With RECORD=1 this peer is a recording tap; the mixer marks and logs it.
         return {"recorder": True} if self._cfg["record"] else {}
 
     def local_track(self):
-        # Slice 0.8f: called once per join attempt. The reader (and its place in the source) lives for the whole
+        # Called once per join attempt. The reader (and its place in the source) lives for the whole
         # run; each attempt gets a fresh track over it, because a stopped track cannot be sent again.
         if not self._reader_started:
             self._reader.start()
@@ -254,7 +254,7 @@ class Injector(ConnectorPeer):
                 log.warning("audio track ended: %s", e)
 
     def on_teardown(self) -> None:
-        # One attempt ends; the peer may join again (slice 0.8f), so the reader keeps running.
+        # One attempt ends; the peer may join again, so the reader keeps running.
         if self._track is not None:
             self._track.stop()
         if self._rx_task:

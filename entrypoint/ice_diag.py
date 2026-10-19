@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""legion-voice ICE diagnostics (slice A.5, SC-126): one record per slvoice session, kept after the session ends.
+"""legion-voice ICE diagnostics (slice A.5): one record per slvoice session, kept after the session ends.
 
 The question it answers is "why did voice fail for that one user", after the fact and without Janus's raw log.
 
@@ -11,7 +11,7 @@ How it collects:
     JS_ICE_DIAG_HISTORY > 0) POSTs session, handle, WebRTC and plugin events to this collector on
     127.0.0.1:SLV_ICE_DIAG_PORT (default 14229). jsep (SDP) and media events are not subscribed.
   - The slvoice plugin sends a plugin event when a participant joins a room, leaves it, or is reaped for having no
-    media (O-75). That is where the display (the agent UUID), the room and the reap reason come from.
+    media. That is where the display (the agent UUID), the room and the reap reason come from.
   - Janus never sends an event for a remote candidate, so the collector reads remote candidate types, and the
     plugin's RTP counters, from the Admin API's handle_info every SLV_ICE_DIAG_POLL_S seconds (default 2) while a
     session is live. That needs JS_ADMIN_SECRET; without it the remote counts stay unobserved.

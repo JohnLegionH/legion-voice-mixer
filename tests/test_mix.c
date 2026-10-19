@@ -187,7 +187,7 @@ static void test_stereo_path(void) {
 	CHECK(identical, "wrapper output identical to stereo core with gainsL==gainsR");
 }
 
-/* ---- O-81: a frame is filled from packets shorter than the frame --------- */
+/* ---- A frame is filled from packets shorter than the frame --------- */
 typedef struct {
 	int   chunk;   /* samples/ch per packet */
 	int   left;    /* packets still available */
@@ -254,7 +254,7 @@ static void test_fill_frame(void) {
 	CHECK(n == 0 && err == -3, "decode error: 0 samples and the error is reported");
 }
 
-/* ---- O-82: a quiet but audible mix is encoded ----------------------------- */
+/* ---- A quiet but audible mix is encoded ----------------------------- */
 static void test_encode_skip(void) {
 	printf("test_encode_skip\n");
 	enum { N = 1920 };

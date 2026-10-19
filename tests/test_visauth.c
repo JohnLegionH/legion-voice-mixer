@@ -6,7 +6,6 @@
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
  * \brief    Unit tests for Phase 0 slice 0.3, the mixer's visibility authority
- *           (docs/voice/nonspatial-phase0-design.md).
  *
  * \details  Reaches the plugin's statics by #including janus_slvoice.c, like test_room_lifecycle, and is linked the
  * same way. Sources carry a real Opus tone through the jitter buffer (primed as tests/bench_tick.c does), so "audible"
@@ -555,7 +554,7 @@ static void test_decision_table(void) {
 	run_ticks(room, &src, 1, 5);
 	CHECK(l->last_mix_rms > 0.05, "new epoch: an arming replace in E2 makes L audible (assertion 12)");
 
-	/* A recorder tap, or any peer with no display, is never armed (O-88: silent until armed). */
+	/* A recorder tap, or any peer with no display, is never armed (silent until armed). */
 	CHECK(row_of(room, NULL) == 1, "a session without a display stands in row 1");
 
 	json_decref(batch);
@@ -914,7 +913,7 @@ static void test_replies(void) {
 	free_session(l);
 }
 
-/* Slice 0.7d (ledger O-95): a heartbeat and a batch are separate flights, so a heartbeat the sim BUILT before a batch
+/* A heartbeat and a batch are separate flights, so a heartbeat the sim BUILT before a batch
  * succeeded can ARRIVE after it. Two orderings, constructed rather than raced:
  *   A  a replace for L is applied at N+1, then a heartbeat built at N arrives naming L at N;
  *   B  an arming replace for a new listener L2 is applied, then a heartbeat built before L2 existed arrives omitting it.
@@ -980,7 +979,7 @@ static void test_heartbeat_ordering(void) {
 	free_session(s);
 }
 
-/* Slice V-1b (O-120): the sim reports its feed's age, the mixer decides whether that is live. */
+/* The sim reports its feed's age, the mixer decides whether that is live. */
 static void test_feed_age_liveness(void) {
 	/* absent = a pre-V1b sim: live, so the field changes nothing for an old sim */
 	CHECK(slv_vis_feed_live(0, -1, 8000), "feed age: absent is live (pre-V1b sim unchanged)");
@@ -989,7 +988,7 @@ static void test_feed_age_liveness(void) {
 	CHECK(slv_vis_feed_live(1, 0, 8000), "feed age: 0 ms is live");
 	CHECK(slv_vis_feed_live(1, 250, 8000), "feed age: one tick of slip is live");
 	CHECK(slv_vis_feed_live(1, 8000, 8000), "feed age: exactly the window is still live");
-	/* past the window is NOT live - this is the O-120 case, a starved feeder still heartbeating */
+	/* past the window is NOT live - this is the starved-feeder case, a feeder still heartbeating */
 	CHECK(!slv_vis_feed_live(1, 8001, 8000), "feed age: one ms past the window is not live");
 	CHECK(!slv_vis_feed_live(1, 60094, 8000), "feed age: the measured 60 s stall is not live");
 	/* malformed is treated as absent: a broken clock must not be able to silence a grid */

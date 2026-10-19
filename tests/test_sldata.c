@@ -221,7 +221,7 @@ static void test_per_source_map(void) {
 	CHECK(!(d.fields_seen & SLV_FIELD_M) && d.n_peers == 0, "bad entry not counted");
 }
 
-/* ---- O-64: persistent geometry merge ------------------------------------ */
+/* ---- Persistent geometry merge ------------------------------------ */
 /* Parse `json` and merge it into (dst, dst_fields), as incoming_data does. */
 static void merge_msg(slv_sldata *dst, unsigned *dst_fields, const char *json) {
 	slv_sldata d;

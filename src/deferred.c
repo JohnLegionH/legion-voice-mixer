@@ -141,7 +141,7 @@ static void channel_update(char (**col)[SLV_UUID_LEN], int *n_col,
 		*n_col = 0;
 		return;
 	}
-	/* O-70: allocate and fill BEFORE freeing the old column, so a malloc failure leaves
+	/* Allocate and fill BEFORE freeing the old column, so a malloc failure leaves
 	 * the channel unchanged as promised above (it used to free first and leave it empty). */
 	char (*fresh)[SLV_UUID_LEN] = malloc((size_t)n_src * SLV_UUID_LEN);
 	if(fresh == NULL)

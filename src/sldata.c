@@ -225,7 +225,7 @@ slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out)
 }
 
 void slv_sldata_merge(slv_sldata *dst, unsigned *dst_fields, const slv_sldata *src) {
-	/* O-64: copy only what this message carried. j/l carry no stored value; their bits
+	/* Copy only what this message carried. j/l carry no stored value; their bits
 	 * still join the union. A map-form "m"/"ug" sets its bit with the legacy scalar left
 	 * at 0 by the parse, which (as before) overwrites an earlier scalar m/ug. */
 	if(dst == NULL || dst_fields == NULL || src == NULL)

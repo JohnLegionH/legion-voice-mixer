@@ -71,7 +71,7 @@ typedef struct slv_vis_entry {
 	int n_excl;                        /*!< number of source UUIDs */
 } slv_vis_entry;
 
-/*! \brief Phase 0 (nonspatial-phase0-design.md §1.3): the listener generation the sim believes the mixer
+/*! \brief Phase 0: the listener generation the sim believes the mixer
  * holds for one listener named by an add/remove. */
 typedef struct slv_vis_base {
 	char listener[SLV_UUID_LEN];
@@ -91,7 +91,7 @@ typedef struct slv_visbatch {
 	slv_vis_entry *mute_entries;       /*!< heap array of \c n_mute_entries moderation-mute updates */
 	int n_mute_entries;
 	int n_skipped;                     /*!< malformed listener/source items skipped (both channels) */
-	/* Phase 0 authority stamp (nonspatial-phase0-design.md §1). A batch from a sim without arming has
+	/* Phase 0 authority stamp. A batch from a sim without arming has
 	 * none of these keys: has_epoch stays 0 and the batch is handled exactly as before. When room_epoch is
 	 * present it must be 16 hex digits and policy_generation an integer 1..2^32-1, else the batch is
 	 * MALFORMED. base is optional (a replace needs none). */

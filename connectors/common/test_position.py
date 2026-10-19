@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for slice 0.8h (ledger O-62): a connector has a position. pytest-style; a __main__ fallback runs them
+"""Unit tests for a connector's position. pytest-style; a __main__ fallback runs them
 with plain python. Run from connectors/: `python -m pytest common/` or `python -m common.test_position`.
 
 Before 0.8h a connector peer opened its SLData channel and sent nothing on it, so the mixer held no geometry for it and

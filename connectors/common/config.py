@@ -9,12 +9,12 @@ import os
 import sys
 
 
-#: SC-96 (spec §3.5): writing room audio to disk needs this set to exactly "yes" (any case).
+#: Recording opt-in (spec §3.5): writing room audio to disk needs this set to exactly "yes" (any case).
 RECORDING_OPT_IN_ENV = "RECORDING_OPT_IN"
 
 
 def require_recording_opt_in(prog: str, environ=os.environ) -> None:
-    """Refuse to record without an explicit operator opt-in (SC-96).
+    """Refuse to record without an explicit operator opt-in.
 
     Prints the effective value first, so the start-up log always shows it, then exits
     non-zero unless RECORDING_OPT_IN is "yes". Default is off: an unset, empty or any
@@ -31,7 +31,7 @@ def require_recording_opt_in(prog: str, environ=os.environ) -> None:
 
 
 def capability_env(prog: str, environ=os.environ) -> tuple:
-    """Slice 0.7b: CONNECTOR_CAP_URL and CONNECTOR_CAP_SECRET, both or neither. Neither returns (None, None) and the
+    """CONNECTOR_CAP_URL and CONNECTOR_CAP_SECRET, both or neither. Neither returns (None, None) and the
     join is exactly today's. One without the other is FATAL: a half-configured peer would otherwise join bare against a
     mixer that requires a capability, and an operator should learn that at start, not from a refusal log."""
     url = (environ.get("CONNECTOR_CAP_URL") or "").strip()
@@ -47,7 +47,7 @@ POSITION_ENV = "CONNECTOR_POSITION_GLOBAL_CM"
 
 
 def position_env(prog: str, environ=os.environ):
-    """Slice 0.8h (O-62): CONNECTOR_POSITION_GLOBAL_CM=x,y,z - this connector's position in the frame a viewer's
+    """CONNECTOR_POSITION_GLOBAL_CM=x,y,z - this connector's position in the frame a viewer's
     SLData uses: GLOBAL centimetres as integers, (region global origin + position in the region) x 100. For a peer with
     no CONNECTOR_CAP_URL; with one, the sim's grant carries the position and wins. Unset returns None: no position,
     mixed non-spatially (the peer warns once at start). Malformed is fatal, like the capability pair."""
@@ -83,9 +83,9 @@ def base_env(prog: str) -> dict:
         cfg["room"] = int(cfg["room"])
     except ValueError:
         sys.exit(f"{prog}: ROOM must be an integer room number, got {cfg['room']!r}")
-    cfg["position_cm"] = position_env(prog)   # slice 0.8h; a grant's "position" replaces it at every join
+    cfg["position_cm"] = position_env(prog)   # a grant's "position" replaces it at every join
     if cap_url:
-        # Slice 0.7b: the sim's grant supplies display and room at every join; the env values are the expectation
+        # The sim's grant supplies display and room at every join; the env values are the expectation
         # it is compared against (common/peer.py warns when they disagree).
         cfg["cap_url"] = cap_url
         cfg["cap_secret"] = cap_secret

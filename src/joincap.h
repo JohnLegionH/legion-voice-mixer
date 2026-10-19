@@ -5,8 +5,7 @@
 /*! \file    joincap.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    The sim-issued join capability: parse, verify, context and replay checks
- *           (docs/voice/nonspatial-phase0-design.md §11, ledger O-46).
+ * \brief    The sim-issued join capability: parse, verify, context and replay checks.
  *
  * \details  A capability is minted by the sim for one join and verified here:
  *
@@ -90,7 +89,7 @@ slv_joincap_verdict slv_joincap_check(const slv_joincap *c, const char *display,
  * WARN with the observed offset. \c out_offset_s is signed: positive means the capability's clock ran ahead. */
 int slv_joincap_used_skew(const slv_joincap *c, int64_t now_s, int64_t *out_offset_s);
 
-/*! \brief The epoch check (§11.5, restated by the 0.8b amendment, ledger O-96): the capability's
+/*! \brief The epoch check (§11.5, restated by the 0.8b amendment): the capability's
  * (epoch, generation) against the room's adopted authority.
  *
  * The GENERATION never refuses. The sim publishes a room's generation when it is ALLOCATED
@@ -120,7 +119,7 @@ typedef enum slv_joincap_gen_note {
  * Never NULL; SLV_JOINCAP_GEN_MATCH is "match". */
 const char *slv_joincap_gen_note_str(slv_joincap_gen_note n);
 
-/*! \brief Classify an accepted capability's difference from the room (O-96). Pure; it changes no verdict. A
+/*! \brief Classify an accepted capability's difference from the room. Pure; it changes no verdict. A
  * capability slv_joincap_generation() refuses classifies as SLV_JOINCAP_GEN_MATCH: its refusal is the count. */
 slv_joincap_gen_note slv_joincap_generation_note(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen);
 

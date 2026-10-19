@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for the slice 0.8f rejoin loop (common/peer.py, ledger O-99). pytest-style; a __main__ fallback runs them
+"""Unit tests for the rejoin loop (common/peer.py). pytest-style; a __main__ fallback runs them
 with plain python. Run from connectors/: `python -m pytest common/` or `python -m common.test_rejoin`.
 
 The Janus/WebRTC half of an attempt (ConnectorPeer._session) is replaced by a script here; the integration harness's

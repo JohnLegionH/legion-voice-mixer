@@ -34,7 +34,7 @@ PKGCONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config
 # janus-gateway pulls in glib-2.0 and jansson via its Requires:; we name them
 # explicitly too so a build still works if only their .pc files are present.
 # Phase 1B echoes audio, so opus (decode/encode) is a dependency again.
-# openssl: slice 0.4's join capability verifies an HMAC-SHA256 with a constant-time compare
+# openssl: the join capability verifies an HMAC-SHA256 with a constant-time compare
 # (src/joincap.c). Janus already links OpenSSL for DTLS, so this adds no new runtime dependency.
 PKGS := janus-gateway glib-2.0 jansson opus openssl
 
@@ -79,7 +79,7 @@ TEST_AZIMUTH_BIN   := tests/test_azimuth
 TEST_AZIMUTH_SRCS  := tests/test_azimuth.c
 TEST_PAN_BIN       := tests/test_pan
 TEST_PAN_SRCS      := tests/test_pan.c
-# test_sdp_redact: O-66 SDP log redaction (header-only sdp_redact.h; libc only).
+# test_sdp_redact: SDP log redaction (header-only sdp_redact.h; libc only).
 TEST_REDACT_BIN    := tests/test_sdp_redact
 TEST_REDACT_SRCS   := tests/test_sdp_redact.c
 # bench_tick is a load HARNESS, not a unit test — deliberately NOT in `test:`.
@@ -93,15 +93,15 @@ BENCH_CFLAGS       := $(CFLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -
 # avoids 14 fragile signature-matched stubs. Safe because those paths are never
 # invoked at runtime — a bad assumption would segfault the run immediately.
 BENCH_LIBS         := $(PKG_LIBS) -pthread -Wl,--unresolved-symbols=ignore-all
-# test_room_lifecycle: slice-5 room lifecycle (O-68 reset_room_state, O-54 grace destroy, O-56
-# hangup leaves, O-67 shared teardown). It reaches the plugin's statics by #including
+# test_room_lifecycle: the room lifecycle (reset_room_state, grace destroy, hangup leaves,
+# shared teardown). It reaches the plugin's statics by #including
 # janus_slvoice.c exactly like bench_tick, so it builds with the bench flags and links -- but
 # unlike bench_tick it IS a unit test and runs in `make test`.
 TEST_LIFECYCLE_BIN  := tests/test_room_lifecycle
 TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/mixer/mix.c
 TEST_VISAUTH_BIN  := tests/test_visauth
 TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/joincap.c src/mixer/mix.c
-# test_joincap: slice 0.4's join capability (src/joincap.c). Links OpenSSL and libc only.
+# test_joincap: the join capability (src/joincap.c). Links OpenSSL and libc only.
 TEST_JOINCAP_BIN  := tests/test_joincap
 TEST_JOINCAP_SRCS := tests/test_joincap.c src/joincap.c
 TEST_SSL_CFLAGS   := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags openssl 2>/dev/null)
@@ -116,7 +116,7 @@ TEST_GLIB_LIBS   := $(shell $(PKGCONFIG) --libs glib-2.0 2>/dev/null)
 # `integration` sits above `all`; without this a bare `make` (the Dockerfile's plugin build) ran it.
 .DEFAULT_GOAL := all
 
-# Two-peer integration harness (O-73, tests/integration/README.md). Runs against a LIVE mixer and
+# Two-peer integration harness (tests/integration/README.md). Runs against a LIVE mixer and
 # is NOT part of `test`: the image build never runs it. Needs Python 3.12 with
 # tests/integration/requirements.txt; pass flags through, e.g. INTEGRATION_ARGS="--only S3 --no-restart".
 PYTHON           ?= python3
@@ -151,7 +151,7 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN
 $(TEST_JOINCAP_BIN): $(TEST_JOINCAP_SRCS) src/joincap.h
 	$(CC) $(TEST_SSL_CFLAGS) -o $@ $(TEST_JOINCAP_SRCS) $(TEST_SSL_LIBS)
 
-# test_visauth: Phase 0 slice 0.3 (keying, the decision table, staleness, replies, shadow counters). Like
+# test_visauth: Phase 0 (keying, the decision table, staleness, replies, shadow counters). Like
 # test_room_lifecycle it #includes janus_slvoice.c and builds with the bench flags.
 $(TEST_VISAUTH_BIN): $(TEST_VISAUTH_SRCS) src/janus_slvoice.c src/visauth.h
 	$(CC) $(BENCH_CFLAGS) -o $@ $(TEST_VISAUTH_SRCS) $(BENCH_LIBS)

@@ -228,7 +228,7 @@ async def s8_hangup_rejoin_same_display(ctx: Ctx) -> None:
     # Make the overlap real. A rejoin started after the crash -- even one whose offer is ready at the
     # moment of the crash -- reaches the plugin only after Janus has processed the old PeerConnection's
     # DTLS close (measured 2026-09-13: no duplicate-display WARN either way). So B2 joins while B is
-    # still up, which is the residue case O-13 is about (two rows for one display), and then B's
+    # still up, which is the residue case this is about (two rows for one display), and then B's
     # PeerConnection dies; the old row must go and the new handle must be the one left.
     b2 = await ctx.join("B2", r, db)
     await ctx.until_participants(r, lambda rows: displays(rows).count(db) == 2,
@@ -285,7 +285,7 @@ async def s10_no_media_reap(ctx: Ctx) -> None:
 
 
 async def s11_muted_source_dot_dark(ctx: Ctx) -> None:
-    """SC-87: a source moderation-muted for one listener lights no dot for that listener, while an
+    """A source moderation-muted for one listener lights no dot for that listener, while an
     unmuted listener in the same room still sees it lit."""
     r = ctx.new_room()
     da, db, dc = new_display(), new_display(), new_display()
@@ -318,7 +318,7 @@ async def s11_muted_source_dot_dark(ctx: Ctx) -> None:
 
 
 async def s12_spatial_cull_and_pan(ctx: Ctx) -> None:
-    """The spatial path runs: in a room created WITHOUT spatial_audio (spatial by default, O-83), a
+    """The spatial path runs: in a room created WITHOUT spatial_audio (spatial by default), a
     source inside the cull distance is audible to the listener and panned, the same source beyond
     the cutoff is culled, and moving back inside the re-add distance makes it audible again. Observed
     through the listener's handle_info mix levels, not by ear."""
@@ -386,7 +386,7 @@ async def s13_relay_only_peer(ctx: Ctx) -> None:
 
 
 async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
-    """A.6: the ICE diagnostics path verdict agrees with where the peer's packets actually came from.
+    """The ICE diagnostics path verdict agrees with where the peer's packets actually came from.
     Ground truth is source_oracle.verdict: the remote address:port of Janus's selected pair is, or is not, one of the
     endpoints A signalled (its offer's host/srflx candidates). An IP A owns is not enough: a published-port proxy on
     A's own host re-sends from the Docker gateway, which is one of A's addresses, but from a port A never signalled.
@@ -426,7 +426,7 @@ async def s14_path_verdict_matches_source(ctx: Ctx) -> None:
                     "peer_endpoints": truth.get("peer_endpoints"), "path": path})
 
 
-# ---- Phase 0 slice 0.3: the visibility authority (docs/voice/nonspatial-phase0-design.md §9) -------------------------
+# ---- Phase 0: the visibility authority -------------------------
 # The harness is the sim here: it declares rooms, arms, heartbeats and reads the replies. S15 needs a mixer with
 # fail-closed OFF (the shipped default), S16-S20 one with it ON (a scratch mixer, never the live grid's), and S21 a
 # pre-0.3 image; each skips on the wrong mixer, so one full run proves which mode it ran against.
@@ -853,7 +853,7 @@ async def s21_old_image_ignores_stamp(ctx: Ctx) -> None:
         raise Fail("peer_ctl_heartbeat is an unknown request to the old image", hb)
 
 
-# ---- Phase 0 slice 0.4: the sim-issued join capability (design §11, ledger O-46) -------------------------------
+# ---- Phase 0: the sim-issued join capability -------------------------------
 # The harness mints capabilities exactly as the sim does, so it needs the mixer's JS_JOIN_CAP_SECRET
 # (--join-cap-secret). S22 needs a mixer with the requirement OFF, S23 one with it ON (a scratch mixer, never the
 # grid's), and S24 a pre-0.4 image. Each skips on the wrong mixer.
@@ -867,7 +867,7 @@ def _b64u(raw: bytes) -> str:
 
 def _mint_cap(secret: str, agent: str, session: str, room: int, epoch: str = _NO_EPOCH, generation: int = 0,
               iat: int | None = None, lifetime: int = 60, nonce: str | None = None) -> str:
-    """The sim's JoinCapability.Mint. Slice 0.8e: one implementation, in harness.mint_cap, shared with the ordinary
+    """The sim's JoinCapability.Mint. One implementation, in harness.mint_cap, shared with the ordinary
     joins the harness now mints for itself."""
     return mint_cap(secret, agent, session, room, epoch=epoch, generation=generation, iat=iat, lifetime=lifetime,
                     nonce=nonce)
@@ -941,7 +941,7 @@ async def s22_join_capability_shadow(ctx: Ctx) -> None:
     if after != before:
         raise Fail("an undeclared room counts no missing capability", {"before": before, "after": after})
 
-    # O-91: the PER-SESSION marker. Everything checked above is process-wide and cannot say whether a GIVEN
+    # The PER-SESSION marker. Everything checked above is process-wide and cannot say whether a GIVEN
     # join carried a capability -- which is why a soak could not attribute what it counted. These two fields
     # can. Checked on all four sessions after the fact, so this also shows the marker persists rather than
     # being a transient of the join. A session that never joined reads "none"; no harness peer can be in that
@@ -985,9 +985,9 @@ async def s23_join_capability_required(ctx: Ctx) -> None:
                    join_cap=_mint_cap(secret, db, new_display(), r), session_id=session_b)
     await _refused(ctx, "WRONGROOM", r, db, "cap_wrong_room",
                    join_cap=_mint_cap(secret, db, session_b, r + 7), session_id=session_b)
-    # Slice 0.8b (O-96): cap_stale_generation now means ONE thing -- an epoch BELOW the room's adopted one. The
+    # Cap_stale_generation now means ONE thing -- an epoch BELOW the room's adopted one. The
     # room must therefore have adopted one before this leg: before 0.8b any epoch at all was refused here,
-    # because the room had adopted none, which is exactly the false refusal O-96 removes.
+    # because the room had adopted none, which is exactly the false refusal the generation rule removes.
     e_hi, e_lo = _epoch(2), _epoch(1)
     _check_reply(await ctx.admin.peer_ctl_batch(r, "replace", excl={db: []}, mute={db: []},
                                                 epoch=e_hi, generation=1),
@@ -1023,7 +1023,7 @@ async def s24_old_mixer_ignores_capability(ctx: Ctx) -> None:
     await ctx.until_info(a, _audible, "the old mixer admitted a stamped join and mixes it exactly as before")
 
 
-# ---- Phase 0 slice 0.5: the remaining §9 assertions ------------------------------------------------------------
+# ---- Phase 0: the remaining assertions ------------------------------------------------------------
 # S25-S30 and S32 need fail-closed ON (a scratch mixer, never the grid's); S31 needs a mixer STARTED below the §5
 # minimum (scratch.sh up-clamp). Each skips on the wrong mixer, so one run proves which mode it ran against.
 #
@@ -1088,8 +1088,8 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
     await _mode(ctx, l, want_fail_closed=True)
 
     e1 = _epoch(1)
-    # Slice 0.7d: as_of rides along as the 0.7d sim sends it, updated in the same step as the listener map, so a heartbeat
-    # built before a batch applied is outdated at the mixer instead of racing it (O-95).
+    # As_of rides along as the 0.7d sim sends it, updated in the same step as the listener map, so a heartbeat
+    # built before a batch applied is outdated at the mixer instead of racing it.
     hb = Heartbeater(ctx.admin, e1, r, {l.display: 1, m.display: 1, src.display: 1}, as_of=0).start()
     ctx.background.append(hb)
     armed = await ctx.admin.peer_ctl_batch(r, "replace",
@@ -1142,7 +1142,7 @@ async def s26_per_listener_staleness(ctx: Ctx) -> None:
 
 
 async def _capture_o95(ctx, r, l, m, hb, rearm, since, t_send, t_reply, t_listeners, failure) -> None:
-    """O-95: everything needed to classify a failed restore, taken at the moment of failure. Written to
+    """Everything needed to classify a failed restore, taken at the moment of failure. Written to
     $O95_CAPTURE_DIR (default: the current directory) as o95-<room>.json, and summarised on stdout."""
     import os
     t_fail = time.monotonic()
@@ -1276,7 +1276,7 @@ async def s29_declared_room_no_listeners(ctx: Ctx) -> None:
 
 async def s30_recorder_in_declared_room(ctx: Ctx) -> None:
     """§9 24. A recording tap in a declared room is silent until armed, like any other participant (open question 3
-    documents that decision). SC-96's "recorder" join key is old; what is new is asserting the tap is gated."""
+    documents that decision). The "recorder" join key is old; what is new is asserting the tap is gated."""
     r = ctx.new_room()
     await ctx.control.create_room(r, f"integration {ctx.name}", vis_authority=True)
     src = await ctx.join("SRC", r)
@@ -1367,7 +1367,7 @@ async def s32_takeover_after_the_window(ctx: Ctx) -> None:
     await ctx.until_info(a, _audible, "§9 13b: the takeover's own arming makes A audible again")
 
 
-# ---- Phase 0 slice 0.7a: connector / recorder arming (ledger O-88) ----------------------------------------------
+# ---- Phase 0: connector / recorder arming ----------------------------------------------
 # The sim arms a voice connector exactly as it arms an avatar: its NPC id is the peer's display, the room is the
 # estate room, and unregistering it drops it from the population, so the next heartbeat OMITS it. S33 checks the
 # mixer end of that ruling, for a recorder tap as a listener and for a non-recorder connector as a source. Every
@@ -1378,7 +1378,7 @@ OMIT_DISARM_S = 3.0
 
 
 async def s33_connector_arming_and_omission(ctx: Ctx) -> None:
-    """O-88 / slice 0.7a. In a declared room under fail-closed, with SRC talking: a recorder tap is silent unarmed,
+    """In a declared room under fail-closed, with SRC talking: a recorder tap is silent unarmed,
     hears the room once an arming replace names its display, and is silent again after a heartbeat that omits it. A
     non-recorder connector-style peer as a SOURCE is inaudible to an armed listener while unarmed, audible armed, and
     inaudible again after omission. Both disarms are the omission itself, not the staleness window."""
@@ -1438,7 +1438,7 @@ async def s33_connector_arming_and_omission(ctx: Ctx) -> None:
         raise Fail("S33: L itself stays armed through the connector's omission", pick(info))
 
 
-# ---- Phase 0 slice 0.7b: the connector join capability (ledger O-88, design §11.10) ----------------------------
+# ---- Phase 0: the connector join capability ----------------------------
 # A connector peer is not exempted from JS_JOIN_CAP_REQUIRED: it fetches a sim-minted capability before every join.
 # S34 drives the REAL connector join code (common/peer.py + common/joincap.py, through TestPeer) against a stub of the
 # sim's endpoint that mints with the harness's own minter (_mint_cap, the sim's JoinCapability.Mint in Python).
@@ -1455,12 +1455,12 @@ class CapStub:
         self.name = name
         self.mode = "ok"
         self.hits = {"ok": 0, "replay": 0, "404": 0, "unauthorised": 0}
-        #: slice 0.8f: every capability this stub minted, in order (S37 leg c: each is used at most once)
+        #: Every capability this stub minted, in order (S37 leg c: each is used at most once)
         self.issued: list = []
         self._last = None
         self._runner = None
         self.url = ""
-        #: slice 0.8h: when set, the grant carries "position": {"x","y","z"} in GLOBAL centimetres, as the sim's does
+        #: When set, the grant carries "position": {"x","y","z"} in GLOBAL centimetres, as the sim's does
         self.position = None
 
     async def start(self) -> "CapStub":
@@ -1521,7 +1521,7 @@ async def _join_answer(peer: TestPeer, what: str, timeout: float = 20.0) -> dict
 
 
 async def s34_connector_join_capability(ctx: Ctx) -> None:
-    """O-88 / slice 0.7b, JS_JOIN_CAP_REQUIRED=1, declared room. A connector peer with no CONNECTOR_CAP_* is refused
+    """JS_JOIN_CAP_REQUIRED=1, declared room. A connector peer with no CONNECTOR_CAP_* is refused
     cap_missing; configured against a healthy endpoint it joins; a capability replayed on a second join is refused
     cap_replayed; and with the endpoint answering 404 the peer keeps retrying and sends no join at all."""
     if not ctx.cfg.join_cap_secret:
@@ -1573,14 +1573,14 @@ async def s34_connector_join_capability(ctx: Ctx) -> None:
         raise Fail("S34: and it is still running, not given up", repr(retrying._task.exception()))
 
 
-# ---- Phase 0 slice 0.7d: heartbeat ordering against batches (ledger O-95) --------------------------------------------
+# ---- Phase 0: heartbeat ordering against batches --------------------------------------------
 # A heartbeat and a batch are separate flights, so a heartbeat the sim built before a batch succeeded can arrive after it.
 # S35 CONSTRUCTS both orderings instead of racing them: the background heartbeater is paused, the batch is applied, and a
 # heartbeat built "before" it (as_of one below) is sent by hand.
 
 
 async def s35_heartbeat_ordering(ctx: Ctx) -> None:
-    """O-95 / slice 0.7d. Fail-closed on, declared room, SRC talking throughout.
+    """Fail-closed on, declared room, SRC talking throughout.
     Leg A: L armed and hearing; a replace for L at N+1; then a heartbeat built at N naming L at N. L is not stale, stays
     at row 4 and keeps hearing for 2 s. Leg B: L2 armed by a replace; then a heartbeat built before that replace, which
     omits L2. L2 stays armed and hears."""
@@ -1633,7 +1633,7 @@ async def s35_heartbeat_ordering(ctx: Ctx) -> None:
     await _hold_audible(ctx, l2, "S35 leg B: and L2 keeps hearing for 2 s", 2.0)
 
 
-# ---- Phase 0 slice 0.8b: the join capability's staleness rule (O-96) ------------------------------------------
+# ---- Phase 0: the join capability's staleness rule ------------------------------------------
 # The sim publishes a room's (epoch, generation) when the generation is ALLOCATED (VisAuthority.NextGeneration ->
 # JoinCapabilityAuthority.Publish, read at JanusRoom.JoinRoom); the mixer holds what it has APPLIED. A capability is
 # therefore normally AHEAD of the mixer -- always for a fresh room, a room whose batch was dropped or is in flight,
@@ -1642,14 +1642,14 @@ async def s35_heartbeat_ordering(ctx: Ctx) -> None:
 
 
 async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
-    """O-96. A capability ahead of the mixer joins; only an older authority's epoch is refused."""
+    """A capability ahead of the mixer joins; only an older authority's epoch is refused."""
     secret = ctx.cfg.join_cap_secret
     # The mode probe joins an UNDECLARED room, which the capability never gates: on a mixer that still refuses a
     # capability ahead of it, leg a's own join is refused and would leave nothing to read the mode from.
     probe = await ctx.join_without_media("PROBE", ctx.new_room())
     probe_state = await _cap_mode(ctx, probe, want_required=True)
     # The capability counters are PROCESS-WIDE, so on a full board other scenarios have already refused things.
-    # Leg d's claim is about what THIS scenario added, so it is measured as a delta from here (slice 0.8e).
+    # Leg d's claim is about what THIS scenario added, so it is measured as a delta from here.
     base_stale = (probe_state.get("refused") or {}).get("cap_stale_generation", 0)
 
     # (a) A FRESH room the mixer has adopted no epoch for, and a capability minted at generation 5 under an
@@ -1728,7 +1728,7 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
     if state.get("cap_generation_ahead", 0) < 1:
         raise Fail("S36 leg c: that join is counted cap_generation_ahead", state)
 
-    # (d) Slice 0.8b ruling change: a capability carrying NO epoch at all, against a room that HAS adopted one.
+    # (d) A ruling change: a capability carrying NO epoch at all, against a room that HAS adopted one.
     # No epoch means the sim held no authority state for that room when it minted; it is not evidence of an older
     # authority, and it is ordinary - the sim forgets a room while the mixer still holds its epoch through the
     # empty-room grace, and the same avatar rejoins. It must be admitted, and counted as its own case.
@@ -1750,7 +1750,7 @@ async def s36_join_cap_generation_staleness(ctx: Ctx) -> None:
                    {"added_cap_stale_generation": added_stale, "join_cap": state})
 
 
-# ---- Phase 0 slice 0.8f: a connector peer survives a failed join (ledger O-99) ---------------------------------------
+# ---- Phase 0: a connector peer survives a failed join ---------------------------------------
 # 0.8d live: both injectors fetched a capability, joined, got "485 No such room", and sat on a room-less Janus session
 # for nine hours. S37 drives the REAL injector (connectors/injector/injector.py over common/peer.py and joincap.py)
 # against a loopback stub of the sim's capability endpoint, on a mixer that requires a capability.
@@ -1787,7 +1787,7 @@ class _S37Watch:
 
 
 async def s37_connector_rejoins_after_failed_join(ctx: Ctx) -> None:
-    """O-99 / slice 0.8f, JS_JOIN_CAP_REQUIRED=1. (a) The injector's room does not exist: every join gets 485, and the
+    """JS_JOIN_CAP_REQUIRED=1. (a) The injector's room does not exist: every join gets 485, and the
     peer keeps retrying, fetching a fresh capability each time; once the harness creates the room the peer joins and
     its audio reaches the mixer. (b) The joined peer's room is destroyed under it: the peer notices, and rejoins once
     the room exists again. (c) Every capability the stub issued was put on the wire at most once, and no join was
@@ -1896,7 +1896,7 @@ async def s37_connector_rejoins_after_failed_join(ctx: Ctx) -> None:
         raise Fail("S37: the peer is still running at the end", repr(task.exception()))
 
 
-# ---- S39: the Janus constraint that retired the sim's same-handle retry (slice 0.8i, O-98) ----------------------
+# ---- S39: the Janus constraint that retired the sim's same-handle retry ----------------------
 # 0.8g PROOF D, live 2026-09-19 01:33:42Z: the sim's viewer join (carrying the viewer's JSEP offer) drew 485 from the
 # plugin, the sim re-created the room and re-sent the same join on the SAME handle, and Janus core refused it with 490
 # "Error setting ICE locally" - core builds the handle's ICE agent from the offer BEFORE the plugin looks at the room,
@@ -1952,7 +1952,7 @@ async def s39_jsep_join_cannot_be_resent_on_the_same_handle(ctx: Ctx) -> None:
             pass
 
 
-# ---- S38: a connector has a position (slice 0.8h, O-62) -------------------------------------------------------------
+# ---- S38: a connector has a position -------------------------------------------------------------
 # 0.8g, live: the injector never sent sp or lp, so the mixer held no geometry for it and mixed it FLAT - the same level
 # to everyone in its room, at any distance. Now the sim's grant carries the connector's position in the viewer's own
 # frame (global centimetres, integers) and the REAL connector peer sends it as SLData once its data channel opens. The
@@ -2061,18 +2061,18 @@ async def s38_connector_position_is_spatialised(ctx: Ctx) -> None:
         peer_mod.geometry_message = real_encoder
 
 
-# ---- S40/S41/S42: Phase 1 authority characterisation (slice 1.1a) -----------------------------------------------
+# ---- S40/S41/S42: Phase 1 authority characterisation -----------------------------------------------
 # CHARACTERISATION, not acceptance: these record what the mixer does TODAY so a design decision rests on a
 # measurement. They pass as long as they can take the measurement; the numbers go in the scenario's own output and
-# in Docs/voice/nonspatial-phase1-authority.md. Do not "fix" the mixer to make them read differently without
-# changing the design brief first.
+# in the run's output. Do not "fix" the mixer to make them read differently without
+# changing the design first.
 
 
 class ArmingDriver:
     """One authority's ARMING, repeated: a peer_ctl_batch replace under its own epoch every `period` seconds with a
     rising generation, exactly as a region's feeder re-arms its population. Counts what the mixer did with each one.
 
-    Slice 1.4 PART 0 found S40 sent ONE replace, from one authority only, so the second authority could never have
+    S40 used to send ONE replace, from one authority only, so the second authority could never have
     armed anybody - the room read 0 armed because a heartbeat confirms arming, it does not create it. Both
     authorities now arm."""
 
@@ -2141,12 +2141,12 @@ async def _s40_measure(ctx: Ctx, room: int, peers, seconds: int = 30):
 
 
 async def s40_two_authorities_one_room(ctx: Ctx) -> None:
-    """O-106: one room, two sims, two epochs, BOTH ARMING. A conference spans regions and each region is its own
+    """One room, two sims, two epochs, BOTH ARMING. A conference spans regions and each region is its own
     authority (VoiceVisibilityService is per region; FeederWorldFromScene.SnapshotAgents is one scene's presences),
     while the mixer allows exactly one authority per room (visauth.h slv_vis_epoch_decide): a higher epoch ADOPTS and
     disarms every record, a lower one is STALE_EPOCH and changes nothing.
 
-    Corrected in slice 1.4: the first version sent a single replace from one authority, so it could only ever show
+    Corrected: the first version sent a single replace from one authority, so it could only ever show
     the winner-never-arms case. Both authorities now re-arm every second, as two regions' feeders would."""
     r = ctx.new_room()
     da, db, dc = new_display(), new_display(), new_display()
@@ -2189,7 +2189,7 @@ async def s40_two_authorities_one_room(ctx: Ctx) -> None:
 
 
 async def s40b_one_authority_control(ctx: Ctx) -> None:
-    """S43, the CONTROL for S40 (slice 1.4): the same room shape and the same three peers with ONE authority arming and
+    """S43, the CONTROL for S40: the same room shape and the same three peers with ONE authority arming and
     heartbeating. If this reads armed 3 while S40 reads 0, the difference is the second authority and not the
     harness."""
     r = ctx.new_room()
@@ -2222,9 +2222,9 @@ MIX_AFTER_ROW_S = 0.1
 
 
 async def s45_heartbeat_with_a_stalled_feed(ctx: Ctx) -> None:
-    """REGRESSION (V-1b, O-120): a sim whose heartbeat keeps arriving but whose FEEDER has stalled is not live.
+    """REGRESSION: a sim whose heartbeat keeps arriving but whose FEEDER has stalled is not live.
 
-    O-120: the sim's heartbeat used to ride the feeder's tick, so a starved region simply went quiet and the mixer
+    The sim's heartbeat used to ride the feeder's tick, so a starved region simply went quiet and the mixer
     aged it out correctly. Now the heartbeat has its own timer and keeps arriving through a stall -- which, without
     this rule, would assert authority over a matrix that stopped moving 60 s ago. The sim therefore REPORTS its own
     feed age and the MIXER rules on it, against the same staleness window it already owns.
@@ -2273,9 +2273,9 @@ async def s45_heartbeat_with_a_stalled_feed(ctx: Ctx) -> None:
 
 
 async def s41_sim_created_room_requires_a_capability(ctx: Ctx) -> None:
-    """REGRESSION (slice 1.4, O-105). Until 1.4 the capability requirement keyed on `vis_authority`, so an
+    """REGRESSION. Until 1.4 the capability requirement keyed on `vis_authority`, so an
     UNDECLARED room admitted a join carrying nothing - and every A2A "multiagent" room on a live grid is undeclared
-    (JanusAudioBridge.ShouldDeclareVisAuthority). Measured against the pre-1.4 image in slice 1.1a:
+    (JanusAudioBridge.ShouldDeclareVisAuthority). Measured against the pre-1.4 image:
 
         S41 required=True bare join into an UNDECLARED room: joined=True cap_present=False verdict=cap_missing
         cap_missing before/after 0/0 enforced_refusals=0
@@ -2308,7 +2308,7 @@ async def s41_sim_created_room_requires_a_capability(ctx: Ctx) -> None:
 
 
 async def s44_old_sim_room_keeps_the_old_rule(ctx: Ctx) -> None:
-    """Mixed version 3(a), slice 1.4: a NEW mixer under an OLD sim. A pre-1.4 sim sends no `sim_created`, so its
+    """Mixed version 3(a): a NEW mixer under an OLD sim. A pre-1.4 sim sends no `sim_created`, so its
     undeclared rooms must keep the pre-1.4 rule exactly - gated only if declared - and a bare join into one is
     admitted, as it is today. The new gate must not reach rooms nobody marked (harness rooms, static rooms, and
     every room an old sim creates)."""
@@ -2327,7 +2327,7 @@ async def s44_old_sim_room_keeps_the_old_rule(ctx: Ctx) -> None:
 
 
 async def s42_mod_mute_in_an_undeclared_room(ctx: Ctx) -> None:
-    """Q2 of slice 1.1a: does the sim's moderation mute still work in an UNDECLARED room? The mute lives in the
+    """Does the sim's moderation mute still work in an UNDECLARED room? The mute lives in the
     listener's per-source mod_muted set (janus_slvoice.c, set_mod_muted_locked) and the mix consults it
     independently of the arming rule - so the expectation is yes, and the conference design can lean on it. This
     measures it rather than assuming."""
@@ -2369,8 +2369,8 @@ async def s48_three_way_group_room_turn_taking(ctx: Ctx) -> None:
     """P1.2G: THREE peers take turns talking in the exact shape of a live group room.
 
     The shape is the one the grid produced for group f7b9f744 as mixer room 68971284: created by the
-    sim (sim_created), UNDECLARED (vis_authority False, so never armed and never enforced -- slice
-    1.1a option (c) for ADHOC/group rooms, Docs/voice/nonspatial-phase1-authority.md), with every
+    sim (sim_created), UNDECLARED (vis_authority False, so never armed and never enforced, as for
+    ADHOC/group rooms), with every
     join carrying a capability.
 
     S17 already covers an undeclared room, but only with TWO peers, and it asserts the mixer logs

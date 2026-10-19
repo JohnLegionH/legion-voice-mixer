@@ -64,7 +64,7 @@ typedef enum slv_field {
  * on the wire. Firestorm builds "sp" from getPositionGlobal() and "lp" from getPosGlobalFromRegion(camera), each
  * (int)(v * 100) (llvoicewebrtc.cpp:1108, :1119, :1241-1256), and sends the same payload to every session,
  * neighbour regions included. The mixer only ever uses differences, so every participant - a connector too
- * (slice 0.8h) - must be in this one frame. (This comment used to say "region-local metres"; it never was.) */
+ * - must be in this one frame. (This comment used to say "region-local metres"; it never was.) */
 typedef struct slv_vec3 { double x, y, z; } slv_vec3;
 
 /*! \brief An orientation quaternion. */
@@ -122,7 +122,7 @@ typedef enum slv_sldata_status {
  *          \c len; never aborts on bad input. */
 slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out);
 
-/*! \brief Merge one parsed message into persistent per-session state (O-64).
+/*! \brief Merge one parsed message into persistent per-session state.
  * Copies ONLY the members whose bit is set in \c src->fields_seen (sp, sh, lp,
  * lh, and the legacy scalars m / ug / echo) into \c dst, and ORs every bit of
  * \c src->fields_seen into \c *dst_fields — so a message carrying only "ug" or

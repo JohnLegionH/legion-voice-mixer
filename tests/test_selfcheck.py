@@ -284,7 +284,7 @@ class Listen(Base):
         self.assertEqual(r["status"], PASS, r["observed"])
 
     def test_the_phone_page_link_carries_the_probe_and_a_browser_check_is_a_receipt(self):
-        """A.6: the nothing-installed method. The printed data: URL holds a WebRTC offer whose only candidate is the
+        """The nothing-installed method. The printed data: URL holds a WebRTC offer whose only candidate is the
         public address and port, with the token as the ICE ufrag; the browser's STUN check carries USERNAME
         "<ufrag>:<its own ufrag>", and that is accepted as the probe."""
         out = io.StringIO()

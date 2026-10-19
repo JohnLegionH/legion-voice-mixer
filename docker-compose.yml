@@ -43,7 +43,7 @@ services:
     # without it; media does not. See docs/docker-notes.md → "Windows/Docker
     # Desktop".
     #
-    # O-55 narrowing is opt-in: with neither knob set, the ports below are the
+    # Narrowing is opt-in: with neither knob set, the ports below are the
     # pre-6m publish (docs/docker-notes.md → "Configuration compatibility rule").
     # JS_ADMIN_BIND = the host address the Admin API is published on; unset means
     # all interfaces (the entrypoint WARNs). To narrow, set it to the address in

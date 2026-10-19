@@ -5,7 +5,7 @@
 /*! \file    tests/test_joincap.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Unit tests for the sim-issued join capability (src/joincap.c, design §11, ledger O-46).
+ * \brief    Unit tests for the sim-issued join capability (src/joincap.c, design §11).
  *
  * \details  Plain C, links OpenSSL and libc only (like test_deferred links nothing), built and run by
  * `make test`. The GOLDEN VECTOR below is the same capability the sim's JoinCapabilityTests mints from the
@@ -14,7 +14,7 @@
  *
  * Covers: the golden vector verifies and parses; every malformed shape; a tampered payload and a tampered
  * signature; the wrong key; wrong agent, wrong session, wrong room; the expiry window and both skew edges;
- * replay; the bounded store's eviction and its full refusal; and the O-96 epoch rule with the three
+ * replay; the bounded store's eviction and its full refusal; and the epoch rule with the three
  * accepted-difference counters. Non-zero exit on failure.
  */
 
@@ -152,7 +152,7 @@ static void test_generation(void) {
 	slv_joincap c;
 	parse(GOLDEN, &c);
 
-	/* Slice 0.8b (O-96): the generation is NOT a refusal criterion in either direction. The sim publishes a
+	/* The generation is NOT a refusal criterion in either direction. The sim publishes a
 	 * room's (epoch, generation) when the generation is ALLOCATED, while the mixer holds what it has APPLIED,
 	 * so a capability minted between the two is normally AHEAD; a batch that lands between minting and joining
 	 * normally leaves it BEHIND. Both are races, not evidence. Only an epoch strictly BELOW the room's adopted
@@ -174,7 +174,7 @@ static void test_generation(void) {
 	plain.epoch = 0;
 	plain.generation = 0;
 	CHECK(slv_joincap_generation(&plain, 0, 0) == SLV_JOINCAP_OK, "arming off on both sides: accepted");
-	/* Slice 0.8b ruling change: a capability carrying NO epoch is ACCEPTED, whatever the room has adopted. No
+	/* A ruling change: a capability carrying NO epoch is ACCEPTED, whatever the room has adopted. No
 	 * epoch means the sim held no authority state for that room when it minted, which is not proof of an older
 	 * authority - and it is easily reached: the sim forgets a room while the mixer still holds its epoch through
 	 * the 60 s empty-room grace, and the same avatar rejoins. Only a NON-ZERO epoch below the adopted one refuses. */
@@ -182,7 +182,7 @@ static void test_generation(void) {
 		"a capability with no epoch at all, against a room that has adopted one: accepted (O-96, 0.8b)");
 }
 
-/* O-96: what a difference that was ACCEPTED is counted as. The verdict above says nothing about which race
+/* What a difference that was ACCEPTED is counted as. The verdict above says nothing about which race
  * happened; this is what the three INFO counters are driven from, and it never turns into a refusal. */
 static void test_generation_notes(void) {
 	slv_joincap c;
