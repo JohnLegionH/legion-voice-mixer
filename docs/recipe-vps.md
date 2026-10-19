@@ -8,9 +8,9 @@ network.
 and a first real session in the diagnostics.
 
 **Provenance, stated plainly:**
-- **Measured (A.6, 2026-09-15):** how a Linux dockerd 28.3.0 treats viewers' source addresses, in all three network
+- **Measured (2026-09-15):** how a Linux dockerd 28.3.0 treats viewers' source addresses, in all three network
   modes. This ran on an isolated dockerd, not on a real VPS.
-- **Not measured on a real VPS in this slice:** the board in section 6. It comes from the self-check's VPS-shape
+- **Not measured on a real VPS:** the board in section 6. It comes from the self-check's VPS-shape
   unit test (`tests/test_selfcheck.py`, `test_vps_shape_has_no_nat_wording`: C1, C2a, C3–C6 PASS, with no NAT wording
   anywhere), plus how each check works. Where a row could honestly read two ways, both are given.
 
@@ -40,7 +40,7 @@ public internet, prefer the private network.
 ## 3. Host firewall
 
 Allow the media range (e.g. `sudo ufw allow 10000:10200/udp`). Docker publishes ports with its own iptables rules (the
-`DOCKER` nat chain, seen in A.6's measurements), so a `ufw deny` does **not** close a port Docker published. The admin
+`DOCKER` nat chain, seen in the source-address measurements), so a `ufw deny` does **not** close a port Docker published. The admin
 port is narrowed by `JS_ADMIN_BIND` (section 4) and the provider firewall, not by ufw.
 
 ## 4. `.env`
@@ -81,6 +81,15 @@ same values in the region server's `os-webrtc-janus` config (`APIToken`, `AdminA
 | `JS_ICE_DIAG_HISTORY` | `200` (default) | |
 | `JS_TURN_*` (all eight) | *(unset)* | a public server needs no mixer-side relay (section 8) |
 
+**Sizing the RTP range.** Every participant in voice at the same time holds one UDP port from `JS_RTP_PORT_RANGE`, and
+each join that carries an offer binds its ports before media flows, so size the range for the most people you expect
+in voice at once, across all regions this mixer serves, plus headroom. The default `10000-10200` is 201 ports.
+Example: a region that peaks at 60 people in voice and a second one that peaks at 40 need at least 100 ports, so a
+range of 200 leaves room for joins and rejoins; a full room of 110 (the mixer's per-room cap) took a range of about 500
+ports in the test harness. When the range runs out, further joins fail.
+Change the range in three places together: `JS_RTP_PORT_RANGE`, the container's published UDP
+ports, and the firewall (and router forward, if any).
+
 With `JS_ADMIN_BIND=127.0.0.1` the region server must call `http://127.0.0.1:14225/voiceAdmin`.
 
 
@@ -92,7 +101,7 @@ With `JS_ADMIN_BIND=127.0.0.1` the region server must call `http://127.0.0.1:142
 > (`connectors/common/test_apisecret.py`). So an nginx/Caddy/ALB access log in default configuration, or any
 > tracing proxy that records full URLs, writes your `JS_API_SECRET` to disk on every poll. If you must proxy,
 > strip or mask the query string in the access-log format, and keep the admin API (`/voiceAdmin`, which uses a
-> body-carried `admin_secret`) on its own bind address. Ledger O-101.
+> body-carried `admin_secret`) on its own bind address.
 
 ## 5. Compose profile and network mode
 
@@ -108,7 +117,7 @@ so the session diagnostics can tell relay from direct. The two alternatives:
 - **`"userland-proxy": false`** in `/etc/docker/daemon.json` removes the proxies too (46–48 → 2), keeps port control,
   and changes nothing about addresses. It applies to every container on the host.
 
-Details: `docs/docker-notes.md` → "Source addresses (A.6)".
+Details: `docs/docker-notes.md` → "Source addresses".
 
 ## 6. The expected self-check board
 
@@ -143,7 +152,7 @@ commands. The token and port below are examples:
   real phone browser** (see the home-hosted recipe, section 7).
 
 **Success:** `[selfcheck-listen] PASS: the probe arrived on UDP 10000 from <source>`. On Linux published ports the
-source should be the sending machine's public address. That is a consequence of the A.6 measurement, not observed on
+source should be the sending machine's public address. That is a consequence of the source-address measurement, not observed on
 a real VPS. Then `docker compose exec janus legion-voice-selfcheck`: C2b PASS, END `exit 0`.
 
 ## 8. First real session, and TURN
@@ -155,7 +164,7 @@ a real VPS. Then `docker compose exec janus legion-voice-selfcheck`: C2b PASS, E
   provider load balancer or a proxy. That is worth investigating.
 
 **TURN:**
-- **Viewer-side TURN is BLOCKED (O-87).** No stock viewer accepts TURN from the region server, so a viewer whose own
+- **Viewer-side TURN is BLOCKED.** No stock viewer accepts TURN from the region server, so a viewer whose own
   network blocks UDP cannot use voice. Buying or running TURN does not change that today.
 - **Mixer-side TURN (`JS_TURN_*`) only rescues a server nobody can reach.** A VPS with a public IPv4 is not that
   server. Leave it unset.

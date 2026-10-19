@@ -29,9 +29,9 @@ A Linux home server differs in two places, both marked **Linux**.
   stall together. Voice feeders miss their ticks, the watchdog fires, and armed listeners can be silenced. It was
   measured on an i7-12700KF: the four E-cores at 100%, eight P-cores idle, about 100 threads waiting, and delivered
   CPU down from about 14.5 cores to about 4. It lasted 16 s to 7 min with the load unchanged. It is not the hypervisor
-  and not thermal throttling. Both were measured and excluded (ledger O-138). Before you go live, do one of these:
+  and not thermal throttling. Both were measured and excluded. Before you go live, do one of these:
   - a **power-plan step**: change the hybrid scheduling policy of the plan the host runs, or use a plan that does
-    not contain work to the E-cores (ledger O-138 records which settings, and the result of switching them);
+    not contain work to the E-cores;
   - or **P-core pinning**: give the region server and Robust processor affinity to the P-cores only.
   - Either way, **do not share the grid host with heavy, sustained work** (large builds, test boards, headless
     browsers rendering in software). That is what triggered every measured episode.
@@ -54,7 +54,7 @@ NAT loopback (hairpin) on the router is not required: LAN viewers use the privat
 
 **Windows** (PowerShell as Administrator). This is the rule to add:
 ```powershell
-New-NetFirewallRule -DisplayName "Legion Voice RTP" -Direction Inbound -Protocol UDP -LocalPort 10000-10200 -Action Allow
+New-NetFirewallRule -DisplayName "Voice mixer RTP" -Direction Inbound -Protocol UDP -LocalPort 10000-10200 -Action Allow
 ```
 Docker Desktop also installs its own "Docker Desktop Backend" allow rules when it is installed. Leave them.
 
@@ -69,7 +69,7 @@ from off the host. It only worked from the host itself, which hides the gap from
 region, add its rule in the same step.
 
 **Linux:** allow the range, e.g. `sudo ufw allow 10000:10200/udp`. Be aware that Docker publishes ports with its own
-iptables rules (the `DOCKER` nat chain, seen during A.6's measurements), so a `ufw deny` does not close a port Docker
+iptables rules (the `DOCKER` nat chain, seen during the source-address measurements), so a `ufw deny` does not close a port Docker
 published. The admin port is narrowed by `JS_ADMIN_BIND` below, not by ufw.
 
 ## 4. `.env`
@@ -110,6 +110,15 @@ random string) and put the same values in the region server's `os-webrtc-janus` 
 | `JS_ICE_DIAG_HISTORY` | `200` (default) | session diagnostics (section 8) |
 | `JS_TURN_*` (all eight) | *(unset)* | not needed on a reachable home server (section 9) |
 
+**Sizing the RTP range.** Every participant in voice at the same time holds one UDP port from `JS_RTP_PORT_RANGE`, and
+each join that carries an offer binds its ports before media flows, so size the range for the most people you expect
+in voice at once, across all regions this mixer serves, plus headroom. The default `10000-10200` is 201 ports.
+Example: a region that peaks at 60 people in voice and a second one that peaks at 40 need at least 100 ports, so a
+range of 200 leaves room for joins and rejoins; a full room of 110 (the mixer's per-room cap) took a range of about 500
+ports in the test harness. When the range runs out, further joins fail.
+Change the range in three places together: `JS_RTP_PORT_RANGE`, the container's published UDP
+ports, and the firewall (and router forward, if any).
+
 
 > **Never put the Janus API behind a proxy that logs query strings.** A long poll carries the API secret as a
 > URL query argument, `GET .../voice/<session>?maxev=1&apisecret=...`, and there is no alternative: Janus's HTTP
@@ -119,7 +128,7 @@ random string) and put the same values in the region server's `os-webrtc-janus` 
 > (`connectors/common/test_apisecret.py`). So an nginx/Caddy/ALB access log in default configuration, or any
 > tracing proxy that records full URLs, writes your `JS_API_SECRET` to disk on every poll. If you must proxy,
 > strip or mask the query string in the access-log format, and keep the admin API (`/voiceAdmin`, which uses a
-> body-carried `admin_secret`) on its own bind address. Ledger O-101.
+> body-carried `admin_secret`) on its own bind address.
 
 ## 5. Compose profile and network mode
 
@@ -129,7 +138,7 @@ never start unless named.
 docker compose up -d
 ```
 Keep the shipped **published ports**. On Docker Desktop that is the only working mode. On a **Linux** home server it
-is also the recommended one (`docs/docker-notes.md` → "Source addresses (A.6)").
+is also the recommended one (`docs/docker-notes.md` → "Source addresses").
 
 **What the network mode means for you.** On **Docker Desktop**, every viewer's packets reach Janus from the Docker
 gateway (measured: `172.30.0.1`), not from the viewer's address. Media is unaffected, but the session diagnostics can
@@ -138,8 +147,8 @@ arrives and the diagnostics show `direct`.
 
 **Also on Docker Desktop for Windows: after a mixer restart, give it time before you judge it.** A restarted
 container can be reachable from *inside* while still unreachable from *outside* for minutes, because the published
-ports are re-established one proxy at a time and the mixer publishes a whole UDP media range. Observed on this host
-(O-113): the signalling port answered within a second, went away again, and did not answer steadily until **167 s**
+ports are re-established one proxy at a time and the mixer publishes a whole UDP media range. Observed on this host:
+the signalling port answered within a second, went away again, and did not answer steadily until **167 s**
 with 51 media ports published — against **13–26 s** with 20. A separate restart of the live mixer under load on the
 same host recovered in ~31 s, so treat this as a range to expect, not a fixed number. The diagnostic is one pair of
 commands — if the first answers and the second does not, nothing is wrong with the mixer and you are waiting on
@@ -233,13 +242,13 @@ last state reached; see `legion-voice-selfcheck --session <handle or agent UUID>
 
 ## 9. TURN: what it does and does not fix
 
-- **Viewer-side TURN is BLOCKED (O-87).** No stock viewer (Second Life or Firestorm) accepts TURN servers or
+- **Viewer-side TURN is BLOCKED.** No stock viewer (Second Life or Firestorm) accepts TURN servers or
   credentials from the region server. **A viewer whose own network blocks UDP cannot use voice, and no TURN you buy
   or run changes that today.**
 - **Mixer-side TURN (`JS_TURN_*`) rescues a server nobody can reach:** one behind CGNAT, or with no usable forward.
   Janus offers a relay on your TURN server as an extra candidate. On a home server with a working forward (C1 and C6
   PASS) it adds nothing, so leave it unset.
-- **TURN over TLS (`JS_TURN_TYPE=tls`) against a real CA-signed certificate is UNTESTED.** A.3 proved TLS only against
+- **TURN over TLS (`JS_TURN_TYPE=tls`) against a real CA-signed certificate is UNTESTED.** TLS was proven only against
   a self-signed test certificate, which does not show whether Janus's TURN client (libnice) validates certificates at
   all. The image carries Ubuntu 18.04's `ca-certificates` bundle (137 certificates, package `20230311ubuntu0.18.04.1`).
   The likely failure is that bundle's availability or age against your certificate chain. If you use it, check C6's
