@@ -1,28 +1,28 @@
 # Design Brief — Per-Room Visibility Emission
 
-**Status:** IMPLEMENTED 2026-08-27 (S5). The S1–S5 build plan (§8) is COMPLETE: S1/S1b
+**Status:** IMPLEMENTED 2026-08-27. The S1–S5 build plan (§8) is complete: S1/S1b
 (`3c95ddea0e`/`7b08786d19`), S2 (`98465dc662`), S3a/S3b (`ef119f2a90`/`e35463a088`), and S4
-(`33fc3b412e`) have shipped; S5 is this flip plus the ledger write-up. NOTE — the shipped S4 DIVERGED
+(`33fc3b412e`) have shipped; S5 is the documentation step. NOTE — the shipped S4 DIVERGED
 from §8's plan: it did NOT add a `PeerCtlSendResult.NotApplied` enum and changed no
 `VisibilityBatchSender` flow; instead it kept the 3-value result, put classification in the sink, and
 surfaced counts via a read-only stats property (same observability, smaller blast radius). M1 (mixer
 version bump) remains optional. The seven open questions are resolved in §7; §8 is the build plan.
-*Originally DECIDED 2026-08-26, nothing implemented; superseded by this line.*
+*Originally decided 2026-08-26, before implementation.*
 **Date:** 2026-08-26.
 **Basis:** `tranquillity-develop` at *docs(voice): file the per-parcel visibility delivery gap,
 split #13 by status* (branch `feature/voice-visibility-matrix`); `legion-voice-mixer` at
 *fix(voice): clear stale exclusions on leave, error on unknown room and request* (plugin
 `janus.plugin.slvoice` 0.9.0 — the version string was not bumped by that commit, so "0.9.0"
 alone does not identify whether the `unknown_room` reply is present; see §5).
-**Authority for the problem:** `Docs/KnownDefects.md`, *"WebRTC voice: the visibility feed is
-addressed only to the estate room, so per-parcel agents receive no exclusions"*. Every claim
+**The problem:** the visibility feed is addressed only to the estate room, so agents on
+per-parcel voice channels receive no exclusions. Every claim
 below about current behaviour carries a `file:line` citation against the basis above.
 
 ## Purpose
 
 Make sim-authoritative voice visibility — parcel ban/restrict, parcel voice moderation,
 `SeeAVs` hiding — take effect for agents on per-parcel voice channels, not only for agents
-on the estate channel. Today the Phase-3a matrix is computed correctly for every voiced agent
+on the estate channel. Today the visibility matrix is computed correctly for every voiced agent
 in the region and then delivered to one room, so it is enforced for a subset of them.
 
 ## Binding constraints — decided, not re-opened here
@@ -78,7 +78,7 @@ at `LOG_VERB`. The admin reply is `{"slvoice":"applied", …}` regardless (`:134
 
 **Why the default matters.** With `LandData.cs`'s default word, a freshly created region's
 initial parcel has `AllowVoiceChat` set and `UseEstateVoiceChan` clear — exactly the
-triggering state. On the reference grid an untouched parcel reads `0x2800204B`, the untouched default. This is
+triggering state. An untouched parcel on a default-configured grid reads `0x2800204B`. This is
 a default-configuration defect with grid-wide reach, which is why the constraint above
 forbids fixing it by touching flags.
 
@@ -160,9 +160,9 @@ Why this seam:
   joined. No `CalcRoomNumber` call is added on the sim side; the float-encoding coupling in §2c
   does not widen.
 - **Naturally gated on success.** Only the JSEP-offer success branch has a `Room`, so only a
-  real join produces a `room` field. This also sidesteps *"WebRTC voice: OnListenerProvisioned
-  runs on failed provisions, queuing a doomed re-send"* for the room record (the pending-join
-  queueing itself is unchanged and that entry stands).
+  real join produces a `room` field. This also sidesteps the known issue that `OnListenerProvisioned`
+  runs on failed provisions, queuing a doomed re-send, for the room record (the pending-join
+  queueing itself is unchanged and that issue stands).
 - **Preserves the separation.** Feeder, matrix, delta, sender and serializer are untouched;
   the sender's `_synced` / `_knownListeners` / `_pending` state remains single-instance because
   the sink, not the sender, does the splitting. The only new coupling is a one-way
@@ -213,7 +213,7 @@ writes the record. No change to this design is needed then.
 
 ### 2c. The float-encoding defect in `CalcRoomNumber`
 
-*"Parcel local IDs are hashed as `float`, not as an integer"* (`Docs/KnownDefects.md`):
+Parcel local IDs are hashed as `float`, not as an integer:
 `hasher.Add(pParcelLocalID)` at `JanusAudioBridge.cs:205` binds to `Add(float)` because
 `IBHasher` has no `Add(int)`. Both sides that must agree on a room number — the provision
 path and, today, the sink — call the same function, so they agree.
@@ -226,7 +226,7 @@ the derivation at all.** Three reasons:
   (`JanusPeerCtlBatchSink.cs:38`–`:39`), kept as the OQ4 fallback value. The two derivation
   sites that exist today — provision path and sink — remain the same two, calling the same
   function with the same binding; this change adds none.
-- That KnownDefects entry states the consequence of changing the encoding: every room number on
+- Changing the encoding has a consequence: every room number on
   the grid changes, and every region and the mixer must cut over together or a rolling upgrade
   splits voice mid-flight. That is a grid-wide renumbering with its own deploy choreography, and
   bundling it into a delivery fix makes the delivery fix undeployable in isolation.
@@ -309,7 +309,7 @@ emission partitions that same content by room. Consequences:
   `SendAsync` run inside one flight. At an admin round-trip of t ms, sequential sends fit the
   250 ms cadence only while 2R·t < 250; beyond that every other tick is skipped, each skip
   forces an R-message snapshot, and the storm self-sustains until R·t drops. **Measured on
-  this deployment, reported 2026-08-26: 2.5–3.3 ms over loopback for a trivial Janus core
+  one deployment, reported 2026-08-26: 2.5–3.3 ms over loopback for a trivial Janus core
   request.** That puts the sequential crossover near **R ≈ 40** occupied rooms (125/t). The
   figure is a **floor, not a benchmark**, for three reasons: a real `peer_ctl_batch` parses
   and does per-listener work under `room->mutex` where a core request does neither; an
@@ -366,9 +366,9 @@ Needed. Split across this change and a separate one:
   as failure modes and turn the mute-everyone-at-41 case into two messages. It is deferred
   because it requires mirroring the mixer's cap constants into C#, a coupling that drifts
   silently and deserves its own decision, and because the dense case is pre-existing and
-  per-room emission does not worsen it. It is filed as its own defect: *"WebRTC voice: a
+  per-room emission does not worsen it. It is tracked as its own defect: a
   dense exclusion batch over 64 KB is rejected whole by the mixer, and the sim reads it as
-  applied"* in `Docs/KnownDefects.md`. Note for that change: a per-listener column over 128
+  applied. Note for that change: a per-listener column over 128
   sources cannot be chunked under `replace`; with OQ2's filtering it cannot occur.
 
 ## 4. Version skew
@@ -406,8 +406,7 @@ every column in that state would have been empty and estate-channel enforcement 
 silently collapsed. The source-side fallback is therefore load-bearing for this skew, not
 cosmetic; see §7.
 
-**When `unknown_room` can legitimately occur after this fix.** *Amended 2026-09-13 (O-54, mixer
-slice 5):* a non-permanent room is **destroyed once it has been empty for the grace period** —
+**When `unknown_room` can legitimately occur after this fix.** *Amended 2026-09-13:* a non-permanent room is **destroyed once it has been empty for the grace period** —
 `JS_EMPTY_ROOM_GRACE_S`, default 60 s, 0 disables. The grace clock starts when the last
 participant leaves (or at creation, for a room nobody joined); a join cancels it. The sender
 thread sweeps about once a second and tears the room down through the same path as an explicit
@@ -419,7 +418,7 @@ re-provision, when the sim's `_knownRooms` hint makes the join fail once with 48
 fires, and the retry creates the room (the self-heal observed live 2026-09-13 10:18:41). So
 `unknown_room` for a batch now has two normal signatures — a mixer restart, and a room that sat
 empty past the grace — and both heal by themselves through the pending-join path as agents
-re-provision. This is why OQ5's inner-reply result never latches. *(Before O-54 rooms were never
+re-provision. This is why OQ5's inner-reply result never latches. *(Before this change rooms were never
 destroyed on empty: the sender skipped idle rooms and a recorded room lived until the mixer
 restarted.)*
 
@@ -476,19 +475,18 @@ per-role estate fallback and its counters, result aggregation across rooms — a
   `false` under `EstateSettings.TaxFree` (`LandObject.cs:847`–`:848`, `:878`–`:879`), so the
   provisioning ban check is a no-op on `TaxFree` estates on both channels. The matrix overrides
   this on its own side via `LandBan.IsBannedIgnoringTaxFree`; the two layers disagree under
-  `TaxFree`. Documented in `parcel-voice-semantics.md` addendum §E and §P; untouched here.
+  `TaxFree`. Untouched here.
 - **The missing channel-change push.** No `ParcelVoiceInfoRequest` CAP; an agent crossing
   parcels intra-region stays in its old room until the viewer re-provisions. §2b shows this fix
-  is independent of it. Not filed in `KnownDefects.md` as of the basis commit — it is
+  is independent of it. As of the basis commit it is
   referenced only in the commit message of *fix(voice): enforce parcel ban/restrict on the
-  estate voice channel* ("tracked separately with the missing channel-change push"). It should
-  be filed.
+  estate voice channel* ("tracked separately with the missing channel-change push").
 - **The `LandData.cs` default divergence.** Bit 30 absent from OpenSim's default word. Binding
   constraint: out of scope; this fix must work with it in place.
 - **The dense-room byte cap.** Mute-everyone in a room of 41+ is `TOOBIG` today and stays so
-  after this change. Chunking is deferred to its own change (OQ6); the defect is filed as
-  *"WebRTC voice: a dense exclusion batch over 64 KB is rejected whole by the mixer, and the
-  sim reads it as applied"* in `Docs/KnownDefects.md`. What this change does add is
+  after this change. Chunking is deferred to its own change (OQ6); the defect is tracked as
+  "a dense exclusion batch over 64 KB is rejected whole by the mixer, and the
+  sim reads it as applied". What this change does add is
   visibility: after S4 the rejection is counted sim-side instead of read as success.
 - **`OnListenerProvisioned` on failed provisions.** The pending-join queueing for failed
   provisions is unchanged; only the room record is gated on success.
@@ -521,7 +519,7 @@ As first drafted, (a) dropped a source with no room record; that part is **super
 consistency resolution below.
 
 **OQ3 — Per-room send concurrency. DECIDED (b): bounded parallel sends per `SendAsync`, with
-an aggregated result.** Basis: the admin round-trip on this deployment measured 2.5–3.3 ms
+an aggregated result.** Basis: the admin round-trip on one deployment measured 2.5–3.3 ms
 over loopback for a trivial Janus core request (operator measurement, reported 2026-08-26),
 which puts the sequential crossover 2R·t < 250 ms near **R ≈ 40** occupied rooms. That figure
 is recorded here as a **floor and not a benchmark**: a real `peer_ctl_batch` parses and does
@@ -556,8 +554,8 @@ no far-end signal without it.
 **OQ6 — Chunking guard. DECIDED (b): a separate change.** Chunking requires mirroring the
 mixer's cap constants into C#, a coupling that drifts silently and deserves its own decision;
 and the dense case is pre-existing — per-room emission neither causes nor worsens it. The
-pre-existing failure is filed on its own as *"WebRTC voice: a dense exclusion batch over 64 KB
-is rejected whole by the mixer, and the sim reads it as applied"* in `Docs/KnownDefects.md`,
+pre-existing failure is tracked on its own (a dense exclusion batch over 64 KB
+is rejected whole by the mixer, and the sim reads it as applied),
 because it is a live silent-failure mode independent of this work. *Rejected:* (a) chunk in
 this change with mirrored constants.
 
@@ -653,10 +651,9 @@ Tests: `JanusAdminClientTests` classification cases (`applied`/`applied+skipped`
 existing 16 unmodified. Artefacts: `WebRtcJanusService.dll`, `WebRtcVoiceRegionModule.dll`,
 `VoiceVisibility.dll`.
 
-**S5 — Documentation.** This brief's status → implemented; the `KnownDefects.md` delivery-gap
-entry → fixed, citing the S3b commit subject; `mixer-feed-protocol.md` §3.4's correction note
-updated to say per-room emission exists; `parcel-voice-semantics.md` §P Part 2 → closed for
-per-parcel agents.
+**S5 — Documentation.** This brief's status → implemented; the sim's known-defect entry for the
+delivery gap → fixed, citing the S3b commit subject; the correction note in
+`mixer-feed-protocol.md` §4 updated to say per-room emission exists.
 
 **M1 — Mixer, optional, independent.** Bump `JANUS_SLVOICE_VERSION_STRING` so a deployed
 plugin can be identified as carrying the `unknown_room` reply (the fix commit did not bump

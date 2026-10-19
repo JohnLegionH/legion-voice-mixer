@@ -1,4 +1,4 @@
-# S-CON-6 injector peer (docs/voice/connector-build-plan.md).
+# Injector peer.
 # Build context is connectors/ (compose sets it) so the shared common/ package
 # ships in the image alongside the injector package.
 FROM python:3.12-slim

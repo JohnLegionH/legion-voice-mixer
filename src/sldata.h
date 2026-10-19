@@ -16,13 +16,13 @@
  * a standalone unit-test binary (see tests/test_sldata.c, `make test`).
  *
  * Field set (docs/voice/webrtc-voice-spec.md §9 client->mixer field list;
- * `lh` semantics confirmed by §6):
+ * `lh` semantics confirmed by §6 of that document):
  *   j, l, sp, sh, lp, lh, m, ug
- * plus the slvoice `echo` extension (spec §4.2 echo-test control; see
+ * plus the slvoice `echo` extension (webrtc-voice-spec.md §4.2 echo-test control; see
  * docs/sldata-extensions.md).
  *
- * Phase-1 policy: we PARSE and STORE the latest values; we do not act on the
- * geometry (no spatial logic until Phase 2). Unknown fields are ignored
+ * Policy: we PARSE and STORE the latest values; we do not act on the
+ * geometry here (no spatial logic in this module). Unknown fields are ignored
  * silently; malformed JSON is reported (never crashes) so the caller can log
  * it at warn. The parse is tolerant of both array and object vector encodings.
  */
@@ -49,8 +49,8 @@
  * Stored as a bitmask so diagnostics can report exactly what the last message
  * carried without keeping the raw JSON. */
 typedef enum slv_field {
-	SLV_FIELD_J    = 1u << 0,  /*!< "j"  — join/roster marker (presence only in Phase 1) */
-	SLV_FIELD_L    = 1u << 1,  /*!< "l"  — leave marker (presence only in Phase 1) */
+	SLV_FIELD_J    = 1u << 0,  /*!< "j"  — join/roster marker (presence only) */
+	SLV_FIELD_L    = 1u << 1,  /*!< "l"  — leave marker (presence only) */
 	SLV_FIELD_SP   = 1u << 2,  /*!< "sp" — self position (x,y,z) */
 	SLV_FIELD_SH   = 1u << 3,  /*!< "sh" — self heading/orientation (x,y,z,w) */
 	SLV_FIELD_LP   = 1u << 4,  /*!< "lp" — listener position (x,y,z) */

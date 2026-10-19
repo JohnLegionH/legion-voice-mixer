@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Source-address probe (slice A.6): does a peer's real address survive to Janus?
+"""Source-address probe: does a peer's real address survive to Janus?
 
 One viewer-shaped peer (the harness's TestPeer: a real Opus tone and the SLData channel) joins a fresh test room and
 brings media up. The probe then puts two things side by side:

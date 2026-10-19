@@ -10,7 +10,7 @@
  * \details  Plain C, links only libm. Built and run by `make test`. Expected
  * values are derived from the geometry and the conventions pinned in
  * docs/voice/phase3b-design-brief.md Amendment 4 — NOT from what the code
- * produces. Verification for Phase 3b item 4 is numeric (no listening tests are
+ * produces. Verification of the stereo pan is numeric (no listening tests are
  * available), so these ARE the acceptance criteria. Exit status is non-zero on
  * any failure so `make test` / the Docker build fails loudly.
  */
@@ -30,8 +30,8 @@
 #define M_PI_4 0.78539816339744830962
 #endif
 
-/* ---- Pan sign convention (Amendment 4), asserted explicitly ---------------
- * DECIDED in Amendment 4: a source to the listener's RIGHT is louder in the
+/* ---- Pan sign convention, asserted explicitly ------------------------------
+ * Pinned by the design brief: a source to the listener's RIGHT is louder in the
  * RIGHT output channel. This file encodes that as the azimuth sign:
  *   azimuth POSITIVE = to the right, NEGATIVE = to the left, 0 = directly ahead.
  * So hard right = +pi/2 and hard left = -pi/2. Flip this one constant if the
@@ -55,7 +55,7 @@ static slv_vec3 v3(double x, double y, double z) { slv_vec3 v = { x, y, z }; ret
 static slv_quat q4(double x, double y, double z, double w) { slv_quat q = { x, y, z, w }; return q; }
 
 static const slv_quat IDENTITY = { 0.0, 0.0, 0.0, 1.0 };   /* faces +X (east) */
-/* 90 deg CCW about +Z (positive rotation per Amendment 4): forward +X -> +Y (north). */
+/* 90 deg CCW about +Z (positive rotation per the pinned convention): forward +X -> +Y (north). */
 #define S45 0.70710678118654752
 static const slv_quat YAW90 = { 0.0, 0.0, S45, S45 };
 
@@ -102,7 +102,7 @@ static void test_truncated_quat(void) {
 	printf("test_truncated_quat\n");
 	/* The same 90-deg-about-Z rotation as it arrives on the wire: (value x100,
 	 * int-truncated). {0,0,70,70}, magnitude ~99 — NOT a unit quaternion
-	 * (Amendment 4). Without normalization this silently produces a wrong angle. */
+	 * (the pinned convention). Without normalization this silently produces a wrong angle. */
 	slv_quat wire = q4(0, 0, 70, 70);
 	double ahead = slv_azimuth(v3(0,0,0), wire, v3(0,10,0));
 	double right = slv_azimuth(v3(0,0,0), wire, v3(10,0,0));

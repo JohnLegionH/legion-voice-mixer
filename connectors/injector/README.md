@@ -1,13 +1,12 @@
-# Voice connector — injector peer (S-CON-6)
+# Voice connector — injector peer
 
 A headless WebRTC peer (Python 3.12 + aiortc) that joins one `janus.plugin.slvoice`
-room as a sim-registered connector NPC identity — exactly as the S-CON-4 recorder
-does — and **sends** audio into the room from a PCM/WAV pipe or file. Design and
-authority: `docs/voice/connector-build-plan.md` S-CON-6,
-`docs/voice/connector-design-brief.md` Amendment 2.
+room as a sim-registered connector NPC identity — exactly as the recorder
+does — and **sends** audio into the room from a PCM/WAV pipe or file. Design:
+`docs/voice/connector-design-brief.md`.
 
 The source is deliberately dumb: an s16 mono/stereo WAV stream read from
-`SOURCE` (a regular file or a named pipe). A TTS engine (S-CON-7) or a live mic
+`SOURCE` (a regular file or a named pipe). A TTS engine or a live mic
 are just different writers to the same pipe. Whatever the input rate/layout, the
 peer sends 20 ms mono 48 kHz frames, paced in real time; an exhausted or idle
 source produces **silence frames, not a stop** — the participant stays joined.
@@ -21,7 +20,7 @@ The `[VoiceConnector.<name>]` record on the sim MUST carry **`MayInject=true`**.
 With `MayInject=false` the sim pushes a moderation mute at registration and
 **nobody hears the injector** — every listener's handle carries
 `mod_muted_entries=1` and the mix gates the source out. That silence is the
-S-CON-5(e) enforcement test working, not a defect here. The NPC's own matrix
+moderation mute working, not a defect here. The NPC's own matrix
 row constrains the injected audio like any avatar's: parcel-excluded listeners
 do not hear it.
 
@@ -31,19 +30,19 @@ do not hear it.
 
 DISPLAY is stable across regionserver restarts from build 1.1.392-alpha+d347102272; set it once.
 
-## Join capability (slice 0.7b)
+## Join capability
 
 Against a mixer with `JS_JOIN_CAP_REQUIRED=1`, set `CONNECTOR_CAP_URL` (the region's
 `/voice/connector/<name>/join-cap`) and `CONNECTOR_CAP_SECRET` (the record's `CapabilitySecret`) in `injector.env`,
-both or neither; see [../README.md](../README.md#join-capability-slice-07b). The injector then fetches a capability
+both or neither; see [../README.md](../README.md#join-capability). The injector then fetches a capability
 before every join and never joins without one. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
 
-## Position (slice 0.8h)
+## Position
 
 With `CONNECTOR_CAP_URL` set there is nothing to do: the sim's grant carries the NPC's position and the injector sends
 it to the mixer, so the audio fades with distance instead of playing at the same level everywhere in the room. Without
 a capability, set `CONNECTOR_POSITION_GLOBAL_CM=x,y,z` (global centimetres); with neither, the injector logs one
-warning at start and is mixed flat. See [../README.md](../README.md#position-slice-08h-ledger-o-62).
+warning at start and is mixed flat. See [../README.md](../README.md#position).
 
 ## Running
 
@@ -78,7 +77,7 @@ end-to-end instead. Restart the service after replacing the file with `LOOP=0`
   `setup:true`, `datachannel_open:true`, and — unlike the recorder — `audible`
   true while real (non-silent) audio is flowing.
 - In-world: the NPC's speaking dot active while the tone plays; the proximity
-  notice (D3(iii)) fires for an avatar approaching the voiced NPC.
+  notice fires for an avatar approaching the voiced NPC.
 
 ## Stopping cleanly
 

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-# public-address.sh: public address discovery, nat_1_1_mapping verdict and change detection (slice A.1).
+# public-address.sh: public address discovery, nat_1_1_mapping verdict and change detection.
 #
 # Sourced by docker-entrypoint.sh and entrypoint/public-address-watch.sh. POSIX sh (the image's
 # /bin/sh is dash). Every function returns 0 unless stated otherwise, so callers under `set -e` are
@@ -67,7 +67,7 @@ addr_reset() {
 # addr_discover HOST MODE
 # Query the sources MODE selects, in this order: stun, dns (JS_PUBLIC_IP_DNS_RESOLVER), container
 # (the container resolver).
-#   auto: all three | stun: stun | dns: dns | static: container (the pre-A.1 behaviour)
+#   auto: all three | stun: stun | dns: dns | static: container (the behaviour before address discovery existed)
 # Every selected source is queried, so the log shows what each one returned.
 # The winner is the first public answer in order, else the first IPv4 answer of any class.
 # Sets:

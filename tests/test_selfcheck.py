@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for entrypoint/selfcheck.py (slices A.2, A.2b, A.3). They cover:
+"""Unit tests for entrypoint/selfcheck.py. They cover:
   - every check's PASS, FAIL (or WARN) and INCONCLUSIVE branch;
   - C2a preserved, remapped and blocked;
   - C2b with no, fresh and stale receipts, including the age boundary;
@@ -426,7 +426,7 @@ class C6(Base):
         r = self.run_c6(self.jcfg(), self.PUBLIC_C1)
         self.assertEqual(r["status"], PASS, r["observed"])
         self.assertIn("publicly reachable per C1 (198.51.100.77)", r["observed"])
-        self.assertTrue(any("viewer-side TURN" in n and "(A.4)" in n for n in r["notes"]), r["notes"])
+        self.assertTrue(any("viewer-side TURN" in n and "cannot provide" in n for n in r["notes"]), r["notes"])
 
     def test_no_turn_cgnat_server_warn(self):
         r = self.run_c6(self.jcfg(), self.CGNAT_C1)

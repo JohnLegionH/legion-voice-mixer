@@ -5,9 +5,8 @@ this tree: the region-side capability module, the service-dispatch layer, the tw
 topologies (region-local Janus vs. Robust grid service), the Janus API surface actually used,
 the config surface, the C# seams for swapping the Janus plugin, and the upstream/local-patch
 status of these files. It proposes no redesign. Where the code is dead or a comment is stale,
-that is called out explicitly. Companion to `parcel-voice-semantics.md`; that doc covers the
-parcel/estate/presence gating semantics (the "voice ON ⇔ …" rule, per-listener gaps) and is
-not repeated here.
+that is called out explicitly. The parcel/estate/presence gating semantics (the "voice ON ⇔ …" rule,
+per-listener gaps) are not covered here.
 
 ## Citation baseline
 
@@ -108,8 +107,7 @@ front door and *calls* the 3-arg overload on its loaded `LocalServiceModule` (`:
    (`:256`–`:258`, comment "do fully not trust viewers voice parcel requests" `:230`), parcel
    `AllowVoiceChat` unless estate `TaxFree` (`:274`), estate-channel substitution by *removing*
    `parcel_local_id` when `UseEstateVoiceChan` is set (`:282`–`:284`), else parcel
-   ban/restrict → Forbidden (`:286`). (Semantics detailed in `parcel-voice-semantics.md` §3.1.)
-4. It calls the **3-arg** overload:
+   ban/restrict → Forbidden (`:286`).4. It calls the **3-arg** overload:
    `voiceService.ProvisionVoiceAccountRequest(map, agentID, scene.RegionInfo.RegionID)` (`:299`).
    This lands on `WebRtcVoiceServiceModule.cs:203` — **not** on any leaf directly.
 5. Dispatcher logic (`:203`–`:243`):
@@ -183,10 +181,9 @@ process; the id is reconciled by the `UpdateViewerSessionId` kludge.
 - **`WebRtcJanusService` 3-arg `ProvisionVoiceAccountRequest` (`:364`) / `VoiceSignalingRequest`
   (`:371`) — dead.** `WebRtcJanusService` is only ever reached as a *leaf* through the 4-arg
   overload (a dispatcher never stores a leaf in `IWebRtcVoiceService` scene slot). The NIE at
-  `:364` the semantics doc flagged is real but **not on the live path**: the region module's
+  `:364` is real but **not on the live path**: the region module's
   3-arg call (`WebRtcVoiceRegionModule.cs:299`) resolves to the *dispatcher*
-  (`WebRtcVoiceServiceModule.cs:203`), never to `WebRtcJanusService:364`. This refines
-  `parcel-voice-semantics.md` §3.3 / final caveat: the working path is
+  (`WebRtcVoiceServiceModule.cs:203`), never to `WebRtcJanusService:364`. The working path is
   region → `WebRtcVoiceServiceModule`(3-arg) → leaf(4-arg); the `WebRtcJanusService` 3-arg
   overload is unreachable in any supported config.
 - **`WebRtcVoiceServiceModule` 4-arg PVAR (`:270`), 4-arg VSR (`:276`), `CreateViewerSession`
@@ -237,7 +234,7 @@ process; the id is reconciled by the `UpdateViewerSessionId` kludge.
 | `AudioBridgeListParticipantsReq` (`:580`) | `listparticipants` | `room` | `HandleJanusListRooms:440` (console only) |
 | `AudioBridgeConfigRoomReq` (`:543`) | `configure` | (TODO stub) | **never constructed (dead)** |
 
-The `join` body confirms the flat-membership finding of `parcel-voice-semantics.md` §3.2: the
+The `join` body shows that membership is flat: the
 only per-participant fields are `room` and `display`.
 
 ### 3.3 Where responses are parsed
@@ -439,8 +436,7 @@ upstream exactly — there is nothing local to carry forward or reconcile here.
   ends, but three are genuinely unreachable (`WebRtcJanusService:364/371`,
   `WebRtcVoiceServiceModule:270/276/281`) and one region-side placeholder
   (`VoiceViewerSession.Shutdown/VoiceServiceSessionId`) throws if ever exercised.
-- The semantics doc's "3-arg throws NotImplementedException" flag is technically true of
-  `WebRtcJanusService:364` but **off the live path** — the region's 3-arg call hits the
+- The 3-arg `NotImplementedException` in `WebRtcJanusService:364` is real but **off the live path** — the region's 3-arg call hits the
   dispatcher, not the Janus leaf (§2.5).
 - Rooms are not reference-counted (`WebRtcJanusService.cs:209` TODO); `_rooms` is per-process
   in-memory (`JanusAudioBridge.cs:135`).

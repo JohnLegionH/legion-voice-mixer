@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for entrypoint/ice_diag.py and the --sessions / --session views of selfcheck.py (slice A.5):
+"""Unit tests for entrypoint/ice_diag.py and the --sessions / --session views of selfcheck.py:
   - a failed session is retained and reportable after it ends (reaped, ICE failed, hung up or ended before media);
   - the ring buffer keeps the newest JS_ICE_DIAG_HISTORY ended sessions and never evicts a live one;
   - relay vs direct carries the prflx caveat and is never decided from a prflx pair;
@@ -284,7 +284,7 @@ class PathTests(unittest.TestCase):
             self.assertIn("published-port", p["caveat"])
 
     def test_janus_side_prflx_with_the_peers_own_address_is_direct(self):
-        """A.6, measured on Linux dockerd with published ports: 172.31.66.10:10019 [prflx,udp] <-> 172.31.66.20:45333
+        """Measured on Linux dockerd with published ports: 172.31.66.10:10019 [prflx,udp] <-> 172.31.66.20:45333
         [host,udp]. The DNAT makes Janus's side prflx; the peer's real address arrived, so the path is direct."""
         for n, (lt, rt) in enumerate((("prflx", "host"), ("prflx", "srflx"))):
             p = self.path(305 + n, lt, rt)

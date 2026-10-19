@@ -65,20 +65,20 @@ def parse_args(argv):
     p.add_argument("--turn-user", default="", help="S13: static TURN username (instead of --turn-secret)")
     p.add_argument("--turn-pwd", default="", help="S13: static TURN password")
     p.add_argument("--join-cap-secret", default="",
-                   help="S22-S24 (slice 0.4): the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join "
+                   help="S22-S24: the mixer's JS_JOIN_CAP_SECRET, so the harness can mint join "
                         "capabilities as the sim does; without it those scenarios are skipped")
     p.add_argument("--stale-ms-started-with", type=int, default=0,
-                   help="S31 (slice 0.5, §9 27): the JS_VIS_STALE_MS this mixer was STARTED with, when that is "
-                        "below the §5 minimum, so S31 can check the clamp took effect. Without it S31 skips")
+                   help="S31: the JS_VIS_STALE_MS this mixer was STARTED with, when that is "
+                        "below the minimum staleness window, so S31 can check the clamp took effect. Without it S31 skips")
     p.add_argument("--prove-fail", action="store_true",
-                   help="slice 0.5: report a SKIP as a FAIL. Only for the 'behaviour absent' proof runs against "
+                   help="report a SKIP as a FAIL. Only for the 'behaviour absent' proof runs against "
                         "an older image, where a scenario that merely skips proves nothing. Never for a "
                         "reporting run")
     p.add_argument("--container", default="",
                    help="a mixer started with `docker run` (a scratch mixer): every scenario reads its logs, execs into it "
-                        "and restarts it by this container name instead of the compose service (O-94)")
+                        "and restarts it by this container name instead of the compose service")
     p.add_argument("--join-cap-secret-file", default="",
-                   help="slice 0.8e: read the mixer's JS_JOIN_CAP_SECRET from a FILE (a bare value, or a dotenv file "
+                   help="read the mixer's JS_JOIN_CAP_SECRET from a FILE (a bare value, or a dotenv file "
                         "with a JS_JOIN_CAP_SECRET= line) instead of a command line, so it never reaches the shell "
                         "history, the process list or this run's output. With a key, every ordinary join into a "
                         "declared room carries a freshly minted capability, which is what a board against a mixer "

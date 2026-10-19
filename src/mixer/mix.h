@@ -5,7 +5,7 @@
 /*! \file    mix.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Pure mixing math for the per-room N-minus-one conference mix (Phase 2)
+ * \brief    Pure mixing math for the per-room N-minus-one conference mix
  *
  * \details  These are the arithmetic primitives the per-region tick uses to
  * build each listener's mix. They are deliberately DEPENDENCY-FREE beyond libc
@@ -49,7 +49,7 @@ int slv_mix_nminus1(float *out, size_t n,
                     int nsrc, int self);
 
 /*! \brief Per-channel (stereo) N-minus-one mix: like \ref slv_mix_nminus1 but with
- * separate left and right gains per source, for amplitude panning (Phase 3b item 4).
+ * separate left and right gains per source, for amplitude panning.
  *
  * \p out is interleaved stereo (even index = left, odd = right) and is fully
  * overwritten. A source contributes when \p active[i] is non-zero, i != \p self,
@@ -58,8 +58,8 @@ int slv_mix_nminus1(float *out, size_t n,
  * A source that is silent in BOTH channels (gainsL[i]==gainsR[i]==0) is dropped and
  * not counted, matching \ref slv_mix_nminus1's zero-gain skip.
  *
- * \ref slv_mix_nminus1 is a thin wrapper over this with gainsL == gainsR == gains
- * (Amendment 5): the pan gains are computed per source from the azimuth
+ * \ref slv_mix_nminus1 is a thin wrapper over this with gainsL == gainsR == gains.
+ * The pan gains are computed per source from the azimuth
  * (\ref mixer/pan.h) and cannot be folded into the shared, tick-owned source
  * buffers, so panning must happen here at mix time.
  *

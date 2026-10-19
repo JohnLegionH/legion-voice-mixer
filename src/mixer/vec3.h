@@ -5,9 +5,9 @@
 /*! \file    vec3.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Pure 3D vector math for the spatial mixer (Phase 3b)
+ * \brief    Pure 3D vector math for the spatial mixer
  *
- * \details  The arithmetic primitives the geometry snapshot (the §7.1 camera
+ * \details  The arithmetic primitives the geometry snapshot (the camera
  * leash) and, later, the distance / attenuation / panning DSP build on. Like
  * \ref mixer/mix.h these are DEPENDENCY-FREE beyond libm and header-only
  * (\c static \c inline), so they add no translation unit / Makefile entry and

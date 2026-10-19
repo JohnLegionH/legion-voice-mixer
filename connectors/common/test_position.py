@@ -4,7 +4,7 @@
 """Unit tests for a connector's position. pytest-style; a __main__ fallback runs them
 with plain python. Run from connectors/: `python -m pytest common/` or `python -m common.test_position`.
 
-Before 0.8h a connector peer opened its SLData channel and sent nothing on it, so the mixer held no geometry for it and
+Older connector peers opened their SLData channel and sent nothing on it, so the mixer held no geometry for the peer and
 mixed it flat - the same level to everyone in its room (janus_slvoice.c, the flat-gain rule for a pair missing
 geometry). Now the peer sends its position once the channel opens, in EXACTLY the viewer's frame: global centimetres
 as integers (Firestorm llvoicewebrtc.cpp:1241-1262), with sp and lp the same point and identity headings. The position
@@ -148,7 +148,7 @@ class _OneAttempt(ConnectorPeer):
 
 
 def test_no_position_warns_once_and_sends_nothing():
-    """R3: neither a grant nor CONNECTOR_POSITION_GLOBAL_CM - exactly today's behaviour, plus ONE warning at start."""
+    """Neither a grant nor CONNECTOR_POSITION_GLOBAL_CM - exactly today's behaviour, plus ONE warning at start."""
     async def go():
         peer = _peer(dict(BASE), _OneAttempt)
         await peer.run()

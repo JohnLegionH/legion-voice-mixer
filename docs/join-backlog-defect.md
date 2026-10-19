@@ -128,7 +128,7 @@ moment their data channel becomes writable, filtered by that listener's own excl
 
 ## Supersedes / retracts
 
-The viewer repo's `docs/voice-participant-row-suppression.md` chased three theories, **all now
+An earlier viewer-side investigation chased three theories, **all now
 refuted by the proven `size=2 hasOther=1` read-back**:
 
 - **`volume_settings.xml`** as the trigger — refuted (row still missing with the file empty).
@@ -136,9 +136,7 @@ refuted by the proven `size=2 hasOther=1` read-back**:
   add is not gated on `mPrimary`).
 - **A viewer read-back returning empty (`mProcessChannels`/`mSession`)** — refuted (`size=2`).
 
-Those were viewer-side and are wrong. The root cause is this mixer's missing join-backlog. **The
-viewer document should receive a final retraction pointing here** — that edit is out of scope for
-this task (viewer repo untouched).
+Those were viewer-side and are wrong. The root cause is this mixer's missing join-backlog.
 
 ## Viewer instrument cleanup (out of scope here; flagged)
 
@@ -153,8 +151,8 @@ and **must be reverted before any viewer commit** — they are diagnostic only, 
 
 ## Notes on where this record lives
 
-This repo has **no defect-log convention** (no `KnownDefects.md`; `docs/` holds flat topical notes
-and briefs — `docker-notes.md`, `mixer-feed-protocol.md`, etc.). This file
+This repo has **no defect-log convention**; `docs/` holds flat topical notes
+and briefs (`docker-notes.md`, `mixer-feed-protocol.md`, etc.). This file
 follows that flat convention rather than inventing a heavier structure. It is deliberately **not**
 in `docs/voice/` (the design and protocol documents), because it is mixer-specific and its fix is
 mixer code.

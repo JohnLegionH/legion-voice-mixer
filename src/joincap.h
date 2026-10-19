@@ -13,8 +13,8 @@
  *   payload  = "<agent>|<session>|<room>|<epoch>|<generation>|<iat>|<exp>|<nonce>"
  *
  * The viewer never sees it: the sim's own Janus session performs the join, so the capability travels
- * sim -> mixer only. It is defence in depth against a leaked JS_API_SECRET (§11.1); it is NOT arming,
- * and it grants no audibility (§11.5).
+ * sim -> mixer only. It is defence in depth against a leaked JS_API_SECRET; it is NOT arming,
+ * and it grants no audibility.
  *
  * This module links OpenSSL (HMAC-SHA256, constant-time compare) and libc, no Janus and no glib, so it
  * compiles into the plugin .so and into tests/test_joincap.c (`make test`).
@@ -36,16 +36,16 @@
 #define SLV_UUID_LEN 40
 #endif
 
-/*! \brief Live nonces remembered per mixer process (§11.6). One 60 s lifetime holds far fewer. */
+/*! \brief Live nonces remembered per mixer process. One 60 s lifetime holds far fewer. */
 #define SLV_JOINCAP_NONCE_MAX 4096
 
-/*! \brief Clock skew tolerated in either direction, seconds (§11.7). */
+/*! \brief Clock skew tolerated in either direction, seconds. */
 #define SLV_JOINCAP_SKEW_S 120
 
 /*! \brief The wire version prefix this mixer accepts. */
 #define SLV_JOINCAP_PREFIX "v1."
 
-/*! \brief Verdicts, in the order §11.4 evaluates them. The reason strings are what a reply carries. */
+/*! \brief Verdicts, in the order they are evaluated. The reason strings are what a reply carries. */
 typedef enum slv_joincap_verdict {
 	SLV_JOINCAP_OK = 0,
 	SLV_JOINCAP_MISSING,            /*!< required, and the join carried none */
@@ -80,7 +80,7 @@ typedef struct slv_joincap {
  * the caller decides whether a missing capability is SLV_JOINCAP_MISSING. */
 slv_joincap_verdict slv_joincap_parse(const char *cap, const void *key, size_t key_len, slv_joincap *out);
 
-/*! \brief The context and time checks (§11.4 rows 4-7): the capability must name this join's agent,
+/*! \brief The context and time checks: the capability must name this join's agent,
  * session and room, and \c now_s must lie within [iat - skew, exp + skew]. */
 slv_joincap_verdict slv_joincap_check(const slv_joincap *c, const char *display, const char *session_id,
 	int64_t room, int64_t now_s, int skew_s);
@@ -89,7 +89,7 @@ slv_joincap_verdict slv_joincap_check(const slv_joincap *c, const char *display,
  * WARN with the observed offset. \c out_offset_s is signed: positive means the capability's clock ran ahead. */
 int slv_joincap_used_skew(const slv_joincap *c, int64_t now_s, int64_t *out_offset_s);
 
-/*! \brief The epoch check (§11.5, restated by the 0.8b amendment): the capability's
+/*! \brief The epoch check: the capability's
  * (epoch, generation) against the room's adopted authority.
  *
  * The GENERATION never refuses. The sim publishes a room's generation when it is ALLOCATED
@@ -110,7 +110,7 @@ slv_joincap_verdict slv_joincap_generation(const slv_joincap *c, uint64_t auth_e
 typedef enum slv_joincap_gen_note {
 	SLV_JOINCAP_GEN_MATCH = 0,     /*!< the room's own (epoch, generation) — or a capability that was refused */
 	SLV_JOINCAP_GEN_EPOCH_AHEAD,   /*!< a higher epoch than the room has adopted (including: it has adopted none) */
-	SLV_JOINCAP_GEN_NO_EPOCH,      /*!< 0.8b: no epoch at all, against a room that HAS adopted one (accepted) */
+	SLV_JOINCAP_GEN_NO_EPOCH,      /*!< no epoch at all, against a room that HAS adopted one (accepted) */
 	SLV_JOINCAP_GEN_AHEAD,         /*!< same epoch, a generation above what the mixer has applied */
 	SLV_JOINCAP_GEN_BEHIND,        /*!< same epoch, a generation below what the mixer has applied */
 } slv_joincap_gen_note;
@@ -123,7 +123,7 @@ const char *slv_joincap_gen_note_str(slv_joincap_gen_note n);
  * capability slv_joincap_generation() refuses classifies as SLV_JOINCAP_GEN_MATCH: its refusal is the count. */
 slv_joincap_gen_note slv_joincap_generation_note(const slv_joincap *c, uint64_t auth_epoch, uint32_t policy_gen);
 
-/*! \brief The bounded replay store (§11.6). Zero-initialised is empty and ready. NOT thread-safe: the
+/*! \brief The bounded replay store. Zero-initialised is empty and ready. NOT thread-safe: the
  * plugin calls it under its own lock. */
 typedef struct slv_joincap_nonce_store {
 	struct {

@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for the S-CON-6 source framer (build plan: "the pipe source
-under- and over-run behaviour; silence on an empty pipe (no junk frames)").
+"""Unit tests for the injector source framer: the pipe source
+under- and over-run behaviour, and silence on an empty pipe (no junk frames).
 pytest-style; a __main__ fallback runs them with plain python where pytest is
 not installed. Run from connectors/ (so the package imports resolve):
 `python -m pytest injector/` or `python -m injector.test_source`."""

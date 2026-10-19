@@ -148,8 +148,8 @@ static void test_rms_silence(void) {
 	CHECK(slv_mix_rms(NULL, 0) == 0.0, "empty buffer RMS is 0");
 }
 
-/* ---- stereo path: per-channel gains, and wrapper equivalence (Amendment 5) -
- * New in Phase 3b item 4. Does NOT touch the 26 checks above. Verifies (a) that
+/* ---- stereo path: per-channel gains, and wrapper equivalence -
+ * Does NOT touch the 26 checks above. Verifies (a) that
  * the stereo core pans (gainL != gainR -> L != R in the interleaved output), and
  * (b) that slv_mix_nminus1 is a faithful thin wrapper: identical output to the
  * stereo core called with gainsL == gainsR == gains. */

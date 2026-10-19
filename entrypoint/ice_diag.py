@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""legion-voice ICE diagnostics (slice A.5): one record per slvoice session, kept after the session ends.
+"""legion-voice ICE diagnostics: one record per slvoice session, kept after the session ends.
 
 The question it answers is "why did voice fail for that one user", after the fact and without Janus's raw log.
 
@@ -218,7 +218,7 @@ def classify_path(rec):
         verdict, basis = "none", "no candidate pair was selected, so there is no path to classify"
     else:
         lt, rt = pair["local"]["type"], pair["remote"]["type"]
-        # The peer's side decides (A.6, measured): a published port DNATs Janus's own address, so Janus's local side reads
+        # The peer's side decides (measured): a published port DNATs Janus's own address, so Janus's local side reads
         # prflx even when the peer's real address arrives untouched. The peer's side reads prflx only when its source
         # address was rewritten on the way (Docker Desktop's port proxy) or learned from checks.
         if lt == "relay":

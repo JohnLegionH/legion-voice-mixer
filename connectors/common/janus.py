@@ -3,8 +3,8 @@
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
 """Minimal Janus HTTP transport client, shared by the connector peers.
 
-Moved verbatim from the S-CON-4 recorder (deliberately small — build plan D5: a
-later port should move little). Janus HTTP API shapes used (mixer plugin verbs
+Moved verbatim from the recorder (deliberately small, so a later port
+should move little). Janus HTTP API shapes used (mixer plugin verbs
 cited from src/janus_slvoice.c):
   create   POST {base}                       {"janus":"create", ...}
   attach   POST {base}/{session}             {"janus":"attach","plugin":"janus.plugin.slvoice"}

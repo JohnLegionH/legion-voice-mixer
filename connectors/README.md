@@ -3,18 +3,18 @@
 Headless WebRTC peers (Python 3.12 + aiortc) that join a `janus.plugin.slvoice`
 room under a sim-registered connector NPC identity:
 
-- [`recorder/`](recorder/README.md): S-CON-4, writes the room mixdown to WAV segments.
-- [`injector/`](injector/README.md): S-CON-6, sends audio into the room.
+- [`recorder/`](recorder/README.md): writes the room mixdown to WAV segments.
+- [`injector/`](injector/README.md): sends audio into the room.
 - `common/`: the shared Janus session/join/poll/teardown plumbing and the segment writer.
 
 `ROOM` and `DISPLAY` come from the sim's registration line:
 
     [CONNECTOR] registered <name> npc=<DISPLAY> room=<ROOM> inject=<bool> session=<...> identity=derived
 
-Since slice 0.8c a connector no longer needs an avatar present for its room to exist: the sim creates the room it
+A connector no longer needs an avatar present for its room to exist: the sim creates the room it
 records, and re-checks it at every capability fetch.
 
-## Join capability (slice 0.7b)
+## Join capability
 
 A mixer with `JS_JOIN_CAP_REQUIRED=1` refuses a join into a declared room that carries no sim-minted capability, and
 connector peers are not exempted. To join such a room, give the record a secret on the sim side and the peer the
@@ -30,13 +30,13 @@ With both set the peer fetches a capability before every join, joins with the di
 env `DISPLAY`/`ROOM` that disagrees loses, with a WARN), and on any failure retries with backoff and never joins
 without one. With neither set the join is exactly as before. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
 
-A peer never gives up on its room (slice 0.8f): after any failed join (a 485, a capability refusal, a transport
+A peer never gives up on its room: after any failed join (a 485, a capability refusal, a transport
 error) or a later loss of the room or session, it tears the session down, waits 2 s doubling to 60 s (back to 2 s
 after a join that stayed up 60 s), fetches a fresh capability and joins again, logging one INFO line per attempt
 with the reason and the next delay. A room destroyed under a joined peer sends it nothing, so the peer asks the
 mixer for its room's participants every 5 s and treats a 485, or its own absence from the list, as a lost room.
 
-## Position (slice 0.8h, ledger O-62)
+## Position
 
 A connector that has a position is mixed **spatially**: the mixer fades it with distance (full volume inside 10 m,
 silent past 60 m) and pans it. Without one it is mixed **flat** - the same level to every listener in the room, at any
@@ -62,7 +62,7 @@ Two ways to have one:
 > (`connectors/common/test_apisecret.py`). So an nginx/Caddy/ALB access log in default configuration, or any
 > tracing proxy that records full URLs, writes your `JS_API_SECRET` to disk on every poll. If you must proxy,
 > strip or mask the query string in the access-log format, and keep the admin API (`/voiceAdmin`, which uses a
-> body-carried `admin_secret`) on its own bind address. Ledger O-101.
+> body-carried `admin_secret`) on its own bind address.
 
 ## Receiving SLData from the mixer
 
@@ -77,7 +77,7 @@ A connector that wants the mixer's SLData must therefore listen on channels the 
 `common/peer.py` registers `pc.on("datachannel")` and routes those messages to `_on_sldata`.
 
 The integration harness's S11 failed until it did this: the test peer received nothing while the
-mixer was sending correctly (ledger O-86).
+mixer was sending correctly.
 
 ## One-time migration (regionserver build 1.1.392+)
 
@@ -94,4 +94,4 @@ or `--profile injector ... injector`). Later regionserver restarts keep the same
 
 Until you re-edit, the peer is joined under an id the sim no longer knows. It is not
 the NPC the sim moderation-muted and disclosed at registration, so a stale injector
-plays unmuted and undisclosed (ledger O-63).
+plays unmuted and undisclosed.

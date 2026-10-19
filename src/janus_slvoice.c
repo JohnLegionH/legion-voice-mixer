@@ -26,7 +26,7 @@
  * participants; each viewer holds one PeerConnection (Opus audio + the SLData
  * DataChannel) per region room. What the plugin does:
  *
- *  - Negotiation. A full JSEP answer for BOTH m=audio (Opus, spec §9 fmtp,
+ *  - Negotiation. A full JSEP answer for BOTH m=audio (Opus, SL voice fmtp,
  *    a=ptime:20/a=maxptime:20) and m=application (the SLData DataChannel the viewer
  *    creates before negotiating). An unanswered application line makes the core log
  *    "Skipping unsupported application media line" (vendor sdp.c:1625) and the viewer
@@ -44,7 +44,7 @@
  *    a silent mix is encode-skipped. Summing/gain/RMS maths in src/mixer/mix.c.
  *  - Spatialisation. sp/sh/lp/lh from SLData persist per participant (a message
  *    merges only the fields it carries). The tick snapshots them, clamps the
- *    listener to a camera-position leash (§7.1), culls by distance with hysteresis,
+ *    listener to a camera-position leash, culls by distance with hysteresis,
  *    attenuates by distance and pans by horizontal azimuth (constant-power). The
  *    listener's per-source m (mute) and ug (gain) apply in the mix. No HRTF or ITD.
  *  - Mixer->client SLData. A ~100 ms per-room power/VAD batch {uuid:{p,v}}, j/l
@@ -89,16 +89,16 @@
 #include <math.h>        /* sqrtf for RMS */
 
 #include "sldata.h"
-#include "visbatch.h"    /* Phase 3a: server-to-server visibility batch parser (unit-tested) */
+#include "visbatch.h"    /* server-to-server visibility batch parser (unit-tested) */
 #include "deferred.h"    /* join-window fix: per-room store of columns deferred for a not-yet-joined listener */
-#include "roster.h"      /* Phase 3a: single-source-of-truth exclusion predicate (unit-tested) */
-#include "visauth.h"     /* Phase 0: epochs, the listener rule rows and the knobs (unit-tested) */
+#include "roster.h"      /* single-source-of-truth exclusion predicate (unit-tested) */
+#include "visauth.h"     /* epochs, the listener rule rows and the knobs (unit-tested) */
 #include "possync.h"     /* vis_protocol 3: sim-reported participant positions, observed only (unit-tested) */
 #include "joincap.h"     /* The sim-issued join capability (unit-tested) */
-#include "mixer/mix.h"   /* Phase 2: pure N-minus-one mixing math (unit-tested) */
-#include "mixer/vec3.h"  /* Phase 3b: pure 3D vector math (geometry snapshot / leash) */
-#include "mixer/azimuth.h" /* Phase 3b item 4: horizontal azimuth of a source (pan input) */
-#include "mixer/pan.h"     /* Phase 3b item 4: constant-power stereo pan gains */
+#include "mixer/mix.h"   /* pure N-minus-one mixing math (unit-tested) */
+#include "mixer/vec3.h"  /* pure 3D vector math (geometry snapshot / leash) */
+#include "mixer/azimuth.h" /* horizontal azimuth of a source (pan input) */
+#include "mixer/pan.h"     /* constant-power stereo pan gains */
 #include "sdp_redact.h"    /* ICE credential / fingerprint redaction for the SDP dumps */
 
 /* Plugin information. JANUS_SLVOICE_VERSION is MAJOR*100 + MINOR*10 + PATCH (1.1.0 = 110;
@@ -133,7 +133,7 @@
 #define JANUS_SLVOICE_ERROR_JOIN_CAP        496
 #define JANUS_SLVOICE_ERROR_UNKNOWN         499
 
-/* Mixer->client SLData power/VAD batch cadence (spec §9: ~100ms). */
+/* Mixer->client SLData power/VAD batch cadence (~100ms). */
 #define SLV_POWER_TICK_MS   100
 /* A non-permanent room that has had no participants for this many seconds is destroyed by
  * the sender thread (janus_slvoice_sweep_empty_rooms_locked). Runtime override: the process env
@@ -148,7 +148,7 @@
 #define SLV_JOIN_MEDIA_TIMEOUT_S 30
 #endif
 
-/* ---- Phase 2 mixer / audio constants --------------------------------------
+/* ---- Mixer / audio constants --------------------------------------
  * Everything runs at Opus fullband stereo (matching the negotiated
  * stereo=1;sprop-stereo=1 fmtp), so decode/encode channel counts are fixed. */
 #define SLV_RATE            48000
@@ -174,7 +174,7 @@
 #define SLV_VAD_RMS         0.02f
 /* DTX/VAD cull release hold: keep a talker in the active set this long after
  * its last RTP, so a DTX gap / brief pause does not chop the next word onset
- * (spec §5: "100-200 ms release hold"). */
+ * (docs/voice/webrtc-voice-spec.md: "100-200 ms release hold"). */
 #define SLV_VAD_RELEASE_MS  150
 /* Per-source gain conversion: the viewer sends ug = volume * 220
  * (PEER_GAIN_CONVERSION_FACTOR in llvoicewebrtc.cpp), so linear = ug/220. */
@@ -184,7 +184,7 @@
  * (enforced at join — see the ROOM_FULL check). One number governs both: the mix
  * arrays are sized to it, so admitting past it is exactly what the old silent tick-
  * time truncation did. 110 matches Second Life's per-region limit; the measurement
- * (docs/voice/scaling-assessment.md) shows it fits under realistic spread geometry,
+ * shows it fits under realistic spread geometry,
  * though NOT under all-audible clustering. Overridable with -DSLV_MAX_MIX=N for
  * measurement builds; raising it exposes the O(N) encode and O(N^2) setup costs. */
 #ifndef SLV_MAX_MIX
@@ -193,7 +193,7 @@
 /* Opus encoder tuning for the per-listener mix. Both are overridable at build time
  * (-DSLV_OPUS_COMPLEXITY=N / -DSLV_OPUS_BITRATE=N) for measurement builds that sweep
  * encode cost, mirroring SLV_MAX_MIX; production values are unchanged. Complexity is
- * the dominant CPU lever of the two (docs/voice/scaling-assessment.md). */
+ * the dominant CPU lever of the two. */
 #ifndef SLV_OPUS_COMPLEXITY
 #define SLV_OPUS_COMPLEXITY 9        /* 0..10; 10 is max. */
 #endif
@@ -201,12 +201,12 @@
  * OPUS_BITRATE_MAX, which this integer define does NOT carry — do not expect them
  * to work through it. */
 #ifndef SLV_OPUS_BITRATE
-#define SLV_OPUS_BITRATE    64000    /* bits/sec; spec §5: listener mix 64-96kbps stereo */
+#define SLV_OPUS_BITRATE    64000    /* bits/sec; listener mix 64-96kbps stereo */
 #endif
-/* Warn if a single tick takes longer than this (spec §4.1 mix-deadline). */
+/* Warn if a single tick takes longer than this (mix deadline). */
 #define SLV_TICK_WARN_MS    15.0
 
-/* ---- Phase 3b spatial constants — DEFAULTS ONLY (Amendment 8) ---------------
+/* ---- Spatial constants — DEFAULTS ONLY ---------------
  * Viewer geometry (sp/sh/lp/lh) arrives scaled ×100 — an int of value×100 — so a
  * stored coordinate is centimetres (docs/voice/phase3b-design-brief.md "Resolved:
  * the geometry unit"; viewer llvoicewebrtc.cpp:1239-1266). The DSP works in that
@@ -220,20 +220,20 @@
  * There is deliberately NO stored-unit macro any more: its removal makes it a COMPILE
  * ERROR, not a silent unit bug, for the tick to read a constant instead of the setting. */
 #define SLV_GEOM_SCALE           100.0   /* stored unit = metres × 100 */
-#define SLV_LEASH_DIST_M         50.0    /* §7.1 camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
+#define SLV_LEASH_DIST_M         50.0    /* camera leash = MAX_AUDIO_DIST (llvoicewebrtc.cpp:92) */
 #define SLV_CUTOFF_DIST_M        60.0    /* audible cutoff: a source beyond this is culled */
 #define SLV_READD_DIST_M         58.0    /* hysteresis re-add: un-cull only inside this (< cutoff) */
 #define SLV_REF_DIST_M           10.0    /* full volume within this radius */
 #define SLV_FALLOFF_EXP_DEFAULT  2.0     /* falloff shaping exponent (dimensionless; do not scale) */
 
-/* Runtime-configurable spatial DSP settings (Amendment 8). The tick reads THIS
+/* Runtime-configurable spatial DSP settings. The tick reads THIS
  * struct, never a macro. The four distances are in stored units (metres ×
  * SLV_GEOM_SCALE); falloff_exp is dimensionless. Pre-initialised to the compiled
  * defaults, so with no config file — or no spatial keys — every value is
  * byte-identical to the previous build. Overwritten only by
  * janus_slvoice_load_spatial_settings, and only when the whole set validates. */
 typedef struct slv_spatial_settings {
-	double leash_dist;    /* stored: §7.1 camera-leash radius */
+	double leash_dist;    /* stored: camera-leash radius */
 	double cutoff_dist;   /* stored: cull cutoff */
 	double readd_dist;    /* stored: hysteresis re-add (must be < cutoff) */
 	double ref_dist;      /* stored: attenuation reference (must be < cutoff) */
@@ -361,7 +361,7 @@ static guint slv_join_media_timeout_s = SLV_JOIN_MEDIA_TIMEOUT_S;
 /* JS_VIS_FAIL_CLOSED and JS_VIS_STALE_MS, parsed by
  * janus_slvoice_vis_load_knobs from init. With fail-closed off (the default, "shadow mode") the authority state below is
  * kept and counted and changes nothing anyone hears or sees. slv_mixer_instance is a random u64 chosen at init and
- * carried in every peer_ctl_batch and heartbeat reply, so a sim can tell this process from its predecessor (§7.3). */
+ * carried in every peer_ctl_batch and heartbeat reply, so a sim can tell this process from its predecessor. */
 static gboolean slv_vis_fail_closed = FALSE;
 static guint slv_vis_stale_ms = SLV_VIS_STALE_MS_DEFAULT;
 static char slv_mixer_instance[17] = "";
@@ -396,9 +396,9 @@ static volatile gint slv_join_cap_no_epoch;       /* 0.8b: no epoch at all again
 static volatile gint slv_join_cap_gen_ahead;      /* same epoch, a generation the mixer has not applied yet */
 static volatile gint slv_join_cap_gen_behind;     /* same epoch, a batch landed between minting and joining */
 
-/* Phase 0 (§1.3): one avatar's standing as a listener in one room. KEYED PER ROOM BY DISPLAY (agent UUID), not per
- * session: every session with that display in the room follows the one record, and it survives a leave and rejoin
- * (§7.4). Present means armed. Guarded by room->mutex. */
+/* One avatar's standing as a listener in one room. KEYED PER ROOM BY DISPLAY (agent UUID), not per
+ * session: every session with that display in the room follows the one record, and it survives a leave and rejoin.
+ * Present means armed. Guarded by room->mutex. */
 typedef struct slv_vis_record {
 	guint64 epoch;          /* the authority epoch that armed it */
 	guint32 listener_gen;   /* policy_generation of the last batch that set or changed its columns */
@@ -437,7 +437,7 @@ typedef struct janus_slvoice_room {
 	GHashTable *participants;    /* guint64* user_id -> janus_slvoice_session* (borrowed) */
 	janus_mutex mutex;
 
-	/* ---- Phase 2 per-region mix tick (the mixer.h slv_region model, realised
+	/* ---- Per-region mix tick (the mixer.h slv_region model, realised
 	 * on this room). One dedicated 20ms thread per room; no shared mix thread. */
 	GThread *ticker;
 	volatile gint tick_running;  /* set FALSE to ask the tick thread to exit */
@@ -449,7 +449,7 @@ typedef struct janus_slvoice_room {
 	double tick_last_ms;
 	double tick_max_ms;
 
-	/* ---- Phase 3a per-listener visibility feed (server-to-server peer_ctl_batch).
+	/* ---- Per-listener visibility feed (server-to-server peer_ctl_batch).
 	 * Guarded by room->mutex (the tick's whole-pass lock) — see
 	 * janus_slvoice_apply_visbatch for the atomicity contract. */
 	guint64 vis_epoch;             /* +1 per applied batch (feed liveness / ordering) */
@@ -462,7 +462,7 @@ typedef struct janus_slvoice_room {
 	 * "..._listener_entries" precisely so it cannot be confused with the per-session
 	 * excluded_entries counter. A correct drop (the sim naming a listener who just left) and a
 	 * wrong one (a listener that IS here under a display the feed doesn't match) are
-	 * indistinguishable without this — the §M investigation's missing instrument. */
+	 * indistinguishable without this — the instrument that tells them apart. */
 	guint64 vis_dropped_listener_entries;      /* cumulative since room creation */
 	guint64 vis_last_batch_dropped_listeners;  /* drops in the most recently applied batch */
 
@@ -472,8 +472,8 @@ typedef struct janus_slvoice_room {
 	 * them is revealed. Guarded by room->mutex, like the vis_* fields above. */
 	slv_deferred_store vis_deferred;
 
-	/* ---- Phase 0 visibility authority. Guarded by room->mutex. */
-	gboolean vis_declared;          /* created with "vis_authority": true (§6.2); fixed for the room's lifetime */
+	/* ---- Visibility authority. Guarded by room->mutex. */
+	gboolean vis_declared;          /* created with "vis_authority": true; fixed for the room's lifetime */
 	gboolean sim_created;           /* Created with "sim_created": true - a simulator owns this room, so a
 	                                 * join into it needs a sim-minted capability when JS_JOIN_CAP_REQUIRED is on,
 	                                 * whether or not the room is declared. Fixed for the room's lifetime. */
@@ -514,10 +514,10 @@ typedef struct slv_peer_ctl {
 } slv_peer_ctl;
 
 /* Per-listener distance-cull hysteresis for one OTHER participant, keyed by that
- * participant's agent UUID (Phase 3b item 2). A PARALLEL structure to peer_ctl: it
+ * participant's agent UUID. A PARALLEL structure to peer_ctl: it
  * covers every audible source, not just viewer-adjusted ones, so it is sized to the
- * participant cap and LRU-evicts the least-recently-seen slot when full (brief
- * Amendment 1 pins UUID-keyed + SLV_MAX_MIX-sized; Amendment 2 pins the eviction). */
+ * participant cap and LRU-evicts the least-recently-seen slot when full (SLV_MAX_MIX
+ * slots, so any displaced slot is a departed UUID). */
 typedef struct slv_cull_hyst {
 	char uuid[SLV_UUID_LEN]; /* source participant agent UUID */
 	gboolean culled;         /* current cull state (the hysteresis latch) */
@@ -528,7 +528,7 @@ typedef struct janus_slvoice_session {
 	janus_plugin_session *handle;
 	guint64 user_id;             /* participant id; 0 until joined */
 	janus_slvoice_room *room;    /* ref held while joined; NULL otherwise (guarded by mutex) */
-	char *display;               /* display name from join = the agent UUID string (§3.2) */
+	char *display;               /* display name from join = the agent UUID string */
 	gboolean recorder;           /* Joined with "recorder": true, i.e. a recording tap */
 	/* What THIS session's last join attempt carried. The join_cap counters in query_session are
 	 * PROCESS-WIDE and cannot attribute a capability to a session, so a soak could never answer "did that
@@ -573,17 +573,17 @@ typedef struct janus_slvoice_session {
 	volatile gint active;        /* DTX/VAD cull: in the active talker set (150ms release hold) */
 	gint64 last_rtp_us;          /* monotonic us of the last inbound RTP (for the cull) */
 	gboolean decode_ok;          /* last decode attempt succeeded */
-	/* Phase 3b geometry snapshot (tick-owned: written only by the tick's pass 1
+	/* Geometry snapshot (tick-owned: written only by the tick's pass 1
 	 * under s->mutex, read by pass 2's per-listener DSP — no lock needed there,
 	 * the same discipline as decbuf above). Copied from last_data each tick and,
 	 * for lp, leash-clamped once here so no listener ever reads an unclamped
-	 * camera. Nothing consumes these yet (Phase 3b slice one is snapshot-only). */
+	 * camera. */
 	slv_vec3 snap_sp;            /* self (avatar) position, stored ×100 (cm) */
 	slv_vec3 snap_lp;            /* listener (camera) position, leash-clamped, ×100 */
 	slv_quat snap_lh;            /* listener heading/orientation, ×100 (identity if absent) */
 	gboolean snap_valid;         /* sp AND lp present this tick -> snap usable for distance */
-	/* Phase 3b item 2: per-listener distance-cull hysteresis, keyed by source UUID,
-	 * sized to the participant cap, LRU-evicted (brief Amendments 1 & 2). Inline, no
+	/* Per-listener distance-cull hysteresis, keyed by source UUID,
+	 * sized to the participant cap, LRU-evicted. Inline, no
 	 * allocation — a parallel to peer_ctl above; touched only in pass 2 under mutex. */
 	slv_cull_hyst cull_hyst[SLV_MAX_MIX];
 	int n_cull_hyst;
@@ -606,7 +606,7 @@ typedef struct janus_slvoice_session {
 	slv_peer_ctl peer_ctl[SLV_MAX_PEER_ADJ];
 	int n_peer_ctl;
 
-	/* Phase 3a per-listener visibility exclusions: a set of TARGET (source) agent
+	/* Per-listener visibility exclusions: a set of TARGET (source) agent
 	 * UUID strings this listener must not hear or see. A PARALLEL structure to
 	 * peer_ctl (not folded into it) because it is O(N) not O(few), sim-sourced not
 	 * viewer-sourced, and wants O(1) membership in the hot mix loop. Both the mix
@@ -616,7 +616,7 @@ typedef struct janus_slvoice_session {
 	 * g_strdup'd (freed on removal / destroy). */
 	GHashTable *excluded;
 
-	/* The SIM moderation-mute set (mute channel, Option A) — source agent UUIDs this
+	/* The SIM moderation-mute set (mute channel) — source agent UUIDs this
 	 * listener must not hear, value GINT_TO_POINTER(1). It used to be a flag on peer_ctl, sharing
 	 * that 32-slot table with the viewer's own mutes/gains, so a listener with 32 stored volumes
 	 * could not be moderation-muted at all (set_mod_muted_locked dropped it silently). Kept
@@ -625,8 +625,8 @@ typedef struct janus_slvoice_session {
 	 * (the peer_ctl discipline); cleared on leave_room, destroyed in session_free. */
 	GHashTable *mod_muted;
 
-	/* Phase 0: whether this session stood in row 4 at the sender's last pass in a fail-closed room, so the sender
-	 * emits j/l when its standing changes (§4 transitions). Guarded by room->mutex. */
+	/* Whether this session stood in row 4 at the sender's last pass in a fail-closed room, so the sender
+	 * emits j/l when its standing changes. Guarded by room->mutex. */
 	gboolean vis_ok_last;
 
 	/* What observing the sim's position of this participant counted (src/possync.h). Written by the room's tick
@@ -647,11 +647,11 @@ typedef struct janus_slvoice_session {
 	double last_mix_rms;         /* RMS of this listener's most recent MIXED OUTPUT frame
 	                              * (0..1): the N-1 mix (or echo) relayed to it, NOT the
 	                              * inbound talker level in last_rms. Diagnostic-only. */
-	double last_mix_rms_l;       /* Phase 3b item 4: RMS of the LEFT channel of that same
+	double last_mix_rms_l;       /* RMS of the LEFT channel of that same
 	                              * frame (even interleaved samples). Diagnostic-only. */
-	double last_mix_rms_r;       /* Phase 3b item 4: RMS of the RIGHT channel (odd samples).
+	double last_mix_rms_r;       /* RMS of the RIGHT channel (odd samples).
 	                              * last_mix_rms sums both and cannot detect an L/R swap;
-	                              * these two can (Amendment 4/5). Diagnostic-only. */
+	                              * these two can. Diagnostic-only. */
 	volatile gint power_p;       /* RMS*128 clamped 0..127 (for the SLData batch) */
 	volatile gint vad;           /* simple energy VAD 0/1 (for the SLData batch) */
 	guint64 data_msgs_received;  /* SLData messages received on the data channel */
@@ -764,7 +764,7 @@ static janus_slvoice_room *janus_slvoice_room_create(guint64 id, const char *des
 		janus_refcount_decrease(&room->ref);
 		return NULL;
 	}
-	/* §6.2: once per room, a fail-closed mixer names each room it will not enforce. */
+	/* Once per room, a fail-closed mixer names each room it will not enforce. */
 	if(slv_vis_fail_closed && !vis_authority)
 		JANUS_LOG(LOG_WARN, "[%s] fail-closed enabled but room %"PRIu64" has no vis_authority: NOT enforced\n",
 			JANUS_SLVOICE_PACKAGE, id);
@@ -785,7 +785,7 @@ static janus_slvoice_room *janus_slvoice_room_ref_by_id(guint64 id) {
 	return room;
 }
 
-/* ---- Phase 0 visibility authority: the rule. room->mutex held throughout. ---- */
+/* ---- Visibility authority: the rule. room->mutex held throughout. ---- */
 
 static gint64 janus_slvoice_vis_stale_us(void) {
 	return (gint64)slv_vis_stale_ms * 1000;
@@ -796,7 +796,8 @@ static gboolean janus_slvoice_vis_enforced(const janus_slvoice_room *room) {
 	return slv_vis_fail_closed && room->vis_declared;
 }
 
-/* The §4 row (1..4) a display stands in, in this room, now. A NULL display is unarmed. */
+/* The visibility row (1..4) a display stands in, in this room, now; row 4 is a record from the current epoch,
+ * confirmed within the staleness window. A NULL display is unarmed. */
 static int janus_slvoice_vis_row_locked(janus_slvoice_room *room, const char *display, gint64 now) {
 	slv_vis_record *r = (display != NULL && room->vis_records != NULL)
 		? g_hash_table_lookup(room->vis_records, display) : NULL;
@@ -1069,7 +1070,7 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 	janus_mutex_lock(&room->mutex);
 	gboolean vis_enforced = janus_slvoice_vis_enforced(room);
 	gint64 vis_now = janus_get_monotonic_time();
-	/* Phase 3a: a join running ahead of the visibility feed is a re-derive-pending
+	/* A join running ahead of the visibility feed is a re-derive-pending
 	 * event; count it so query_session shows how far the roster leads the feed. */
 	if(join)
 		room->vis_joins_since_snapshot++;
@@ -1080,12 +1081,12 @@ static void janus_slvoice_push_presence(janus_slvoice_room *room, const char *wh
 		janus_slvoice_session *p = value;
 		if(p->display != NULL && !strcmp(p->display, who))
 			continue;   /* skip the subject itself */
-		/* Phase 3a roster omission: a listener that excludes the subject gets no
+		/* Roster omission: a listener that excludes the subject gets no
 		 * join/leave dot for it — same set that culls its audio (single source of
 		 * truth). The apply path emits the corrective join/leave on transitions. */
 		if(slv_roster_excludes(p->excluded, who))
 			continue;
-		/* Phase 0 pair rule (§4): under fail-closed, a listener or subject not in row 4 gets or reveals nothing. The
+		/* Pair rule: under fail-closed, a listener or subject not in row 4 gets or reveals nothing. The
 		 * sender emits the j/l when either one's standing changes. */
 		if(vis_enforced && !janus_slvoice_vis_pair_visible_locked(room, p->display, who, vis_now))
 			continue;
@@ -1148,7 +1149,7 @@ static void janus_slvoice_send_join_backlog_locked(janus_slvoice_session *listen
 		if(slv_roster_excludes(listener->excluded, p->display))
 			continue;   /* same visibility rule as live joins / dots (single source of truth) */
 		if(vis_enforced && !janus_slvoice_vis_pair_visible_locked(room, listener->display, p->display, vis_now))
-			continue;   /* Phase 0 pair rule (§4): no backlog row unless both stand in row 4 */
+			continue;   /* Pair rule: no backlog row unless both stand in row 4 */
 		json_t *entry = json_object();
 		json_t *sub = json_object();
 		json_t *jd = json_object();
@@ -1279,7 +1280,7 @@ static gboolean janus_slvoice_cfg_double(janus_config *config, janus_config_cate
 	return TRUE;
 }
 
-/* Amendment 8: runtime spatial DSP config from the process-wide [general] jcfg
+/* Runtime spatial DSP config from the process-wide [general] jcfg
  * section. Distances are given in METRES and converted to stored units ONCE here.
  * The set is validated as a whole and applied all-or-nothing: any invalid value
  * logs an error and leaves the compiled defaults (already in slv_spatial) untouched,
@@ -1339,8 +1340,8 @@ static void janus_slvoice_load_spatial_settings(janus_config *config) {
 /* ---- Plugin lifecycle ---------------------------------------------------- */
 
 /* The visibility authority knobs from the process env (the entrypoint exports both), and this
- * process's mixer_instance. Invalid values are ignored with a WARN; a staleness window below the §5 constraint is
- * raised to it with a WARN. */
+ * process's mixer_instance. Invalid values are ignored with a WARN; a staleness window below the minimum its heartbeat
+ * interval needs is raised to it with a WARN. */
 static void janus_slvoice_vis_load_knobs(void) {
 	const char *fc_env = getenv("JS_VIS_FAIL_CLOSED");
 	int fc = 0;
@@ -1468,7 +1469,7 @@ static slv_joincap_verdict janus_slvoice_joincap_verify(const char *cap, const c
 						g_atomic_int_inc(&slv_join_cap_gen_behind);
 					JANUS_LOG(LOG_INFO, "[%s] join capability %s for %s in room %"PRId64": minted under epoch "
 						"%016"PRIx64" generation %u, the room has adopted epoch %016"PRIx64" generation %u; "
-						"admitted (the generation does not refuse: O-96)\n", JANUS_SLVOICE_PACKAGE,
+						"admitted (the generation does not refuse)\n", JANUS_SLVOICE_PACKAGE,
 						slv_joincap_gen_note_str(note), display ? display : "(no display)", room,
 						parsed.epoch, parsed.generation, auth_epoch, policy_gen);
 				}
@@ -1575,7 +1576,7 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 	/* JS_JOIN_CAP_REQUIRED and JS_JOIN_CAP_SECRET. */
 	janus_slvoice_joincap_load_knobs();
 
-	/* Amendment 8: runtime spatial DSP overrides from [general]; metres->stored
+	/* Runtime spatial DSP overrides from [general]; metres->stored
 	 * converted once here, validated, defaults kept on any bad value. Must run
 	 * BEFORE janus_config_destroy, which frees the parsed config. */
 	janus_slvoice_load_spatial_settings(config);
@@ -1742,7 +1743,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	}
 	janus_mutex_lock(&session->mutex);
 	gboolean up = g_atomic_int_get(&session->webrtc_up);
-	/* Per-connection state vector (spec §4.1). Plugins only learn PeerConnection
+	/* Per-connection state vector. Plugins only learn PeerConnection
 	 * up/down (setup_media / hangup_media), so ICE/DTLS are reported coarsely. */
 	json_object_set_new(info, "ice_state", json_string(up ? "connected" : "disconnected"));
 	json_object_set_new(info, "dtls_state", json_string(up ? "connected" : "disconnected"));
@@ -1779,7 +1780,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "echo_active", g_atomic_int_get(&session->echo_active) ? json_true() : json_false());
 	json_object_set_new(info, "last_rms", json_real(session->last_rms));
 	json_object_set_new(info, "last_mix_rms", json_real(session->last_mix_rms));   /* listener's mixed-OUTPUT level (vs last_rms = inbound talker input) */
-	json_object_set_new(info, "last_mix_rms_l", json_real(session->last_mix_rms_l)); /* per-channel output level (Phase 3b item 4 pan diagnostic; L/R swap detector) */
+	json_object_set_new(info, "last_mix_rms_l", json_real(session->last_mix_rms_l)); /* per-channel output level (pan diagnostic; L/R swap detector) */
 	json_object_set_new(info, "last_mix_rms_r", json_real(session->last_mix_rms_r));
 	json_object_set_new(info, "peer_ctl_entries", json_integer(session->n_peer_ctl));
 	/* Viewer mute/gain entries refused because peer_ctl was full (bounded at SLV_MAX_PEER_ADJ). */
@@ -1868,7 +1869,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(hist, "last_ms", json_real(qroom->tick_last_ms));
 		json_object_set_new(hist, "max_ms", json_real(qroom->tick_max_ms));
 		json_object_set_new(hist, "tick_seq", json_integer((json_int_t)qroom->tick_seq));
-		/* Phase 3a visibility feed state (the admin-API verification surface).
+		/* Visibility feed state (the admin-API verification surface).
 		 * epoch = batches applied; joins_since_snapshot = roster-ahead-of-feed
 		 * count (reset by each REPLACE snapshot). */
 		json_t *vis = json_object();
@@ -1884,7 +1885,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		}
 		json_object_set_new(vis, "joins_since_snapshot",
 			json_integer((json_int_t)qroom->vis_joins_since_snapshot));
-		/* ROOM-level dropped-listener instrument (§M follow-up): entries whose listener
+		/* ROOM-level dropped-listener instrument: entries whose listener
 		 * was not in the room. Distinct by name from the per-session excluded_entries. */
 		json_object_set_new(vis, "dropped_listener_entries",
 			json_integer((json_int_t)qroom->vis_dropped_listener_entries));
@@ -1902,7 +1903,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 			json_integer((json_int_t)qroom->vis_deferred.replayed));
 		json_object_set_new(vis, "deferred_evicted",
 			json_integer((json_int_t)qroom->vis_deferred.evicted));
-		/* Phase 0 visibility authority. ADDITIVE keys. The would_silence
+		/* Visibility authority. ADDITIVE keys. The would_silence
 		 * gauges count only rooms created with vis_authority, with fail-closed on or off; in shadow mode they are the
 		 * only effect of an unarmed or stale listener. */
 		gint64 vnow = janus_get_monotonic_time();
@@ -2062,7 +2063,7 @@ static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const cha
 	json_decref(entry);
 }
 
-/* Apply one parsed visibility batch (peer_ctl_batch, §3.3) to its room.
+/* Apply one parsed visibility batch (peer_ctl_batch) to its room.
  *
  * ATOMICITY — SHARED LOCK (explicitly NOT a staged double-buffer + tick-boundary
  * swap): the whole batch is applied while holding room->mutex, the SAME lock
@@ -2075,9 +2076,9 @@ static void janus_slvoice_relay_presence_one(janus_slvoice_session *L, const cha
  * L->mutex so query_session (session->mutex) reads a consistent excluded size.
  *
  * The caller (janus_slvoice_handle_admin_message) resolves the room, holds room->mutex across the
- * Phase 0 authority check and both channels, and reports unknown_room itself. `skip` names the
+ * authority check and both channels, and reports unknown_room itself. `skip` names the
  * listeners whose entries that check refused under fail-closed; they are neither applied nor
- * deferred. Under fail-closed the presence transitions follow the §4 pair rule. */
+ * deferred. Under fail-closed the presence transitions follow the pair rule. */
 static void janus_slvoice_apply_visbatch_locked(janus_slvoice_room *room, const slv_visbatch *vb,
 		GHashTable *skip, guint64 *out_deferred) {
 	gboolean vis_enforced = janus_slvoice_vis_enforced(room);
@@ -2099,12 +2100,12 @@ static void janus_slvoice_apply_visbatch_locked(janus_slvoice_room *room, const 
 	for(int i = 0; i < vb->n_entries; i++) {
 		const slv_vis_entry *e = &vb->entries[i];
 		if(skip != NULL && g_hash_table_contains(skip, e->listener))
-			continue;   /* Phase 0: refused by the authority check (fail-closed only) */
-		/* Fan-out (Amendment 7): an exclusion entry names an AVATAR — the listener's
+			continue;   /* Refused by the authority check (fail-closed only) */
+		/* Fan-out: an exclusion entry names an AVATAR — the listener's
 		 * agent UUID (= display), the only identifier the feed carries (visbatch.h) —
 		 * not a specific handle. It therefore applies to EVERY session in the room
 		 * whose display matches, not to whichever one a single-value map happens to
-		 * keep (that would depend on undefined GLib iteration order; §M). Scan
+		 * keep (that would depend on undefined GLib iteration order). Scan
 		 * room->participants; each match merges into ITS OWN excluded table. by_display
 		 * is retained only as the O(1) present-set for the source-side transition gate
 		 * below — a key-membership test, unaffected by listener duplicates. */
@@ -2212,7 +2213,7 @@ static void janus_slvoice_apply_visbatch_locked(janus_slvoice_room *room, const 
 				(int64_t)vb->room, room->vis_dropped_listener_entries);
 		}
 		if(nmatch > 1) {
-			/* Amendment 7 / §M: this resolution was silent before — every counter read
+			/* This resolution was silent before — every counter read
 			 * healthy while one handle got the exclusion and the other silently did not.
 			 * Name the display and the colliding user_ids now that we apply to all. The
 			 * merge above already fanned out to ALL nmatch sessions; match_ids only holds
@@ -2225,8 +2226,7 @@ static void janus_slvoice_apply_visbatch_locked(janus_slvoice_room *room, const 
 				off += g_snprintf(ids + off, sizeof(ids) - (gsize)off, "%s%"PRIu64,
 					m ? "," : "", match_ids[m]);
 			JANUS_LOG(LOG_WARN, "[%s] peer_ctl_batch listener %s (op=%s, room %"PRId64") "
-				"matched %d sessions (user_ids: %s%s) — duplicate display; applied to all "
-				"(parcel-voice-semantics.md §M)\n",
+				"matched %d sessions (user_ids: %s%s) — duplicate display; applied to all\n",
 				JANUS_SLVOICE_PACKAGE, e->listener, slv_vis_op_str(vb->op),
 				(int64_t)vb->room, nmatch, ids,
 				nmatch > SLV_MAX_MIX ? " (user_ids truncated)" : "");
@@ -2245,8 +2245,8 @@ static void janus_slvoice_apply_visbatch_locked(janus_slvoice_room *room, const 
 		room->vis_joins_since_snapshot = 0;   /* a fresh snapshot re-derives the roster */
 }
 
-/* Build {who:{"m":true|false}} and relay it to one listener — the moderation-mute transition emit
- * (Option A). Same field the viewer reads into mIsModeratorMuted: it KEEPS the row and greys it,
+/* Build {who:{"m":true|false}} and relay it to one listener — the moderation-mute transition emit.
+ * Same field the viewer reads into mIsModeratorMuted: it KEEPS the row and greys it,
  * never removes it (contrast the "l" leave). Caller must NOT hold L->mutex. */
 static void janus_slvoice_relay_mute_one(janus_slvoice_session *L, const char *who, gboolean muted) {
 	json_t *entry = json_object();
@@ -2273,7 +2273,7 @@ static gboolean janus_slvoice_set_mod_muted_locked(janus_slvoice_session *L, con
 	return TRUE;
 }
 
-/* Apply the parsed MODERATION MUTE channel (Option A) to its room. PARALLEL to apply_visbatch and
+/* Apply the parsed MODERATION MUTE channel to its room. PARALLEL to apply_visbatch and
  * deliberately separate from it: a mute NEVER adds to L->excluded and NEVER synthesises a leave, so
  * the source stays in the roster (push_presence / the dot batch / the backlog all key on L->excluded,
  * which is untouched here). It sets the listener's per-source mod_muted (the mix silences it) and
@@ -2289,7 +2289,7 @@ static void janus_slvoice_apply_mutebatch_locked(janus_slvoice_room *room, const
 	for(int i = 0; i < vb->n_mute_entries; i++) {
 		const slv_vis_entry *e = &vb->mute_entries[i];
 		if(skip != NULL && g_hash_table_contains(skip, e->listener))
-			continue;   /* Phase 0: refused by the authority check (fail-closed only) */
+			continue;   /* Refused by the authority check (fail-closed only) */
 		GHashTableIter lit;
 		gpointer lv;
 		int nmatch = 0;
@@ -2297,7 +2297,7 @@ static void janus_slvoice_apply_mutebatch_locked(janus_slvoice_room *room, const
 		while(g_hash_table_iter_next(&lit, NULL, &lv)) {
 			janus_slvoice_session *L = lv;
 			if(L->display == NULL || strcmp(L->display, e->listener) != 0)
-				continue;   /* fan-out to EVERY session matching the listener display (§M) */
+				continue;   /* fan-out to EVERY session matching the listener display */
 			nmatch++;
 
 			char trans_uuid[SLV_VIS_MAX_EXCL * 2][SLV_UUID_LEN];
@@ -2381,7 +2381,7 @@ static void janus_slvoice_room_replay_deferred_locked(janus_slvoice_room *room, 
 		JANUS_SLVOICE_PACKAGE, L->display, ne, nm, room->room_id);
 }
 
-/* ---- Phase 0 visibility authority: batches, heartbeats, replies ---------------
+/* ---- Visibility authority: batches, heartbeats, replies ---------------
  * Everything below runs with room->mutex held unless it says otherwise. With fail-closed off (shadow mode) the checks
  * run and are reported, and every batch is applied exactly as before; only fail-closed in a declared room lets them
  * refuse anything. */
@@ -2408,7 +2408,7 @@ static void janus_slvoice_vis_mirror_apply(GHashTable **col, slv_vis_op op, cons
 	}
 }
 
-/* §7.4 and open question 2: under fail-closed, a session joining with a display the current authority has armed takes
+/* Under fail-closed, a session joining with a display the current authority has armed takes
  * the columns that authority set for the display, so a rejoin is audible at once without hearing what its policy
  * excludes. Anything deferred for the display is superseded and dropped. Returns TRUE if it did (the caller then skips
  * the deferred replay). With fail-closed off, or no armed record, it does nothing and the join is exactly as before.
@@ -2442,7 +2442,7 @@ static gboolean janus_slvoice_vis_rejoin_columns_locked(janus_slvoice_room *room
 	return TRUE;
 }
 
-/* §1.1: apply the adoption rule to one message carrying `incoming`. A new epoch or a takeover disarms every record and
+/* Apply the adoption rule to one message carrying `incoming`. A new epoch or a takeover disarms every record and
  * restarts the policy generation; an accepted message (not stale_epoch) is the room's latest sign of life. */
 static slv_vis_epoch_verdict janus_slvoice_vis_adopt_locked(janus_slvoice_room *room, guint64 incoming, gint64 now,
 		const char *via) {
@@ -2483,7 +2483,7 @@ typedef struct janus_slvoice_vis_outcome {
 	json_t *unarmed;             /* unarmed_listeners */
 } janus_slvoice_vis_outcome;
 
-/* §1.2, §1.3, §2: check a stamped batch against the room's authority and update the records. A replace arms each
+/* Check a stamped batch against the room's authority and update the records. A replace arms each
  * listener it names; an add/remove advances a listener whose base matches and marks any other stale. */
 static void janus_slvoice_vis_batch_authority_locked(janus_slvoice_room *room, const slv_visbatch *vb, gint64 now,
 		janus_slvoice_vis_outcome *out) {
@@ -2576,14 +2576,14 @@ static void janus_slvoice_vis_batch_authority_locked(janus_slvoice_room *room, c
 			stale == 0 ? "" : enforced ? " (their entries refused)" : " (applied as before: fail-closed disabled)");
 }
 
-/* Every peer_ctl_batch and heartbeat reply advertises the protocol and this process (§3). Appended last, so a reply's
+/* Every peer_ctl_batch and heartbeat reply advertises the protocol and this process. Appended last, so a reply's
  * existing keys keep their order. */
 static void janus_slvoice_vis_reply_common(json_t *response) {
 	json_object_set_new(response, "vis_protocol", json_integer(SLV_VIS_PROTOCOL));
 	json_object_set_new(response, "mixer_instance", json_string(slv_mixer_instance));
 }
 
-/* The per-room authority keys (§3 reply). */
+/* The per-room authority keys of a reply. */
 static void janus_slvoice_vis_reply_room_locked(json_t *obj, janus_slvoice_room *room, const char *status,
 		json_t *stale, json_t *unarmed) {
 	char epoch[17];
@@ -2595,7 +2595,7 @@ static void janus_slvoice_vis_reply_room_locked(json_t *obj, janus_slvoice_room 
 	json_object_set(obj, "stale_listeners", stale);
 }
 
-/* §3 steps 2 and 3 for one accepted room entry: confirm each listed listener whose record is from this epoch at the same
+/* For one accepted room entry: confirm each listed listener whose record is from this epoch at the same
  * generation, report the rest, and disarm every armed listener the entry omits. A heartbeat never arms. */
 static void janus_slvoice_vis_heartbeat_listeners_locked(janus_slvoice_room *room, json_t *listeners, gint64 now,
 		json_t *stale, json_t *unarmed) {
@@ -2636,7 +2636,7 @@ static void janus_slvoice_vis_heartbeat_listeners_locked(janus_slvoice_room *roo
 			JANUS_SLVOICE_PACKAGE, room->room_id, disarmed);
 }
 
-/* peer_ctl_heartbeat (§3). Not under any lock; takes each named room's mutex in turn. */
+/* peer_ctl_heartbeat. Not under any lock; takes each named room's mutex in turn. */
 static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 	static gint64 warned_us = 0;   /* one WARN a minute for a malformed or too-slow sender (benign race: a log line) */
 	json_t *response = json_object();
@@ -2649,7 +2649,7 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 	 * body. Its heartbeat now runs on a timer of its own, so it keeps arriving through a feeder stall; without this
 	 * field a starved sim would look exactly like a healthy one and keep its listeners armed on a frozen matrix.
 	 * The sim does NOT decide what counts as live - it reports, the mixer rules, against the one staleness window
-	 * it already owns. ABSENT means a pre-V1b sim: everything below behaves exactly as it did before. */
+	 * it already owns. ABSENT means a sim that predates the field: everything below behaves exactly as it did before. */
 	json_t *jfeed_age = json_object_get(message, "feed_age_ms");
 	if(!json_is_string(jepoch) || !slv_vis_parse_epoch(json_string_value(jepoch), &epoch)
 			|| !json_is_integer(jinterval) || json_integer_value(jinterval) < 1
@@ -2667,7 +2667,7 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 	json_int_t interval = json_integer_value(jinterval);
 	guint64 needs_ms = interval > SLV_VIS_STALE_MS_MAX ? G_MAXUINT64 : slv_vis_stale_min_ms((guint64)interval);
 	if(needs_ms > slv_vis_stale_ms) {
-		/* §5 / §6.1: the mixer rejects an interval the staleness window cannot absorb. */
+		/* The mixer rejects an interval the staleness window cannot absorb. */
 		if(warned_us == 0 || now - warned_us > 60 * G_USEC_PER_SEC) {
 			warned_us = now;
 			JANUS_LOG(LOG_WARN, "[%s] peer_ctl_heartbeat rejected: interval_ms %"JSON_INTEGER_FORMAT" needs a staleness window of "
@@ -2734,7 +2734,7 @@ static json_t *janus_slvoice_handle_heartbeat(json_t *message) {
 			if(v == SLV_VIS_EPOCH_STALE) {
 				status = "stale_epoch";
 			} else if(stopping) {
-				/* §3 graceful stop: the authority's rooms are stale at once, not after the window, and a lower epoch may
+				/* Graceful stop: the authority's rooms are stale at once, not after the window, and a lower epoch may
 				 * take them over. */
 				room->vis_heartbeats++;
 				GHashTableIter it;
@@ -2874,7 +2874,7 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 	}
 
 	if(request_text != NULL && !strcmp(request_text, "peer_ctl_heartbeat"))
-		return janus_slvoice_handle_heartbeat(message);   /* Phase 0 §3 */
+		return janus_slvoice_handle_heartbeat(message);
 
 	if(request_text != NULL && !strcmp(request_text, "peer_pos"))
 		return janus_slvoice_handle_peer_pos(message);   /* vis_protocol 3 */
@@ -2895,7 +2895,7 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 			/* Apply the EXCLUSION channel first (ban/visibility -> leaves/removals), then the
 			 * ADDITIVE moderation MUTE channel (keeps the row, silences, greys). The two are
 			 * independent per source (Build guarantees ban wins, so no source is in both). Each is
-			 * skipped when its channel is empty. Phase 0: the room is resolved once and room->mutex
+			 * skipped when its channel is empty. The room is resolved once and room->mutex
 			 * is held across the authority check and both channels, so a batch is still observed
 			 * whole by the tick, sender and presence paths. */
 			janus_slvoice_room *room = janus_slvoice_room_ref_by_id((guint64)vb.room);
@@ -2976,7 +2976,7 @@ json_t *janus_slvoice_handle_admin_message(json_t *message) {
 
 /* ---- JSEP negotiation helper (join / configure with an offer) ------------
  * Parses the offer, picks the Opus PT, and builds an answer that accepts BOTH
- * the m=audio (Opus 48k + spec §9 fmtp) AND the m=application (SCTP DataChannel)
+ * the m=audio (Opus 48k + SL voice fmtp) AND the m=application (SCTP DataChannel)
  * lines. Answering the application line (JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
  * modelled on janus_videoroom.c:13113) is THE fix for "Skipping unsupported
  * application media line" — see the file header. Returns TRUE + *answer_sdp
@@ -3049,7 +3049,7 @@ static gboolean janus_slvoice_negotiate(janus_slvoice_session *session, json_t *
 		}
 		temp = temp->next;
 	}
-	/* Attach the SL WebRTC voice Opus fmtp (spec §9) as a raw attribute, the
+	/* Attach the SL WebRTC voice Opus fmtp as a raw attribute, the
 	 * way audiobridge does: "<pt> <params>\r\n". */
 	janus_sdp_mline *am = janus_sdp_mline_find(answer, JANUS_SDP_AUDIO);
 	if(am != NULL) {
@@ -3114,18 +3114,18 @@ static json_t *janus_slvoice_participant_summary(janus_slvoice_session *p) {
 }
 
 /* The join arm's commit, with room->mutex held and the joiner already in room->participants: the columns it starts with,
- * its Phase 0 standing, the duplicate-display WARN, and the initial roster the "joined" event carries (returned; the
- * caller owns it). Split out of the join arm unchanged apart from Phase 0, so tests/test_visauth.c can drive a join
+ * its visibility standing, the duplicate-display WARN, and the initial roster the "joined" event carries (returned; the
+ * caller owns it). Split out of the join arm unchanged apart from the visibility authority, so tests/test_visauth.c can drive a join
  * without a JSEP negotiation. */
 static json_t *janus_slvoice_join_commit_locked(janus_slvoice_room *room, janus_slvoice_session *session,
 		const char *display, guint64 room_id, guint64 user_id) {
 	/* Join-window fix: replay any columns deferred for this listener BEFORE the join roster
 	 * below (and before push_presence / the data_ready backlog) reads its exclusion/mute
-	 * state, so a ban/mute that arrived pre-join is in force first. Phase 0: under fail-closed,
+	 * state, so a ban/mute that arrived pre-join is in force first. Under fail-closed,
 	 * an armed display takes its authority's columns instead (janus_slvoice_vis_rejoin_columns_locked). */
 	if(!janus_slvoice_vis_rejoin_columns_locked(room, session))
 		janus_slvoice_room_replay_deferred_locked(room, session);
-	/* Phase 0: the joiner's standing, and the pair rule for its initial roster (fail-closed rooms only). */
+	/* The joiner's standing, and the pair rule for its initial roster (fail-closed rooms only). */
 	gint64 vis_join_now = janus_get_monotonic_time();
 	gboolean vis_join_enforced = janus_slvoice_vis_enforced(room);
 	session->vis_ok_last = janus_slvoice_vis_ok_locked(room, session->display, vis_join_now);
@@ -3137,8 +3137,7 @@ static json_t *janus_slvoice_join_commit_locked(janus_slvoice_room *room, janus_
 		janus_slvoice_session *p = value;
 		if(p == session)
 			continue;
-		/* Join-time duplicate-display detection (§M / KnownDefects teardown
-		 * ordering item 1, approach (a)+): a display (avatar UUID) already in
+		/* Join-time duplicate-display detection: a display (avatar UUID) already in
 		 * the room means an orphaned handle or a relog overlap. DETECTION
 		 * ONLY — the joiner is admitted and nothing is evicted (the plugin
 		 * cannot notify an evicted viewer, so evicting a live session is an
@@ -3156,13 +3155,13 @@ static json_t *janus_slvoice_join_commit_locked(janus_slvoice_room *room, janus_
 			JANUS_LOG(LOG_WARN, "[%s] join: display %s already in room %"PRIu64
 				" — duplicate display; admitted anyway, no eviction. new user_id %"PRIu64
 				", existing user_id %"PRIu64" (webrtc_up=%d, rtp_in_count=%"PRIu64
-				", rtp_idle=%.1fs, age=%.1fs) (parcel-voice-semantics.md §M)\n",
+				", rtp_idle=%.1fs, age=%.1fs)\n",
 				JANUS_SLVOICE_PACKAGE, display, room_id, user_id, p->user_id,
 				g_atomic_int_get(&p->webrtc_up) ? 1 : 0, p->rtp_in_count,
 				p->last_rtp_us ? (double)(dnow - p->last_rtp_us) / (double)G_USEC_PER_SEC : -1.0,
 				(double)(dnow - p->created_ts) / (double)G_USEC_PER_SEC);
 		}
-		/* Phase 3a: the initial roster (join-backlog) a newly-connecting
+		/* The initial roster (join-backlog) a newly-connecting
 		 * listener receives is filtered by the SAME exclusion predicate the
 		 * live join/leave, power batch, and mix cull use — a speaker this
 		 * listener excludes is omitted from its initial roster, exactly as a
@@ -3235,7 +3234,7 @@ static void *janus_slvoice_handler(void *data) {
 			json_t *rate_j = json_object_get(root, "sampling_rate");
 			guint32 rate = (rate_j && json_is_integer(rate_j)) ? (guint32)json_integer_value(rate_j) : 48000;
 			gboolean permanent = json_is_true(json_object_get(root, "permanent"));
-			/* Phase 0 §6.2: the creator declares a sim authority arms this room's listeners. Only a JSON true counts. */
+			/* The creator declares a sim authority arms this room's listeners. Only a JSON true counts. */
 			gboolean vis_authority = json_is_true(json_object_get(root, "vis_authority"));
 			/* The creator says a simulator owns this room. The capability requirement keys on THIS,
 			 * not on vis_authority, so an undeclared sim room - every A2A "multiagent" room, and every future ADHOC
@@ -3249,7 +3248,7 @@ static void *janus_slvoice_handler(void *data) {
 			if(room != NULL) {
 				/* Match audiobridge exactly: an existing room is error 486. The
 				 * C# side (CreateRoom) treats 486 as success — every region that
-				 * hashes to the same room number relies on this (§3.3). */
+				 * hashes to the same room number relies on this. */
 				/* The sim creates before every join, so a 486 is the join's announcement - an empty
 				 * room gets a fresh grace clock, and the join that follows cannot lose it to the sweep. */
 				janus_slvoice_room_rearm_grace_locked(room, janus_get_monotonic_time());
@@ -3345,7 +3344,7 @@ static void *janus_slvoice_handler(void *data) {
 			/* The sim-issued join capability, checked before negotiate so a
 			 * refusal costs nothing and leaves nothing to undo. ENFORCED only when JS_JOIN_CAP_REQUIRED is on
 			 * AND the room was created with vis_authority; in every other room, and with the knob off, the
-			 * verdict is counted and the join proceeds exactly as it did before this slice. */
+			 * verdict is counted and the join proceeds exactly as it did without a capability. */
 			{
 				const char *join_cap = json_string_value(json_object_get(root, "join_cap"));
 				const char *cap_session = json_string_value(json_object_get(root, "session_id"));
@@ -3375,7 +3374,7 @@ static void *janus_slvoice_handler(void *data) {
 					goto respond;
 				}
 			}
-			/* Join-time capacity cap (item 1, docs/voice/scaling-assessment.md).
+			/* Join-time capacity cap.
 			 * Reject the (cap+1)th joiner BEFORE negotiate/media_alloc so nothing needs
 			 * undoing. This REPLACES the old silent, non-deterministic tick-time
 			 * truncation (:2157): admission is now deterministic (first-come-first-served
@@ -3621,7 +3620,7 @@ static void janus_slvoice_dot_darken(json_t *filt, const char *display, json_t *
  * last tick, reports {p:0,v:false}. A source excluded from L's roster is omitted. Returns NULL when
  * none of that applies, so L gets the shared batch unchanged; otherwise a new object the caller
  * decrefs. dark is the shared {p:0,v:false} value. room->mutex and L->mutex held.
- * Phase 0 (§4), fail-closed rooms only: a listener not in row 4 (vis_listener_ok FALSE) keeps only its own
+ * In fail-closed rooms only: a listener not in row 4 (vis_listener_ok FALSE) keeps only its own
  * entry, and every display in vis_hidden (the room's displays not in row 4) is omitted. Elsewhere the caller
  * passes TRUE and NULL, and the batch is exactly as before. */
 static json_t *janus_slvoice_dot_batch_for_listener_locked(janus_slvoice_room *room,
@@ -3673,7 +3672,7 @@ static json_t *janus_slvoice_dot_batch_for_listener_locked(janus_slvoice_room *r
 	return filt;
 }
 
-/* Phase 0 (§4 transitions), fail-closed rooms only, from the sender with room->mutex held: each participant's standing
+/* Fail-closed rooms only, from the sender with room->mutex held: each participant's standing
  * now, a j or l for every (listener, source) pair whose visibility changed since the last pass (arming, disarming,
  * staleness, an epoch change), and the set of displays not in row 4 for the dot filter. The caller frees the set; its
  * keys are borrowed session displays. */
@@ -3719,7 +3718,7 @@ static GHashTable *janus_slvoice_vis_transitions_locked(janus_slvoice_room *room
 }
 
 /* ---- Mixer->client periodic power/VAD ticker -----------------------------
- * Every ~100ms (spec §9) push each room's participants a well-formed per-peer
+ * Every ~100ms push each room's participants a well-formed per-peer
  * batch keyed by display (agent UUID): { "<uuid>": {"p":<level*128>,"v":<VAD>} }.
  * p and v are the real level/VAD the room tick computes for each active participant.
  * Each listener's copy omits the sources its exclusion set removes and reports no
@@ -3753,13 +3752,13 @@ static void *janus_slvoice_sender(void *data) {
 			}
 			/* One batch for the whole room. p = level*128, v = VAD — both real,
 			 * computed by the mix tick from each ACTIVE participant's decoded
-			 * frame (so OTHER avatars' dots animate, spec §4.1 / req 5). NOTE the
+			 * frame (so OTHER avatars' dots animate). NOTE the
 			 * VAD key is lowercase "v": the viewer reads participant_obj["v"] into
 			 * mIsSpeaking (llvoicewebrtc.cpp); the old uppercase "V" was never
 			 * consumed, so the speaking state never lit. */
 			gint64 now = janus_get_monotonic_time();
 			json_t *batch = json_object();
-			/* §M dot-batch collapse fix: `batch` is keyed by display, and jansson
+			/* Dot-batch collapse fix: `batch` is keyed by display, and jansson
 			 * replaces on duplicate key — so two same-display sessions (orphan +
 			 * live after a relog) used to collapse LAST-WRITE-WINS in undefined
 			 * GLib iteration order, and an orphan's {p:0,v:false} could darken a
@@ -3822,12 +3821,12 @@ static void *janus_slvoice_sender(void *data) {
 				}
 			}
 			g_hash_table_destroy(dot_up);
-			/* Phase 0 (§4), fail-closed rooms only: j/l for pairs whose visibility changed, and the displays whose
+			/* Fail-closed rooms only: j/l for pairs whose visibility changed, and the displays whose
 			 * dots no one else may see. NULL elsewhere, which leaves every batch as before. */
 			gboolean vis_enforced = janus_slvoice_vis_enforced(room);
 			GHashTable *vis_hidden = vis_enforced ? janus_slvoice_vis_transitions_locked(room, now) : NULL;
 			/* Send per listener: each listener's batch reflects what it hears, from the
-			 * same state its mix uses (single source of truth, §7.3). A listener with nothing
+			 * same state its mix uses (single source of truth). A listener with nothing
 			 * excluded, muted or culled gets the shared full batch (the common case). Otherwise
 			 * janus_slvoice_dot_batch_for_listener_locked darkens the sources it cannot hear and
 			 * omits the ones excluded from its roster. room->mutex, held here, excludes the tick
@@ -3879,7 +3878,7 @@ static void *janus_slvoice_sender(void *data) {
 	return NULL;
 }
 
-/* ---- Phase 2 media: buffers, jitter buffer, per-room mix tick ------------- */
+/* ---- Media: buffers, jitter buffer, per-room mix tick ------------- */
 
 /* Free all codec + mix buffers for a session. session->mutex held. */
 static void janus_slvoice_media_free_locked(janus_slvoice_session *s) {
@@ -3927,7 +3926,7 @@ static gboolean janus_slvoice_media_alloc_locked(janus_slvoice_session *s) {
 	opus_encoder_ctl(s->enc, OPUS_SET_INBAND_FEC(1));
 	opus_encoder_ctl(s->enc, OPUS_SET_PACKET_LOSS_PERC(10));
 	opus_encoder_ctl(s->enc, OPUS_SET_COMPLEXITY(SLV_OPUS_COMPLEXITY));
-	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(SLV_OPUS_BITRATE));   /* spec §5: listener mix 64-96kbps stereo */
+	opus_encoder_ctl(s->enc, OPUS_SET_BITRATE(SLV_OPUS_BITRATE));   /* listener mix 64-96kbps stereo */
 	opus_encoder_ctl(s->enc, OPUS_SET_DTX(1));            /* encode-skip: cheap comfort frames on silence */
 	/* Preallocate every buffer used by the tick — nothing is allocated per packet
 	 * or per tick. The 240KB echo delay ring is the ONE exception: it is used only
@@ -4155,7 +4154,7 @@ static void janus_slvoice_build_echo(janus_slvoice_session *s, float *out, int s
  * is SKIPPED entirely (DTX transmit-suppression): the RTP timestamp still
  * advances so the viewer's playout timeline stays honest, but no packet is sent
  * and no encode cost is paid — so encode cost scales with AUDIBLE listeners, not
- * connected ones (spec §5). tick-owned; no lock needed. */
+ * connected ones. tick-owned; no lock needed. */
 static void janus_slvoice_encode_relay(janus_slvoice_session *s, float *frame, int samples, gboolean silence) {
 	uint32_t ts = s->out_ts;
 	s->out_ts += (uint32_t)samples;     /* advance every tick, 48k clock */
@@ -4195,14 +4194,13 @@ static void janus_slvoice_encode_relay(janus_slvoice_session *s, float *frame, i
  * listener's per-source mutes/gains), encode, and relay. An echoed participant
  * hears its own delayed audio instead. Holds room->mutex for the whole tick so
  * membership is frozen and no participant's media is freed mid-tick. */
-/* Phase 3b: snapshot this participant's geometry for the tick. Runs in pass 1
+/* Snapshot this participant's geometry for the tick. Runs in pass 1
  * under s->mutex — the SAME lock last_data is written under by
  * janus_slvoice_incoming_data — so pass 2 reads the snapshot lock-free, exactly
  * as it reads decbuf. Copies sp/lp/lh from the last SLData gated on presence,
- * then applies the §7.1 server-side camera leash to lp (the client clamp at
+ * then applies the server-side camera leash to lp (the client clamp at
  * llvoicewebrtc.cpp:1203-1220 is spoofable, so we re-apply it here). Leaves the
- * snapshot marked invalid when the two positions are absent. Snapshot-only:
- * nothing reads snap_* yet (Phase 3b slice one). */
+ * snapshot marked invalid when the two positions are absent. */
 static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
 	unsigned f = s->last_data_fields;
 	s->snap_valid = ((f & SLV_FIELD_SP) != 0) && ((f & SLV_FIELD_LP) != 0);
@@ -4212,7 +4210,7 @@ static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
 	s->snap_lp = s->last_data.lp;
 	s->snap_lh = (f & SLV_FIELD_LH) ? s->last_data.lh
 	                                : (slv_quat){ 0.0, 0.0, 0.0, 1.0 };   /* identity if no heading */
-	/* §7.1 camera leash: clamp lp onto the slv_spatial.leash_dist sphere around sp
+	/* Camera leash: clamp lp onto the slv_spatial.leash_dist sphere around sp
 	 * when it exceeds it. Projection lifted from llvoicewebrtc.cpp:1213, ×100 unit. */
 	slv_vec3 off = slv_vec3_sub(s->snap_lp, s->snap_sp);
 	double d = slv_vec3_mag(off);
@@ -4233,11 +4231,11 @@ static void janus_slvoice_pos_observe_locked(janus_slvoice_room *room, janus_slv
 		(s->last_data_fields & SLV_FIELD_LP) != 0, claim);
 }
 
-/* Phase 3b item 2: per-listener distance cull with hysteresis. Returns TRUE if the
+/* Per-listener distance cull with hysteresis. Returns TRUE if the
  * source `uuid`, at distance `d` from this listener (stored ×100 unit), must be
  * dropped from the mix. Maintains the per-listener hysteresis latch keyed by source
- * UUID: find-or-create the slot, LRU-evicting the oldest seen_tick when full (brief
- * Amendment 2 proves any displaced slot is a departed UUID), stamp it this tick, and
+ * UUID: find-or-create the slot, LRU-evicting the oldest seen_tick when full (the table is
+ * sized to the participant cap, so any displaced slot is a departed UUID), stamp it this tick, and
  * latch — an audible pair culls only past the cutoff (slv_spatial.cutoff_dist), a culled
  * pair un-culls only inside the re-add distance (slv_spatial.readd_dist). A pair seen for
  * the first time has no prior state, so it uses
@@ -4256,7 +4254,7 @@ static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
 		if(s->n_cull_hyst < SLV_MAX_MIX) {
 			slot = &s->cull_hyst[s->n_cull_hyst++];
 		} else {
-			/* Table full: evict the least-recently-seen slot (Amendment 2). */
+			/* Table full: evict the least-recently-seen slot. */
 			slot = &s->cull_hyst[0];
 			for(int k = 1; k < s->n_cull_hyst; k++)
 				if(s->cull_hyst[k].seen_tick < slot->seen_tick)
@@ -4276,7 +4274,7 @@ static gboolean janus_slvoice_distance_cull_locked(janus_slvoice_session *s,
 	return slot->culled;
 }
 
-/* Phase 3b spatial stage for one (listener s, source src) pair that exclusion and mute left in the
+/* Spatial stage for one (listener s, source src) pair that exclusion and mute left in the
  * mix: distance cull with hysteresis, falloff past the reference distance, constant-power azimuth
  * pan. Writes the per-channel gains and returns TRUE when the pair is culled. A pair without
  * geometry on both sides keeps the flat gain. So does every pair in a non-spatial room
@@ -4301,7 +4299,7 @@ static gboolean janus_slvoice_spatial_pair_locked(janus_slvoice_room *room, janu
 		gain *= (float)pow(t, slv_spatial.falloff_exp);
 	}
 	/* Split by the source's horizontal azimuth in the listener's head frame; behind renders
-	 * centred (Amendment 5). */
+	 * centred. */
 	double az = slv_azimuth(s->snap_lp, s->snap_lh, src->snap_sp);
 	float pl = 1.0f, pr = 1.0f;
 	slv_pan(az, &pl, &pr);
@@ -4350,7 +4348,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		janus_slvoice_tick_decode_locked(s, t0);
 		audible[i] = (s->dec_samples > 0) ? 1 : 0;
 		srcbuf[i] = s->decbuf;   /* tick-owned; stable for the rest of this tick */
-		janus_slvoice_snapshot_geometry_locked(s);   /* Phase 3b: geometry + §7.1 leash (tick-owned) */
+		janus_slvoice_snapshot_geometry_locked(s);   /* geometry + leash (tick-owned) */
 		janus_slvoice_pos_observe_locked(room, s, t0);   /* vis_protocol 3: count only, no audio change */
 		if(check_reap && s->join_ts != 0 && !g_atomic_int_get(&s->media_seen)
 				&& !g_atomic_int_get(&s->destroyed) && t0 - s->join_ts >= reap_after_us) {
@@ -4361,7 +4359,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		janus_mutex_unlock(&s->mutex);
 	}
 
-	/* Phase 0 (§4): in a room created with vis_authority, each participant's row, once per tick. The would_silence gauges
+	/* In a room created with vis_authority, each participant's row, once per tick. The would_silence gauges
 	 * are kept with fail-closed on or off; only fail-closed lets the rows reach the mix (pass 2). In any other room none
 	 * of this runs and the tick is exactly as before. */
 	gboolean vis_ok[SLV_MAX_MIX];
@@ -4389,11 +4387,11 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		 * peer-control snapshot, echo ring, and output RTP state against a
 		 * concurrent echo toggle / SLData update. Reading OTHER sessions' decbuf
 		 * (srcbuf[j]) needs no lock — those are tick-owned and already written in
-		 * pass 1. relay_rtp under the session lock matches the proven Phase-1
+		 * pass 1. relay_rtp under the session lock matches the proven
 		 * path. Order is room->mutex -> session->mutex throughout. */
 		int mutes[SLV_MAX_MIX];
 		float gains[SLV_MAX_MIX];
-		/* Phase 3b item 4: per-channel gains for the stereo (panned) mix. Same
+		/* Per-channel gains for the stereo (panned) mix. Same
 		 * sizing and lifetime as gains[] — stack, rebuilt each tick, no allocation.
 		 * They DERIVE from gains[] (which still carries peer gain * attenuation);
 		 * the pan below splits that scalar into L/R, or leaves both equal to it. */
@@ -4404,11 +4402,11 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		for(int j = 0; j < count; j++) {
 			mutes[j] = 0;
 			gains[j] = 1.0f;
-			gainsL[j] = 1.0f;   /* item 4: default to the same unity gains[] starts at, so */
-			gainsR[j] = 1.0f;   /* a source with no geometry / no pan behaves as pre-3b. */
+			gainsL[j] = 1.0f;   /* default to the same unity gains[] starts at, so */
+			gainsR[j] = 1.0f;   /* a source with no geometry / no pan behaves as a flat mix. */
 			if(j == i)
 				continue;
-			/* Phase 0 pair rule (§4), fail-closed only: nothing reaches a listener not in row 4, and nothing comes
+			/* Pair rule, fail-closed only: nothing reaches a listener not in row 4, and nothing comes
 			 * from a source not in row 4. Checked before every other stage, so a silenced pair costs no DSP. */
 			if(vis_enforced && (!vis_ok[i] || !vis_ok[j])) {
 				mutes[j] = 1;
@@ -4418,7 +4416,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 			if(disp == NULL)
 				continue;
 			/* Silence the source if the listener personally muted it (peer_ctl) OR the sim
-			 * moderation-muted it (Option A; the mod_muted set, checked outside
+			 * moderation-muted it (the mod_muted set, checked outside
 			 * the peer_ctl loop because a moderated source need not have a peer_ctl entry).
 			 * A moderation mute leaves the source in the roster (never in L->excluded) and is
 			 * silenced here instead of by the exclusion cull. s->mutex is held. */
@@ -4433,17 +4431,17 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 					break;
 				}
 			}
-			/* Phase 3a visibility: a sim-excluded source contributes nothing to
-			 * this listener's mix. Culled here (O(1) set lookup) BEFORE any Phase-3b
+			/* Visibility: a sim-excluded source contributes nothing to
+			 * this listener's mix. Culled here (O(1) set lookup) BEFORE any
 			 * spatial DSP, alongside the per-source mute and the VAD/DTX cull. Reads
 			 * the SAME set the roster/presence path uses (single source of truth). */
 			if(slv_roster_excludes(s->excluded, disp))
 				mutes[j] = 1;
-			/* Phase 3b item 2: per-listener distance cull (spatial stage — after
+			/* Per-listener distance cull (spatial stage — after
 			 * exclusion/mute/gain). Skip pairs already dropped (no distance math,
 			 * no hysteresis churn) and pairs without geometry (leave in the flat
 			 * mix). Writes mutes[j] and the hysteresis slot only — never the global
-			 * active/audible/decode state. Attenuation is item 3; this only drops. */
+			 * active/audible/decode state. Attenuation is separate; this only drops. */
 			if(mutes[j])
 				continue;
 			/* Cull, falloff and pan in one place; a non-spatial room keeps the flat gain. */
@@ -4465,7 +4463,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		 * the encode-skip decision below does not use it. */
 		double out_rms = slv_mix_rms(frame, SLV_FRAME_TOTAL);
 		s->last_mix_rms = out_rms;
-		/* Phase 3b item 4: per-channel RMS of the interleaved output (even = left,
+		/* Per-channel RMS of the interleaved output (even = left,
 		 * odd = right). Computed inline because slv_mix_rms strides contiguously and
 		 * cannot address one channel (mix.h). DIAGNOSTIC-ONLY: it reads the finished
 		 * frame and feeds nothing back — out_rms, the silence test, the encode-skip
@@ -4489,7 +4487,7 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 	}
 	janus_mutex_unlock(&room->mutex);
 
-	/* Tick-duration histogram (spec §4.1): buckets <5 / 5-10 / 10-15 / 15-20 / >=20 ms. */
+	/* Tick-duration histogram: buckets <5 / 5-10 / 10-15 / 15-20 / >=20 ms. */
 	double ms = (double)(janus_get_monotonic_time() - t0) / 1000.0;
 	int b = ms < 5.0 ? 0 : ms < 10.0 ? 1 : ms < 15.0 ? 2 : ms < 20.0 ? 3 : 4;
 	janus_mutex_lock(&room->mutex);
@@ -4621,7 +4619,7 @@ void janus_slvoice_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp *
 		return;
 	if(packet == NULL || packet->buffer == NULL || packet->video)
 		return;   /* audio only */
-	/* Phase 2: incoming_rtp only feeds the jitter buffer and stamps liveness for
+	/* incoming_rtp only feeds the jitter buffer and stamps liveness for
 	 * the DTX/VAD cull. Decode + mix + relay happen on the room's 20ms tick, so
 	 * every participant is decoded once on a common clock and mixed. No decode
 	 * or allocation here. */
@@ -4664,7 +4662,7 @@ void janus_slvoice_incoming_data(janus_plugin_session *handle, janus_plugin_data
 		session->last_msg_fields = d.fields_seen;
 		/* Per-source mute/gain the viewer set on OTHER participants
 		 * ({"m":{uuid:bool}} / {"ug":{uuid:val}}) — merge into the persistent
-		 * per-listener control map the tick reads (req 4). */
+		 * per-listener control map the tick reads. */
 		if(d.n_peers > 0)
 			janus_slvoice_apply_peer_ctl_locked(session, &d);
 	}

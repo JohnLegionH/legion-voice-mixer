@@ -1,11 +1,12 @@
 # Design Brief — Voice Connectors
 
-**Status:** DECIDED 2026-08-31 — build plan: `connector-build-plan.md`.
+**Status:** DECIDED 2026-08-31 (see Amendment 2).
 **Date:** 2026-08-21.
-**Basis:** CC recon 2026-08-21 against `legion-voice-mixer @ b4672ff`.
-**Origin:** Balpien Hammerer's second deficiency, raised 2026-07-31 — no connector hooks
-for post-processing, recording, transcription, or NPC TTS voice. The last of his three
-unbuilt; spatialization shipped 2026-08-20, avatar-to-avatar remains separate work.
+**Basis:** recon 2026-08-21 against `legion-voice-mixer @ b4672ff`.
+**Origin:** the second of three deficiencies reported against the stock voice system on
+2026-07-31 — no connector hooks for post-processing, recording, transcription, or NPC TTS
+voice. The last of the three unbuilt; spatialization shipped 2026-08-20, avatar-to-avatar
+remains separate work.
 
 ## Purpose
 
@@ -54,8 +55,7 @@ Recorded so the option is understood, not endorsed:
   is overwritten. Injection means Opus-encoding and feeding a session's jitter buffer.
 
 An in-tick callback would run **under `room->mutex` inside the 20 ms tick**, so a slow or
-blocking connector stalls the entire room — the same single-core wall the scaling
-assessment records. A crashing connector `.so` takes Janus with it. Neither applies to a
+blocking connector stalls the entire room — the mixer tick runs on a single core. A crashing connector `.so` takes Janus with it. Neither applies to a
 headless peer, which is a separate process behind a real transport.
 
 ## Privacy — the finding that shapes the design
@@ -84,11 +84,11 @@ than from an affordance that does not exist.
 
 ## Scope
 
-**First slice — read-only mixdown tap via a headless WebRTC peer.** Recording and
+**First stage — read-only mixdown tap via a headless WebRTC peer.** Recording and
 transcription. No injection. Essentially no mixer changes; the work is a WebRTC client on
 the connector side.
 
-**GATE — exclusion is not inherited; the first slice cannot ship until Q1 is answered.**
+**GATE — exclusion is not inherited; the first stage cannot ship until Q1 is answered.**
 A headless peer does NOT automatically hear only what a listener could hear. Its
 `s->excluded` set is created EMPTY at session-create (`janus_slvoice.c:815`) and is
 populated ONLY by the sim's incoming visibility feed (the merge at `:1083`-`:1135`). The
@@ -101,9 +101,9 @@ This holds unless Q1 is resolved so the connector carries a matrix-legible ident
 will compute an exclusion row for, OR the sim explicitly mints and pushes an exclusion set
 for the connector's identity. Until one of those is decided, a read-only tap bypasses
 `slv_roster_excludes` and **defeats parcel and estate voice semantics wholesale** — so the
-first slice is blocked on Q1, not merely informed by it.
+first stage is blocked on Q1, not merely informed by it.
 
-**Explicitly not in the first slice:**
+**Explicitly not in the first stage:**
 
 - **Per-speaker separated audio** — needs the in-tick tap and its stall and fault risks.
 - **Injection** — TTS, NPC voice, effects returned to the room. Needs a synthetic source
@@ -112,15 +112,15 @@ first slice is blocked on Q1, not merely informed by it.
 
 ## Constraints
 
-- **A headless peer consumes an encode slot.** Per the scaling assessment, cost tracks
-  audible listeners. Every connector is one more encode per tick.
-- **No new mixer ingress.** If the first slice needs mixer changes, that is a signal the
+- **A headless peer consumes an encode slot.** Encode cost tracks audible listeners, so
+  every connector is one more encode per tick.
+- **No new mixer ingress.** If the first stage needs mixer changes, that is a signal the
   design is wrong.
 - Mixer changes deploy by container rebuild; **tags trigger release CI**.
 
 ## Open questions — resolve before freeze
 
-1. **Connector identity — gates the first slice (see §Scope GATE).** A headless peer joins
+1. **Connector identity — gates the first stage (see §Scope GATE).** A headless peer joins
    with a `display` value, an agent-UUID string, and exclusion is matched BY that string
    (`:1576`, `:2276`). So identity is not only about legibility ("Recorder" vs an unknown
    UUID) — it decides whether the sim's visibility matrix can compute an exclusion row for
@@ -148,7 +148,7 @@ first slice is blocked on Q1, not merely informed by it.
    heard region-wide regardless of parcel or estate voice rules — the inject-side mirror of
    the §Scope GATE. So "needs to be somebody" is a correctness requirement for parcel/estate
    semantics on injection, not a spatialization nicety. Still a sim question (it connects to
-   the existing bot/NPC framework) and out of scope for the first slice, but it shapes what
+   the existing bot/NPC framework) and out of scope for the first stage, but it shapes what
    the second needs.
 
 5. **Hypergrid interaction.** The unenforced policy — grid-service Janus default,
@@ -223,21 +223,20 @@ carry an explicit obligation — and if so, what enforces it?
 
 **AMENDMENT 2 — all remaining questions DECIDED (2026-08-31)**
 
-**Basis:** `Docs/voice/connector-assessment-20260831.md` (ground truth against
-`tranquillity-develop @ 6d012a40d2` / `legion-voice-mixer @ 0eb38f1`). Q1 was decided by
-Amendment 1; this amendment closes Q2–Q6 and the §Scope gate. Build plan:
-`connector-build-plan.md`.
+**Basis:** a ground-truth check against
+`tranquillity-develop @ 6d012a40d2` / `legion-voice-mixer @ 0eb38f1`. Q1 was decided by
+Amendment 1; this amendment closes Q2–Q6 and the §Scope gate.
 
 **D1 — Authorisation (Q3): the ini-declared policy record is the gate.** `[VoiceConnector.<name>]`
 records in the region config are the sole authorisation: operator-only by construction (writing
 the ini IS the grant), no runtime grant/revoke surface in v1. At registration the sim logs the
 connector's UUID and room at INFO so the operator can configure the peer from the log line alone.
-The peer→Janus leg stays protected by network isolation only — the assessment's §7(c) finding
-(the mixer join is ungated and `display` is trusted) is pre-existing and not connector-specific,
-so it is filed as its own ledger O-item rather than solved here.
+The peer→Janus leg stays protected by network isolation only — the mixer join is ungated and
+`display` is trusted, which is pre-existing and not connector-specific, so it is recorded as a
+separate open item rather than solved here.
 
 **D2 — Injection (Q4): IN SCOPE.** The origin request (2026-07-31) named NPC TTS voice
-explicitly, so injection is part of this programme, not deferred. A record's `may_inject=true`
+explicitly, so injection is part of this work, not deferred. A record's `may_inject=true`
 lifts the default refusal. `may_inject=false` is enforced with existing machinery: the sim pushes
 a **moderation mute for the NPC identity at registration** (the mute channel, Option A — every
 listener's mix silences the connector; **no mixer change**). Defence in depth for the wider NPC
@@ -266,7 +265,7 @@ enforces it.
 and are recordable/addressable under the same disclosure as residents; untrusted-HG visitors get
 NO region voice (their provision is refused), so the recording question is moot for them. This is
 a provisioning rule; enforcement ships with the trusted-HG regionserver rollout, not with this
-plan — no code here, and the owed enforcement is filed in the ledger as its own O-item so it is
+decision — no code here, and the owed enforcement is recorded as a separate open item so it is
 not lost.
 
 **D5 — Runtime: aiortc, containerised, both directions.** The connector peer is an aiortc process

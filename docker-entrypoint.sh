@@ -41,9 +41,9 @@ WS_JCFG="$CONF_DIR/janus.transport.websockets.jcfg"
 # in; the entrypoint only reports it (Janus itself listens on all container addresses).
 : "${JS_ADMIN_BIND:=0.0.0.0}"
 : "${JS_RTP_PORT_RANGE:=10000-10200}"
-# An IPv4 literal (used as-is) or, since A.1, a hostname (discovered, below).
+# An IPv4 literal (used as-is) or a hostname (discovered, below).
 : "${JS_PUBLIC_IP:=}"
-# A DNS/DDNS hostname whose public address is discovered at start (slice A.1).
+# A DNS/DDNS hostname whose public address is discovered at start.
 : "${JS_PUBLIC_HOST:=}"
 # Extra nat_1_1_mapping addresses (comma list), appended after the public address.
 : "${JS_NAT_EXTRA_IPS:=}"
@@ -77,7 +77,7 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 # from the process environment. 0 is shadow mode: the plugin tracks and counts arming, epochs and staleness, and audio
 # is unchanged. 1 silences unarmed or stale listeners in rooms the sim declared (vis_authority). Do not set 1 unless
 # connector peers and recorder taps are armed by the sim (an unarmed one would be silent). JS_VIS_STALE_MS is the staleness window; the plugin raises a
-# value below 7250 to 7250 (§5). Neither changes any generated config file.
+# value below 7250 to 7250. Neither changes any generated config file.
 : "${JS_VIS_FAIL_CLOSED:=0}"
 export JS_VIS_FAIL_CLOSED
 : "${JS_VIS_STALE_MS:=8000}"
@@ -91,19 +91,19 @@ export JS_VIS_STALE_MS
 export JS_JOIN_CAP_REQUIRED
 : "${JS_JOIN_CAP_SECRET:=}"
 export JS_JOIN_CAP_SECRET
-# Slice A.1: public address discovery and its periodic re-check (docs/docker-notes.md, "External access").
+# Public address discovery and its periodic re-check (docs/docker-notes.md, "External access").
 : "${JS_PUBLIC_IP_DISCOVERY:=auto}"
 : "${JS_STUN_SERVER:=stun.l.google.com:19302}"
 : "${JS_PUBLIC_IP_DNS_RESOLVER:=1.1.1.1}"
 : "${JS_PUBLIC_IP_REFRESH_S:=300}"
 : "${JS_PUBLIC_IP_CHANGE_ACTION:=warn}"
 : "${JS_PUBLIC_IP_RESTART_MAX_WAIT_S:=900}"
-# Slice A.2: the startup self-check (docs/docker-notes.md, "Startup self-check").
+# The startup self-check (docs/docker-notes.md, "Startup self-check").
 : "${JS_SELFCHECK:=on}"
 : "${JS_SELFCHECK_TIMEOUT_S:=20}"
-# Slice A.2b: hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS.
+# Hours an inbound receipt recorded by `legion-voice-selfcheck --listen` keeps C2b at PASS.
 : "${JS_SELFCHECK_INBOUND_MAX_AGE_H:=168}"
-# Slice A.3: TURN for the mixer itself (docs/docker-notes.md, "TURN for the mixer"). All unset = no TURN, and the
+# TURN for the mixer itself (docs/docker-notes.md, "TURN for the mixer"). All unset = no TURN, and the
 # generated janus.jcfg is byte-for-byte what it was before these knobs existed. Static credentials
 # (JS_TURN_SERVER + JS_TURN_USER + JS_TURN_PWD) and REST credentials (JS_TURN_REST_API) are mutually exclusive.
 : "${JS_TURN_SERVER:=}"
@@ -114,9 +114,9 @@ export JS_JOIN_CAP_SECRET
 : "${JS_TURN_REST_API:=}"
 : "${JS_TURN_REST_API_KEY:=}"
 : "${JS_TURN_REST_API_METHOD:=}"
-# Slice A.5: ICE diagnostics (docs/docker-notes.md, "ICE diagnostics"). How many ENDED slvoice sessions the collector
+# ICE diagnostics (docs/docker-notes.md, "ICE diagnostics"). How many ENDED slvoice sessions the collector
 # keeps for `legion-voice-selfcheck --sessions`; live ones are always kept. 0 turns the collector off, and with it
-# Janus's event broadcast, so janus.jcfg is then what it was before A.5.
+# Janus's event broadcast, so janus.jcfg is then what it was before the diagnostics existed.
 : "${JS_ICE_DIAG_HISTORY:=200}"
 
 # The address library and its probe ship beside this script (SLV_LIB_DIR is a test seam).
@@ -327,7 +327,7 @@ if [ "$TLS_ON" = true ] && { [ "$JS_ADMIN_HTTP_PLAIN" = false ] || [ "$JS_HTTP_P
 	echo "[entrypoint] WARNING: a plain http listener is off, and the startup self-check and the ICE diagnostics reach Janus over plain http on loopback; they will report it unreachable. Use JS_HTTP_PLAIN=loopback and JS_ADMIN_HTTP_PLAIN=loopback to keep them working, or set JS_SELFCHECK=off and JS_ICE_DIAG_HISTORY=0." >&2
 fi
 
-# ---- TURN for the mixer: validate (slice A.3) ----
+# ---- TURN for the mixer: validate ----
 # Two styles, never both: static (JS_TURN_SERVER, JS_TURN_PORT, JS_TURN_TYPE, JS_TURN_USER, JS_TURN_PWD) or REST
 # (JS_TURN_REST_API, JS_TURN_REST_API_KEY, JS_TURN_REST_API_METHOD). A partial configuration is FATAL, not a
 # silent start without TURN. Messages name knobs, never credential values.
@@ -381,7 +381,7 @@ for knob in JS_TURN_SERVER JS_TURN_USER JS_TURN_PWD JS_TURN_REST_API JS_TURN_RES
 	esac
 done
 
-# ---- Public address: a literal, or discovered from a hostname (slice A.1) ----
+# ---- Public address: a literal, or discovered from a hostname ----
 # nat_1_1_mapping needs IPv4 literals.
 # - A literal in JS_PUBLIC_IP (or JS_PUBLIC_HOST) is used as-is, with no lookup.
 # - A hostname in JS_PUBLIC_HOST (or, when that is unset, in JS_PUBLIC_IP) is discovered according
@@ -391,7 +391,7 @@ done
 #                 container resolver comes last because a hairpin or split-horizon setup answers
 #                 it with the LAN address.
 #     stun | dns  that source only
-#     static      the container resolver only, at start, as before A.1 (no periodic re-check)
+#     static      the container resolver only, at start (no periodic re-check)
 # Every source queried is logged with its answer, then the winner: the first public answer.
 # See entrypoint/public-address.sh.
 case "$JS_PUBLIC_IP_DISCOVERY" in
@@ -536,7 +536,7 @@ else
 	echo "[entrypoint] WARNING: set JS_PUBLIC_IP (LAN or public IPv4) or JS_PUBLIC_HOST in .env. See docs/docker-notes.md." >&2
 fi
 
-# ---- TURN keys in the nat section (slice A.3) ----
+# ---- TURN keys in the nat section ----
 # Written only when TURN is configured, so a start without TURN generates exactly the config it did before these
 # knobs existed. The stock template ships each key commented; ensure_kv_in_section uncomments it in place.
 # Credentials go into the file, never into the log.
@@ -556,7 +556,7 @@ elif [ "$TURN_MODE" = rest ]; then
 	echo "[entrypoint] turn_rest_api = $(redact_url "$JS_TURN_REST_API") method=${TURN_REST_METHOD} key=$(secret_state "$JS_TURN_REST_API_KEY")"
 fi
 
-# ---- Resolution record (slice A.1) ----
+# ---- Resolution record ----
 # The same one-line JSON goes to the log (grep ADDRESS_RESOLUTION) and to the state file
 # /run/legion-voice/public-address.json inside the container, for tooling to read. The fields are
 # the sources, values, winner, mapping and verdict.
@@ -564,7 +564,7 @@ ADDR_JSON=$(addr_json start "$ADDR_HOST" "$ADDR_HOST_VAR" "$JS_PUBLIC_IP_DISCOVE
 echo "[entrypoint] ADDRESS_RESOLUTION ${ADDR_JSON}"
 addr_write_state "$ADDR_JSON" "[entrypoint]"
 
-# ---- Effective configuration for the self-check (slice A.2) ----
+# ---- Effective configuration for the self-check ----
 # legion-voice-selfcheck reads the values this start actually used. A `docker exec` shell has the .env
 # values but not the defaults assigned above. No secrets go in this file.
 : "${SLV_EFFECTIVE_CONFIG:=/run/legion-voice/effective-config.json}"
@@ -619,8 +619,8 @@ else
 	sed -i '/^transports:[[:space:]]*{/,/^}/ s|^\([[:space:]]*\)#*[[:space:]]*disable = .*|\1disable = "libjanus_websockets.so"|' "$JANUS_JCFG"
 fi
 
-# ---- ICE diagnostics: Janus events to the collector (slice A.5) ----
-# Written only when the collector runs, so JS_ICE_DIAG_HISTORY=0 generates exactly the config from before A.5. The
+# ---- ICE diagnostics: Janus events to the collector ----
+# Written only when the collector runs, so JS_ICE_DIAG_HISTORY=0 generates exactly the config from before the diagnostics existed. The
 # sample event handler POSTs to the collector on loopback; jsep (SDP) and media events are not subscribed.
 : "${SLV_ICE_DIAG_PORT:=14229}"
 if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
@@ -629,7 +629,7 @@ if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
 	# FATAL "giving up"). Only the sample handler is used. Scoped to events:{}: plugins/transports/loggers have `disable` too.
 	sed -i '/^events:[[:space:]]*{/,/^}/ s|^\([[:space:]]*\)#*[[:space:]]*disable = .*|\1disable = "libjanus_wsevh.so,libjanus_nanomsgevh.so,libjanus_rabbitmqevh.so,libjanus_gelfevh.so,libjanus_mqttevh.so"|' "$JANUS_JCFG"
 	cat > "$CONF_DIR/janus.eventhandler.sampleevh.jcfg" <<EOF
-# Written by the legion-voice entrypoint (slice A.5): Janus session, handle, WebRTC and plugin events for the ICE
+# Written by the legion-voice entrypoint: Janus session, handle, WebRTC and plugin events for the ICE
 # diagnostics collector on loopback. No jsep (SDP) and no media events. JS_ICE_DIAG_HISTORY=0 turns this off.
 general: {
 	enabled = true
@@ -652,7 +652,7 @@ if [ -d "$OVERRIDE_DIR" ]; then
 	done
 fi
 
-# ---- Janus debug level vs TURN REST credentials (slice A.5) ----
+# ---- Janus debug level vs TURN REST credentials ----
 # At debug level 5 Janus prints the TURN REST request URI with the API key (turnrest.c:166) and the REST response with
 # the TURN username and password (turnrest.c:194), and at 6 the credentials again (ice.c:3657-3658). Said loudly at
 # every start, not only in the docs. The level is Janus's -d/--debug-level argument when given, else debug_level in
@@ -692,7 +692,7 @@ if [ -n "$JS_TURN_REST_API" ] || [ -n "$(jcfg_value "$JANUS_JCFG" nat turn_rest_
 	fi
 fi
 
-# ---- 4. Periodic public address re-check (slice A.1) ----
+# ---- 4. Periodic public address re-check ----
 # Runs in the background beside Janus; see entrypoint/public-address-watch.sh. The JS_* values it
 # needs are exported, because a default assigned above is not in the environment otherwise.
 if [ -n "$ADDR_HOST" ] && [ "$JS_PUBLIC_IP_DISCOVERY" != static ] && [ "$JS_PUBLIC_IP_REFRESH_S" -gt 0 ]; then
@@ -705,7 +705,7 @@ elif [ -n "$ADDR_HOST" ]; then
 	echo "[entrypoint] INFO: periodic public address re-check off (JS_PUBLIC_IP_REFRESH_S=${JS_PUBLIC_IP_REFRESH_S}, JS_PUBLIC_IP_DISCOVERY=${JS_PUBLIC_IP_DISCOVERY})"
 fi
 
-# ---- 4b. ICE diagnostics collector (slice A.5) ----
+# ---- 4b. ICE diagnostics collector ----
 # Receives Janus's events (configured above) and keeps session records for `legion-voice-selfcheck --sessions`. It is
 # restarted if it exits, and reloads its file, so records survive. SLV_ICE_DIAG_CMD and SLV_ICE_DIAG_ONCE are test seams.
 : "${SLV_ICE_DIAG_CMD:=$SLV_LIB_DIR/ice_diag.py}"
@@ -723,7 +723,7 @@ if [ "$JS_ICE_DIAG_HISTORY" -gt 0 ]; then
 	) &
 fi
 
-# ---- 5. Startup self-check (slice A.2) ----
+# ---- 5. Startup self-check ----
 # Runs in the background, so Janus starts at once. The self-check waits for Janus's HTTP transport itself,
 # stays inside JS_SELFCHECK_TIMEOUT_S, and prints one [selfcheck] block. `timeout` is a backstop 5 s past
 # that bound, in case the check itself hangs. SLV_SELFCHECK_CMD is a test seam.

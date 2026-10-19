@@ -46,9 +46,9 @@ over the whole config dir by default (that was the old model).
 
 | `.env` variable | Janus file → key | Default |
 |---|---|---|
-| `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping`. An IPv4 literal is used as-is, with no lookup. Since A.1 a hostname here is discovered like `JS_PUBLIC_HOST` (when that is unset) | *(unset)* |
-| `JS_PUBLIC_HOST` | a DNS/DDNS hostname. Its public address is discovered at start (`JS_PUBLIC_IP_DISCOVERY`) and goes first in `nat_1_1_mapping`, with a literal `JS_PUBLIC_IP` kept after it. Before A.1 it was resolved by the container resolver and *overrode* `JS_PUBLIC_IP` | *(unset)* |
-| `JS_PUBLIC_IP_DISCOVERY` | no jcfg key: how a hostname becomes an address. `auto` = STUN, then DNS via `JS_PUBLIC_IP_DNS_RESOLVER`, then the container resolver; the first public answer wins. `stun` / `dns` = that source only. `static` = the container resolver only, at start, with no re-check (the pre-A.1 behaviour). Any other value is FATAL | `auto` |
+| `JS_PUBLIC_IP` | `janus.jcfg` → `nat_1_1_mapping`. An IPv4 literal is used as-is, with no lookup. A hostname here is discovered like `JS_PUBLIC_HOST` (when that is unset) | *(unset)* |
+| `JS_PUBLIC_HOST` | a DNS/DDNS hostname. Its public address is discovered at start (`JS_PUBLIC_IP_DISCOVERY`) and goes first in `nat_1_1_mapping`, with a literal `JS_PUBLIC_IP` kept after it. Before address discovery existed it was resolved by the container resolver and *overrode* `JS_PUBLIC_IP` | *(unset)* |
+| `JS_PUBLIC_IP_DISCOVERY` | no jcfg key: how a hostname becomes an address. `auto` = STUN, then DNS via `JS_PUBLIC_IP_DNS_RESOLVER`, then the container resolver; the first public answer wins. `stun` / `dns` = that source only. `static` = the container resolver only, at start, with no re-check (the behaviour before address discovery existed). Any other value is FATAL | `auto` |
 | `JS_STUN_SERVER` | no jcfg key: the STUN server discovery asks (`host[:port]` or `stun:host:port`). Janus itself is not given it | `stun.l.google.com:19302` |
 | `JS_PUBLIC_IP_DNS_RESOLVER` | no jcfg key: the external DNS resolver discovery asks directly (`host[:port]`), bypassing the container resolver | `1.1.1.1` |
 | `JS_PUBLIC_IP_REFRESH_S` | no jcfg key: seconds between re-checks of a discovered address; `0` disables. A change counts after 2 consecutive agreeing checks | `300` |
@@ -66,8 +66,8 @@ over the whole config dir by default (that was the old model).
 | `JS_TURN_REST_API_METHOD` | nat `turn_rest_api_method`: `GET` or `POST` (REST style; anything else is FATAL) | `POST` when `JS_TURN_REST_API` is set |
 | `JS_KEEP_PRIVATE_HOST` | `janus.jcfg` → `keep_private_host` (only when a public address is set) | `true` when public set, else `false` |
 | `JS_NAT_EXTRA_IPS` | comma list of IPv4 literals appended to `nat_1_1_mapping` after the discovered and literal addresses (duplicates dropped; a non-IPv4 entry is FATAL) | *(unset)* |
-| `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
-| `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret`. **Required**: empty → FATAL, exit 1 (O-65) | *(none)* |
+| `JS_API_SECRET` | `janus.jcfg` → `api_secret`. **Required**: empty → FATAL, exit 1 | *(none)* |
+| `JS_ADMIN_SECRET` | `janus.jcfg` → `admin_secret`. **Required**: empty → FATAL, exit 1 | *(none)* |
 | `ALLOW_INSECURE_DEV` | no jcfg key — `true` lets the container start with an empty secret. **Dev only** | `false` |
 | `JS_RTP_PORT_RANGE` | `janus.jcfg` → `rtp_port_range` | `10000-10200` |
 | `JS_SERVER_NAME` | `janus.jcfg` → `server_name` | `GridVoice` |
@@ -75,11 +75,11 @@ over the whole config dir by default (that was the old model).
 | `JS_HTTP_BASEPATH` | `janus.transport.http.jcfg` → `base_path` | `/voice` |
 | `JS_ADMIN_PORT` | `janus.transport.http.jcfg` → `admin_port` | `14225` |
 | `JS_ADMIN_BASEPATH` | `janus.transport.http.jcfg` → `admin_base_path` | `/voiceAdmin` |
-| `JS_ADMIN_BIND` | no jcfg key: the host address `docker-compose.yml` publishes the admin port on (O-55). Unset = all interfaces, with a start-up WARNING | *(unset)* = all interfaces |
-| `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; `false` also sets `transports: { disable = "libjanus_websockets.so" }` (O-55) | `true` |
+| `JS_ADMIN_BIND` | no jcfg key: the host address `docker-compose.yml` publishes the admin port on. Unset = all interfaces, with a start-up WARNING | *(unset)* = all interfaces |
+| `JS_WS_ENABLED` | `janus.transport.websockets.jcfg` → `ws`; `false` also sets `transports: { disable = "libjanus_websockets.so" }` | `true` |
 | `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (used when `JS_WS_ENABLED=true`) | `8188` |
-| `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed (O-54); `0` disables; an invalid value is ignored with a WARN | `60` |
-| `JS_JOIN_MEDIA_TIMEOUT_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a participant whose PeerConnection is not up this many seconds after joining is reaped from its room, as a hangup leaves (O-75); `0` disables; an invalid value is ignored with a WARN | `30` |
+| `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed; `0` disables; an invalid value is ignored with a WARN | `60` |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a participant whose PeerConnection is not up this many seconds after joining is reaped from its room, as a hangup leaves; `0` disables; an invalid value is ignored with a WARN | `30` |
 
 The entrypoint also forces `http = true` and `admin_http = true`, and sets `ws`
 from `JS_WS_ENABLED`.
@@ -91,9 +91,9 @@ container), matching how `JS_HTTP_PORT`/`JS_ADMIN_PORT` behave.
 
 ### Binds, secrets and extra NAT addresses
 
-Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
+Config hygiene: the admin bind, WebSockets, fail-closed secrets and SDP logging.
 
-- **Admin bind (O-55).** `docker-compose.yml` publishes the Admin API on
+- **Admin bind.** `docker-compose.yml` publishes the Admin API on
   `JS_ADMIN_BIND`. Unset (the default) publishes it on all interfaces, exactly as
   before the knob existed, and the entrypoint's first lines say so:
   `[entrypoint] INFO: admin API bind=0.0.0.0 port=… base_path=…`, then
@@ -104,17 +104,18 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   same host (for example `http://192.168.0.225:24225/voiceAdmin` →
   `JS_ADMIN_BIND=192.168.0.225`), and on a production server it is a different host.
   So `127.0.0.1` cuts the sim off: its visibility/moderation `peer_ctl_batch` calls
-  are refused. That was the slice-6m regression that hotfix 6m-1 reverted. The HTTP
+  are refused. An earlier release defaulted to `127.0.0.1` and did exactly that; the default
+  was reverted. The HTTP
   signalling port stays on all interfaces: the sim and the connectors use it, and
   `api_secret` guards it.
-- **WebSockets (O-55).** `JS_WS_ENABLED` defaults to `true`: Janus loads the
+- **WebSockets.** `JS_WS_ENABLED` defaults to `true`: Janus loads the
   transport on `JS_WS_PORT` and compose publishes it, as before the knob existed.
   The entrypoint prints `[entrypoint] INFO: websockets transport enabled=<value>
   port=<port>`. The OpenSim sim uses HTTP only, so `JS_WS_ENABLED=false` is an
   opt-in narrowing: the entrypoint writes `ws = false` and adds the transport to
   `transports: { disable }`, so Janus does not load it. The compose port mapping
   stays but answers nothing; delete that line in your compose file to unpublish it.
-- **Fail-closed secrets (O-65).** The container exits 1 at start when either secret
+- **Fail-closed secrets.** The container exits 1 at start when either secret
   is empty or whitespace, naming the keys and the override:
   `[entrypoint] FATAL: JS_API_SECRET and JS_ADMIN_SECRET empty; refusing to start.
   Set JS_API_SECRET=<the sim's APIToken> and JS_ADMIN_SECRET=<the sim's
@@ -125,7 +126,7 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   **behaviour change on upgrade** (see below). **`ALLOW_INSECURE_DEV=true` is a
   dev-only override**: it starts anyway, with a WARNING. Use it only on a throwaway
   local box that nothing else can reach, never on the grid host.
-- **`nat_1_1_mapping` verdict and `JS_NAT_EXTRA_IPS` (A.1).** The entrypoint builds
+- **`nat_1_1_mapping` verdict and `JS_NAT_EXTRA_IPS`.** The entrypoint builds
   the mapping in this order:
   1. the address discovered for a hostname (see "External access" below);
   2. any literal `JS_PUBLIC_IP`;
@@ -144,7 +145,7 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
   and off-LAN viewers both get a reachable one. `JS_NAT_EXTRA_IPS` still appends
   literals, but a hand-added router address goes stale when a dynamic IP changes;
   discovery exists so it is not needed.
-- **Resolution record (A.1).** Every start writes one line, `[entrypoint] ADDRESS_RESOLUTION
+- **Resolution record.** Every start writes one line, `[entrypoint] ADDRESS_RESOLUTION
   {json}`, and the same JSON to `/run/legion-voice/public-address.json` in the container.
   - **Fields:** `event`, `time`, `host`, `host_var`, `discovery`, `sources[]`
     (`name`/`via`/`status`/`address`/`class`), `winner`, `literal_ips`, `extra_ips`,
@@ -153,7 +154,7 @@ Config hygiene from the 2026-09-09 audit (W-8, §8; ledger O-55, O-65, O-66).
     rewrites the file after every check (`event: refresh`) with `running_address`,
     `observed_address` and `agreeing_checks`.
   - **To read it:** `docker exec <container> cat /run/legion-voice/public-address.json`.
-- **SDP logging (O-66).** The plugin's full offer/answer SDP dumps are at
+- **SDP logging.** The plugin's full offer/answer SDP dumps are at
   `LOG_VERB` (debug level 5+), with `a=ice-ufrag`, `a=ice-pwd` and the
   `a=fingerprint` value redacted. Each join still logs one INFO line:
   `Answer sent: audio Opus pt=<pt> ptime=20 maxptime=20; m=application answered=YES`.
@@ -277,9 +278,9 @@ and set the same value on the regionserver.
 - An empty `JS_API_SECRET` or `JS_ADMIN_SECRET` is handled by the existing empty-secret check, and an
   empty `JS_JOIN_CAP_SECRET` means join capabilities are not in use; neither counts as weak here.
 
-### Startup self-check (A.2)
+### Startup self-check
 
-A.1 proves what the mixer advertises. The self-check tests what it can find out from inside the
+Address discovery proves what the mixer advertises. The self-check tests what it can find out from inside the
 container about reachability, for a home host behind consumer NAT and for a VPS with a public
 address alike.
 
@@ -316,13 +317,13 @@ INCONCLUSIVE means the check could not decide, and is never reported as PASS.
 
 | Check | What it tests | Results |
 |---|---|---|
-| C1 advertised address is public | the A.1 state file's `nat_1_1_mapping` | PASS: a public address. **CGNAT (100.64.0.0/10) is its own FAIL**, remediation TURN or a public IPv4. No public address: FAIL naming `JS_PUBLIC_HOST` / `JS_PUBLIC_IP` / `JS_NAT_EXTRA_IPS`. A confirmed address change not yet applied: WARN. Unreadable state: INCONCLUSIVE |
+| C1 advertised address is public | the address-discovery state file's `nat_1_1_mapping` | PASS: a public address. **CGNAT (100.64.0.0/10) is its own FAIL**, remediation TURN or a public IPv4. No public address: FAIL naming `JS_PUBLIC_HOST` / `JS_PUBLIC_IP` / `JS_NAT_EXTRA_IPS`. A confirmed address change not yet applied: WARN. Unreadable state: INCONCLUSIVE |
 | C2a media path, outbound (information) | STUN Binding requests from sockets bound to the lowest, middle and highest port of `JS_RTP_PORT_RANGE` (the nearest free port if one is in use), to `JS_STUN_SERVER` | Every mapped port equals its local port: PASS. On a VPS whose public address is on the interface, the report says "no address translation". Any port remapped: **WARN** "container-initiated UDP is source-port remapped; this is normal for a published-port container and does not by itself break a forwarded server". Container-initiated flows are SNATed by the container network layer on every containerised deployment (Docker Desktop's VM, iptables MASQUERADE on Linux). No answer while the same server answers an ephemeral port: FAIL "outbound UDP from the media range is blocked". No answer from any port: INCONCLUSIVE. Every result states that inbound-forwarded flows are a separate mapping this probe cannot see |
 | C2b media path, inbound | the receipt `legion-voice-selfcheck --listen` recorded in `/run/legion-voice/selfcheck-inbound.json` | Inbound reachability cannot be seen from inside the container, so the default is **INCONCLUSIVE**, with `docker compose exec janus legion-voice-selfcheck --listen` in the remediation. PASS only for a receipt from an outside device that is no older than `JS_SELFCHECK_INBOUND_MAX_AGE_H` (default 168 h), is for a port still in the range, and was recorded while advertising an address still advertised: "inbound UDP reached port N from outside (observed <when>, from <source>, <age> ago)". A stale, unreadable or mismatched receipt: INCONCLUSIVE. Never a guessed PASS |
 | C3 RTP range | binds up to 9 sampled ports of the range, and compares `JS_RTP_PORT_RANGE` with `rtp_port_range` in the generated `janus.jcfg` | PASS: bindable (a port in use by Janus media is fine) and matching. FAIL: a port the container cannot bind, an invalid range, or a mismatch (a mounted override). INCONCLUSIVE: config unreadable, or every sampled port in use |
 | C4 signalling | `GET http://127.0.0.1:<JS_HTTP_PORT><JS_HTTP_BASEPATH>/info`; at start it waits for Janus within the bound | PASS: Janus `server_info` with `janus.plugin.slvoice`. FAIL: HTTP error (base path), not Janus, plugin missing, or connection refused. INCONCLUSIVE: connected but no reply within the bound |
-| C5 admin API | reports `JS_ADMIN_BIND`:`JS_ADMIN_PORT`, then connects to that port at each public address in the mapping | PASS: unreachable, **the desired result**. FAIL: the Janus admin API answers there. WARN: the port accepts but is not Janus. INCONCLUSIVE: no public address. It deliberately does not probe the LAN address, which the sim uses. From inside, a router that does not hairpin TCP also reads as unreachable, so confirm from outside (A.6) |
-| C6 TURN for this server | `turn_server` or `turn_rest_api` in the nat section of the generated `janus.jcfg` (what Janus uses, mounted overrides included), judged against C1 | **No TURN, server publicly reachable per C1:** PASS; the server-side path is complete. A note says viewers whose own network blocks UDP need viewer-side TURN, which the mixer cannot provide (A.4). **No TURN, server CGNAT or unreachable per C1:** WARN; mixer-side TURN is the remedy, naming the knobs. **TURN configured:** a real TURN Allocate with the configured credentials, through the REST API when that style is set. It passes with the relay address obtained ("rescues a CGNAT or unreachable server") or FAILs with the reason. C1 INCONCLUSIVE: INCONCLUSIVE. Every result notes `turn_type` as information; it is never a pass criterion |
+| C5 admin API | reports `JS_ADMIN_BIND`:`JS_ADMIN_PORT`, then connects to that port at each public address in the mapping | PASS: unreachable, **the desired result**. FAIL: the Janus admin API answers there. WARN: the port accepts but is not Janus. INCONCLUSIVE: no public address. It deliberately does not probe the LAN address, which the sim uses. From inside, a router that does not hairpin TCP also reads as unreachable, so confirm from outside (see "Source addresses") |
+| C6 TURN for this server | `turn_server` or `turn_rest_api` in the nat section of the generated `janus.jcfg` (what Janus uses, mounted overrides included), judged against C1 | **No TURN, server publicly reachable per C1:** PASS; the server-side path is complete. A note says viewers whose own network blocks UDP need viewer-side TURN, which the mixer cannot provide. **No TURN, server CGNAT or unreachable per C1:** WARN; mixer-side TURN is the remedy, naming the knobs. **TURN configured:** a real TURN Allocate with the configured credentials, through the REST API when that style is set. It passes with the relay address obtained ("rescues a CGNAT or unreachable server") or FAILs with the reason. C1 INCONCLUSIVE: INCONCLUSIVE. Every result notes `turn_type` as information; it is never a pass criterion |
 
 **Verdict.** The END line leads with the report's worst status, in the order FAIL > INCONCLUSIVE > WARN >
 PASS, and the JSON carries it as `verdict`. A correctly forwarded deployment with no TURN shows WARN at
@@ -366,7 +367,7 @@ at start. It holds the effective, non-secret values of `JS_RTP_PORT_RANGE`, `JS_
 - three STUN requests from the media range, plus one from an ephemeral port;
 - one TCP connection per public address to the admin port.
 
-### TURN for the mixer (A.3)
+### TURN for the mixer
 
 **What mixer-side TURN is for.** Setting TURN on the mixer lets Janus allocate a relay on a TURN server and
 offer it to viewers as an extra candidate. That moves the **server's** candidate, and it rescues a mixer
@@ -374,7 +375,7 @@ viewers cannot otherwise reach: one behind CGNAT, or with no usable forward.
 
 It does **not** give a viewer whose own network blocks UDP a path. `JS_TURN_TYPE` (`udp`/`tcp`/`tls`) only
 sets how Janus reaches the TURN server, and the relay still speaks UDP toward the viewer. A UDP-blocked
-viewer needs viewer-side TURN, delivered by the sim, which is slice A.4.
+viewer needs viewer-side TURN, delivered by the sim.
 
 So on a publicly reachable, forwarded mixer (C1 PASS), no TURN is the correct configuration, and C6 is PASS.
 
@@ -386,7 +387,7 @@ choice. There are two credential styles, never both:
   ttl, uris}`. Janus's TURN REST support is compiled into this image (`janus_turnrest_*` symbols).
 
 The entrypoint writes the matching keys into the `nat` section of `janus.jcfg`. With no TURN knob set it
-writes nothing, and the generated `janus.jcfg` is byte-identical to the one before A.3
+writes nothing, and the generated `janus.jcfg` is byte-identical to the one before the TURN knobs existed
 (`tests/golden/janus.jcfg.pre-turn`).
 
 **Validation, all FATAL at start, naming knobs and never values:**
@@ -405,9 +406,9 @@ type=udp user=set pwd=set`.
 One caveat outside this entrypoint: Janus core itself prints TURN REST secrets at raised debug levels. At level 5
 (VERB) it logs the REST request URI with the key (`turnrest.c:166`) **and the REST response body, which carries the
 TURN username and password** (`turnrest.c:194`). At 6 (HUGE) it logs the credentials again (`ice.c:3657`–`:3658`).
-A.3's notes said the credentials appeared only at 6; the response body at 5 was missed. The image runs at Janus's
-default level 4. Do not raise `debug_level` on a mixer using TURN REST. Since A.5 the entrypoint prints a WARNING
-block at every start when the effective level is 5 or more and TURN REST is configured ("ICE diagnostics (A.5)").
+Earlier notes said the credentials appeared only at 6; the response body at 5 carries them too. The image runs at Janus's
+default level 4. Do not raise `debug_level` on a mixer using TURN REST. The entrypoint prints a WARNING
+block at every start when the effective level is 5 or more and TURN REST is configured ("ICE diagnostics").
 
 **Seeing whether relay is live.** Every self-check run reports, for each slvoice handle, the ICE candidate
 types Janus offered (host / srflx / relay), with the peer's types and the selected pair. They come from the
@@ -435,7 +436,7 @@ The harness's relay scenario S13 uses the same coturn from the host: `--turn-uri
 
 To tear down: `docker compose --profile turn-test rm -sf turn-test turn-test-rest`.
 
-### ICE diagnostics (A.5)
+### ICE diagnostics
 
 **The question.** "Why did voice fail for that one user?" is asked after the fact, about a session that has ended,
 by someone who should not have to read Janus's raw log. The mixer keeps one record per slvoice session, live or
@@ -469,20 +470,20 @@ every file write and every output also passes through a scrubber that drops sens
 
 | Status | When |
 |---|---|
-| FAIL | reaped by the mixer with no media (O-75, `JS_JOIN_MEDIA_TIMEOUT_S`); ICE failed, DTLS failed, or a hangup, before media came up; or ended before media came up |
+| FAIL | reaped by the mixer with no media (`JS_JOIN_MEDIA_TIMEOUT_S`); ICE failed, DTLS failed, or a hangup, before media came up; or ended before media came up |
 | WARN | media came up, then was lost (a hangup reason naming a failure, error or timeout, or ICE or DTLS failed); or media was up and the end was not observed |
 | PASS | media came up and the session ended normally, or is live with media |
 | INCONCLUSIVE | live and media not up yet; or media never came up and the end was not observed |
 
 **Path, as far as this side can tell.** Janus sees its own candidates, the candidates the peer signalled and the address
 the peer's packets arrive from, nothing more. On a published-port mixer a peer's packets, relayed or not, arrive
-through the port publish and show as prflx (A.3's S13), so the selected pair alone never proves how the viewer reached
+through the port publish and show as prflx (harness scenario S13), so the selected pair alone never proves how the viewer reached
 the mixer. Every verdict carries that caveat:
 
 | Verdict | Basis |
 |---|---|
 | `relay` | a relay candidate on either side of the selected pair: Janus's own TURN relay, or one the peer signalled |
-| `direct` | the peer's side is host or srflx: its own signalled address reached Janus. Janus's side may read prflx, which a published port's DNAT causes and which says nothing about the peer (A.6, measured) |
+| `direct` | the peer's side is host or srflx: its own signalled address reached Janus. Janus's side may read prflx, which a published port's DNAT causes and which says nothing about the peer (measured, see "Source addresses") |
 | `undetermined` | the peer's side is prflx (and no relay): its source address was rewritten on the way, or learned only from checks. If the peer signalled relay candidates, a note says it may be relaying; that is never promoted to a verdict |
 | `none` | no pair was selected |
 
@@ -511,13 +512,13 @@ restart are kept as ended, with the end marked as not observed) and is lost when
 - event delivery is Janus's: 3 retries with backoff, then an event is dropped;
 - remote candidate counts need the poll, so a session shorter than 2 s, or a mixer without `JS_ADMIN_SECRET` in the
   container's environment, shows them as not observed;
-- `JS_ICE_DIAG_HISTORY=0` turns all of it off, and `janus.jcfg` is then byte-identical to before A.5.
+- `JS_ICE_DIAG_HISTORY=0` turns all of it off, and `janus.jcfg` is then byte-identical to before the diagnostics existed.
 - **Events queued when Janus stops are lost.** The sample event handler sets `stopping` before its exit event
   (`janus_sampleevh.c:275`, `:277`), and its loop runs only while not stopping (`:454`). A session that joined in the
   last moment before a mixer stop is recorded with no agent or room, and INCONCLUSIVE with its end not observed.
   Seen on every harness run: S4 restarts the mixer 0.23 s after its second peer's DTLS completes.
 - **On Docker Desktop the path is always `undetermined`:** every viewer arrives from the Docker gateway (see
-  "Source addresses (A.6)").
+  "Source addresses").
 
 **TURN REST credentials at raised debug levels.** Janus prints them at debug level 5 and above (see "TURN for the
 mixer"). When the effective level is 5 or more and TURN REST is configured, every start prints a WARNING block that
@@ -526,9 +527,9 @@ argument when given, else `debug_level` in the final `janus.jcfg`, mounted overr
 counts as configured from `JS_TURN_REST_API` or from an uncommented `turn_rest_api` in that file. The start line also
 shows `debug_level=N`.
 
-### Visibility authority (Phase 0, 0.3)
+### Visibility authority
 
-The plugin can fail closed (`docs/voice/nonspatial-phase0-design.md`). In a room the sim created with
+The plugin can fail closed. In a room the sim created with
 `vis_authority`, it can silence a listener or source that the sim never armed, armed under another epoch, or has not
 confirmed within the staleness window.
 
@@ -577,22 +578,22 @@ malformed entry is skipped and counted. Enforcement (clamping the claim to the s
   vis_authority: NOT enforced` once.
 
 **Before setting `1`.**
-- Ledger O-88 must be closed. Nothing arms connector peers or recorder taps yet, so they would be silent.
+- Connector peers and recorder taps must be armed first. Nothing arms them yet, so they would be silent.
 - The sim must be arming (`[WebRtcVoice] VisibilityArmingEnabled`).
-- The 0.6 shadow soak must have passed.
+- A shadow-mode soak must have passed.
 
 Rollback is `JS_VIS_FAIL_CLOSED=0` and a container recreate. The sim needs no change.
 
-### Join capability (Phase 0, 0.4)
+### Join capability
 
 The plugin's join was ungated: Janus checks `api_secret` to reach the API at all, but the join itself accepted any
-`room` and any `display` (ledger O-46). The sim can now mint a short-lived capability for each join, bound to the
+`room` and any `display`. The sim can now mint a short-lived capability for each join, bound to the
 agent, its viewer session, the room, the arming generation, an expiry and a one-shot nonce, and the mixer verifies
-it (`docs/voice/nonspatial-phase0-design.md` §11).
+it.
 
 | Knob | Default | Effect |
 |---|---|---|
-| `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join any room **a simulator created** - from slice 1.4 that means any room whose create carried `"sim_created": true` (spatial and `multiagent` alike), plus any room created with `vis_authority`. A room nobody marked - the harness's, a static room from the config file, or one a pre-1.4 simulator created - is never gated. The knob has never shipped in a tagged release, so `0` is byte-identical to every published image |
+| `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join any room **a simulator created** - that is, any room whose create carried `"sim_created": true` (spatial and `multiagent` alike), plus any room created with `vis_authority`. A room nobody marked - the harness's, a static room from the config file, or one an older simulator that does not send the marker created - is never gated. The knob has never shipped in a tagged release, so `0` is byte-identical to every published image |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key, shared with the sim. Not `JS_API_SECRET`. With `JS_JOIN_CAP_REQUIRED=1` and no key the container refuses to start |
 | `JS_TLS_CERT`, `JS_TLS_KEY` | *(unset)*: plain http only; the generated `janus.transport.http.jcfg` is byte-identical | the API and admin API could only be served over plain http. Both set turns on Janus's https for both listeners; a missing or unreadable file refuses to start ("TLS for the API and admin API") | this release |
 | `JS_HTTPS_PORT`, `JS_ADMIN_HTTPS_PORT` | `14224`, `14226` | n/a (used only with `JS_TLS_CERT` and `JS_TLS_KEY`) | this release |
@@ -620,19 +621,19 @@ value of a stolen capability. A join admitted only inside that tolerance logs a 
 offset: fix NTP when you see it.
 
 **After a mixer restart** the replay store is empty, so a capability replayed inside its remaining lifetime (at
-most 60 s) would be accepted. Small, time-boxed, and written down in §11.6 rather than implied.
+most 60 s) would be accepted. Small, time-boxed, and documented here rather than implied.
 
 **Before setting `1`.** The sim must be minting (`[WebRtcVoice] JoinCapabilityEnabled` with the shared secret),
 and connector peers and recorder taps must mint capabilities too — they do not yet, and a declared room would
-refuse them (ledger O-46's sibling, O-88). Rollback is `0` and a container recreate.
+refuse them. Rollback is `0` and a container recreate.
 
 ## Configuration compatibility rule
 
 Rebuilding or pulling a new image onto an existing `.env` must not silently change
-what a running install does. Slice 6m broke this: its `JS_ADMIN_BIND=127.0.0.1`
+what a running install does. An earlier release broke this: its `JS_ADMIN_BIND=127.0.0.1`
 default cut the regionserver off the Admin API, and `JS_WS_ENABLED=false` removed a
-WebSocket transport that had been on and published. Hotfix 6m-1 reverted both
-defaults and wrote down the rule:
+WebSocket transport that had been on and published. A hotfix reverted both
+defaults, and the rule is:
 
 - **A new knob's default reproduces the behaviour of the release before it
   existed.**
@@ -646,7 +647,7 @@ defaults and wrote down the rule:
   migrations"**, even when a list is empty. The release notes are
   `docs/RELEASES.md`; the two sections below summarise them for configuration.
 
-A change that must break compatibility for safety (O-65 below) is allowed only if
+A change that must break compatibility for safety (the blank-secret refusal, below) is allowed only if
 it fails loud at start, names the exact keys to set and the override, and appears
 under "Behaviour changes on upgrade".
 
@@ -672,33 +673,33 @@ its knobs have no "before".
 | `JS_PUBLIC_HOST` | *(unset)* | only `JS_PUBLIC_IP` could set the mapping | `fc39fb5` |
 | `JS_KEEP_PRIVATE_HOST` | `true` when a public address is set, else `false` | Janus default `false`: the mapping replaced host candidates with the public address. **Pre-rule exception**: the `true` default added the private candidate on upgrade | `fc39fb5` |
 | `JS_EMPTY_ROOM_GRACE_S` | `60` | rooms persisted until the mixer restarted. **Pre-rule exception, kept**: an empty non-permanent room is destroyed after 60 s, and the sim self-heals (a join to the destroyed room answers 485 → the sim forgets and re-creates it). `0` restores the old behaviour | `1859a7f` |
-| `JS_ADMIN_BIND` | *(unset)*: all interfaces, with a start-up WARNING | admin API published on all interfaces | `b96e7b3` (default `127.0.0.1`; restored to all interfaces by hotfix 6m-1) |
-| `JS_WS_ENABLED` | `true` | WebSockets transport loaded and published | `b96e7b3` (default `false`; restored to `true` by hotfix 6m-1) |
+| `JS_ADMIN_BIND` | *(unset)*: all interfaces, with a start-up WARNING | admin API published on all interfaces | `b96e7b3` (default `127.0.0.1`; restored to all interfaces by `8d56823`) |
+| `JS_WS_ENABLED` | `true` | WebSockets transport loaded and published | `b96e7b3` (default `false`; restored to `true` by `8d56823`) |
 | `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
-| `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the O-65 behaviour change | `b96e7b3` |
-| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change (O-75)**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
-| `JS_PUBLIC_IP_DISCOVERY` | `auto` | `JS_PUBLIC_HOST` was resolved once by the container resolver and overrode `JS_PUBLIC_IP`; that is `static`. **Deliberate behaviour change (A.1)**: `auto` puts the STUN-discovered public address first, and keeps a literal `JS_PUBLIC_IP`. A hairpinned DDNS name then no longer yields a private-only mapping. `static` restores the old resolution, but keeps the literal | slice A.1 |
-| `JS_STUN_SERVER` | `stun.l.google.com:19302` | no STUN query (the container made no outbound STUN request) | slice A.1 |
-| `JS_PUBLIC_IP_DNS_RESOLVER` | `1.1.1.1` | no external DNS query (the container resolver only) | slice A.1 |
-| `JS_PUBLIC_IP_REFRESH_S` | `300` | no re-check: a mid-run IP change went unnoticed. The default adds a background re-check that only logs; `0` restores the old behaviour | slice A.1 |
-| `JS_PUBLIC_IP_CHANGE_ACTION` | `warn` | nothing acted on an IP change. `warn` only logs; `restart` is opt-in | slice A.1 |
-| `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | `900` | n/a (used only with `JS_PUBLIC_IP_CHANGE_ACTION=restart`) | slice A.1 |
-| `JS_SELFCHECK` | `on` | no self-check. The default adds a background, diagnostics-only run after start: one `[selfcheck]` log block, brief UDP binds and STUN requests from the RTP range, and a TCP probe of the admin port at the public address. Nothing is configured or blocked by it. `off` restores the old behaviour | slice A.2 |
-| `JS_SELFCHECK_TIMEOUT_S` | `20` | n/a (the self-check's bound) | slice A.2 |
-| `JS_SELFCHECK_INBOUND_MAX_AGE_H` | `168` | n/a (C2b did not exist) | slice A.2b |
-| `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD` | *(unset)*: no TURN; the generated `janus.jcfg` is byte-identical | no TURN configurable from `.env` (only a mounted `janus.jcfg`) | slice A.3 |
-| `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` | *(unset)*: no TURN REST | as above | slice A.3 |
-| `JS_ICE_DIAG_HISTORY` | `200` | no session diagnostics, and Janus's event broadcast off. The default adds diagnostics only: Janus events to a loopback collector, and a `handle_info` poll every 2 s per live session. Nothing about media is configured or blocked. `0` restores the old behaviour, with `janus.jcfg` byte-identical | slice A.5 |
-| `JS_VIS_FAIL_CLOSED` | `0` (shadow mode) | no visibility authority: an empty exclusion set meant "hear everyone" whether or not the sim had spoken. `0` keeps that exactly: the plugin tracks arming, epochs and staleness in rooms created with `vis_authority`, counts `would_silence_*`, and changes nothing audible. `1` silences unarmed or stale listeners and sources in those rooms only. **Do not set `1` while ledger O-88 is open.** Environment only: every generated config file is byte-identical either way | slice 0.3 (`4492dbc`) |
-| `JS_VIS_STALE_MS` | `8000` | n/a (no staleness window). Values below 7250 (2 × the sim's 1000 ms heartbeat + 5000 ms admin timeout + 250 ms) are raised to 7250 with a WARN | slice 0.3 (`4492dbc`) |
-| `JS_JOIN_CAP_REQUIRED` | `0` (shadow) | the plugin join was ungated: anything holding `JS_API_SECRET` could join any room as any avatar (ledger O-46). `0` keeps that exactly, and verifies and counts any capability that arrives. `1` requires a valid sim-issued capability to join a room created with `vis_authority`, and changes nothing in any other room. Environment only: no generated config changes either way | slice 0.4 |
-| `JS_JOIN_CAP_SECRET` | *(unset)* | n/a (no capability). The HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, deliberately **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start | slice 0.4 |
+| `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the fail-closed-secrets behaviour change | `b96e7b3` |
+| `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
+| `JS_PUBLIC_IP_DISCOVERY` | `auto` | `JS_PUBLIC_HOST` was resolved once by the container resolver and overrode `JS_PUBLIC_IP`; that is `static`. **Deliberate behaviour change**: `auto` puts the STUN-discovered public address first, and keeps a literal `JS_PUBLIC_IP`. A hairpinned DDNS name then no longer yields a private-only mapping. `static` restores the old resolution, but keeps the literal | `9831943` |
+| `JS_STUN_SERVER` | `stun.l.google.com:19302` | no STUN query (the container made no outbound STUN request) | `9831943` |
+| `JS_PUBLIC_IP_DNS_RESOLVER` | `1.1.1.1` | no external DNS query (the container resolver only) | `9831943` |
+| `JS_PUBLIC_IP_REFRESH_S` | `300` | no re-check: a mid-run IP change went unnoticed. The default adds a background re-check that only logs; `0` restores the old behaviour | `9831943` |
+| `JS_PUBLIC_IP_CHANGE_ACTION` | `warn` | nothing acted on an IP change. `warn` only logs; `restart` is opt-in | `9831943` |
+| `JS_PUBLIC_IP_RESTART_MAX_WAIT_S` | `900` | n/a (used only with `JS_PUBLIC_IP_CHANGE_ACTION=restart`) | `9831943` |
+| `JS_SELFCHECK` | `on` | no self-check. The default adds a background, diagnostics-only run after start: one `[selfcheck]` log block, brief UDP binds and STUN requests from the RTP range, and a TCP probe of the admin port at the public address. Nothing is configured or blocked by it. `off` restores the old behaviour | `994f924` |
+| `JS_SELFCHECK_TIMEOUT_S` | `20` | n/a (the self-check's bound) | `994f924` |
+| `JS_SELFCHECK_INBOUND_MAX_AGE_H` | `168` | n/a (C2b did not exist) | `5b38098` |
+| `JS_TURN_SERVER`, `JS_TURN_PORT`, `JS_TURN_TYPE`, `JS_TURN_USER`, `JS_TURN_PWD` | *(unset)*: no TURN; the generated `janus.jcfg` is byte-identical | no TURN configurable from `.env` (only a mounted `janus.jcfg`) | `4d3b4bb` |
+| `JS_TURN_REST_API`, `JS_TURN_REST_API_KEY`, `JS_TURN_REST_API_METHOD` | *(unset)*: no TURN REST | as above | `4d3b4bb` |
+| `JS_ICE_DIAG_HISTORY` | `200` | no session diagnostics, and Janus's event broadcast off. The default adds diagnostics only: Janus events to a loopback collector, and a `handle_info` poll every 2 s per live session. Nothing about media is configured or blocked. `0` restores the old behaviour, with `janus.jcfg` byte-identical | `b1e744d` |
+| `JS_VIS_FAIL_CLOSED` | `0` (shadow mode) | no visibility authority: an empty exclusion set meant "hear everyone" whether or not the sim had spoken. `0` keeps that exactly: the plugin tracks arming, epochs and staleness in rooms created with `vis_authority`, counts `would_silence_*`, and changes nothing audible. `1` silences unarmed or stale listeners and sources in those rooms only. **Do not set `1` while connector peers and recorder taps are unarmed.** Environment only: every generated config file is byte-identical either way | `4492dbc` |
+| `JS_VIS_STALE_MS` | `8000` | n/a (no staleness window). Values below 7250 (2 × the sim's 1000 ms heartbeat + 5000 ms admin timeout + 250 ms) are raised to 7250 with a WARN | `4492dbc` |
+| `JS_JOIN_CAP_REQUIRED` | `0` (shadow) | the plugin join was ungated: anything holding `JS_API_SECRET` could join any room as any avatar. `0` keeps that exactly, and verifies and counts any capability that arrives. `1` requires a valid sim-issued capability to join a room created with `vis_authority`, and changes nothing in any other room. Environment only: no generated config changes either way | `889a892` |
+| `JS_JOIN_CAP_SECRET` | *(unset)* | n/a (no capability). The HMAC key shared with the sim's `[JanusWebRtcVoice] JoinCapabilitySecret`, deliberately **not** `JS_API_SECRET`. `JS_JOIN_CAP_REQUIRED=1` with this empty refuses to start | `889a892` |
 
-**Example deployment (slice 0.9b):** `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1`,
+**Example deployment:** `JS_VIS_FAIL_CLOSED=1` and `JS_JOIN_CAP_REQUIRED=1`,
 both set in the mixer's `.env`. Rollback for either is the same: remove the line and
 recreate the container; the sim needs no change.
 
-| `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change (SC-96)**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
+| `RECORDING_OPT_IN` (connector env: `connectors/recorder/recorder.env`, and `injector.env` when `RECORD=1`) | *(unset)*: off, so the peer refuses to start | the recorder started and recorded with no opt-in. **Deliberate behaviour change**: an existing recorder, or an injector with `RECORD=1`, now exits 1 at start until the operator sets `yes`. Printed as the peer's first start-up line (the connector's own entrypoint, not the janus container banner) | `ae159b0` |
 
 `JANUS_CONF_DIR`, `JANUS_TEMPLATE_DIR`, `JANUS_OVERRIDE_DIR`, `JANUS_BIN`, `SLV_LIB_DIR`,
 `SLV_ADDR_PROBE`, `SLV_ADDR_STATE_FILE` and the watcher's `SLV_ADDR_WATCH_MAX_CHECKS`,
@@ -718,13 +719,13 @@ operator knobs.
   - New opt-in knobs: `JS_TLS_CERT` / `JS_TLS_KEY` (https), `JS_HTTP_PLAIN` / `JS_ADMIN_HTTP_PLAIN`,
     `JS_WEAK_SECRET_FATAL`. With none set, the generated Janus config is byte-identical.
   - New start-up WARNING when a non-empty API, admin or join-capability secret is under 32 characters.
-- **Slice A.6: source addresses and recipes**
+- **Source addresses and recipes**
   - **Path classifier:** the diagnostics path follows the peer's side of the selected pair. host or srflx there reads
     `direct` even when Janus's side is prflx (a published port's DNAT). Docker Desktop is unchanged: `undetermined`.
   - **`--listen`** prints a `data:` link for a phone with nothing installed, and accepts the probe token without its
     dashes.
-  - No knob, default or compose change. The shipped network mode stays published ports ("Source addresses (A.6)").
-- **Slice A.5: ICE diagnostics**
+  - No knob, default or compose change. The shipped network mode stays published ports ("Source addresses").
+- **ICE diagnostics**
   - **New knob `JS_ICE_DIAG_HISTORY` (default 200).** Janus's event broadcast is now on, with the sample event handler
     posting to a loopback collector, and `janus.jcfg` gains `broadcast = true` and an events `disable` of Janus's
     other event handlers. A background collector runs beside the
@@ -733,7 +734,7 @@ operator knobs.
   - **New subcommands** `legion-voice-selfcheck --sessions` and `--session`.
   - **New start-up WARNING** when the effective debug level is 5 or more and TURN REST is configured; the start line
     gains `debug_level=N`.
-- **Slice A.3: TURN for the mixer**
+- **TURN for the mixer**
   - **New TURN knobs.** Unset (the default), the generated `janus.jcfg` is byte-identical to before.
     Set, they write the nat `turn_*` keys, and a partial or mixed-style configuration now refuses to
     start (FATAL). Credentials appear in the log only as `set`/`EMPTY`.
@@ -746,20 +747,20 @@ operator knobs.
     and `/run/legion-voice/candidates.json`, all read from the Admin API. `--candidates` prints them alone.
   - **`--listen`** also prints a busybox `nc` form.
   - **New compose profile `turn-test`**, a test fixture only; off unless named.
-- **Slice A.2b: C2 corrected, inbound proof**
+- **C2 corrected, inbound proof**
   - **C2 is now C2a and C2b.**
     - A source-port remap on container-initiated UDP is a WARN (C2a), not a FAIL. That remap is normal
       for any published-port container.
     - Inbound reachability (C2b) is INCONCLUSIVE until `legion-voice-selfcheck --listen` records a
       receipt from an outside device.
-    - A deployment that A.2 reported as C2 FAIL now reports C2a WARN and C2b INCONCLUSIVE: exit 2 instead
+    - A deployment that the first self-check reported as C2 FAIL now reports C2a WARN and C2b INCONCLUSIVE: exit 2 instead
       of 1.
   - **C6's no-TURN WARN** is one viewer-side sentence and no longer reasons from C2.
   - **Output changes:** the END line and the JSON carry the worst status (`verdict`). The block's check
     ids are `C1 C2a C2b C3 C4 C5 C6`.
   - **New knob** `JS_SELFCHECK_INBOUND_MAX_AGE_H` (168) and new file
     `/run/legion-voice/selfcheck-inbound.json`, written only by `--listen`.
-- **Slice A.2: startup self-check**
+- **Startup self-check**
   - **Every start** now runs `legion-voice-selfcheck` in the background (`JS_SELFCHECK=on`) and logs
     one `[selfcheck]` block. It only reports; it changes no configuration and never blocks or
     delays Janus.
@@ -769,12 +770,12 @@ operator knobs.
     - one TCP connection per public address to the admin port.
   - **New files:** `/run/legion-voice/effective-config.json` (non-secret effective values) and
     `/run/legion-voice/selfcheck.json`.
-  - **A.1 restart action:** a participant poll that fails, is unauthorised (wrong `JS_API_SECRET`) or
+  - **Address-change restart action:** a participant poll that fails, is unauthorised (wrong `JS_API_SECRET`) or
     returns anything but a count is now logged, `[address-watch] WARNING: participant poll failed
     (<reason>); not counted as zero participants`. It was already never read as zero; now the
     reason is visible.
 
-- **Slice A.1: public address discovery**
+- **Public address discovery**
   - **A DDNS hostname now yields the router's public address (deliberate).** A hostname in
     `JS_PUBLIC_HOST` (or `JS_PUBLIC_IP`) is discovered by STUN first, then an external resolver,
     then the container resolver. Before, the container resolver alone decided, and a hairpinning
@@ -795,50 +796,50 @@ operator knobs.
   - **A hostname that no source can resolve still refuses to start.** The message is now
     `FATAL: could not discover an IPv4 address for JS_PUBLIC_HOST=…`.
 
-- **Untagged V-2 to V-4 (2026-09-14): `34935a2` (O-80), `fc48ea6` (O-83), `4fbfaf4` (SC-87), `ae159b0` (SC-96)**
+- **Untagged changes (2026-09-14): `34935a2`, `fc48ea6`, `4fbfaf4`, `ae159b0`**
   - **A recorder, or an injector with `RECORD=1`, refuses to start until `RECORDING_OPT_IN=yes`**
-    is set in its env file (SC-96). It logs `recorder: RECORDING_OPT_IN=<unset> (recording opt-in,
+    is set in its env file. It logs `recorder: RECORDING_OPT_IN=<unset> (recording opt-in,
     default off)` and then a FATAL line. Set it only after the room has been told it is being
     recorded.
-  - A room created with `spatial_audio=false` is a flat mix (O-80). A room created without the key
-    stays spatial (O-83); V-2 alone briefly made it flat.
-  - Voice dots: each listener receives `{p:0, v:false}` for sources it cannot hear (SC-87). This
+  - A room created with `spatial_audio=false` is a flat mix. A room created without the key
+    stays spatial; the first of these changes alone briefly made it flat.
+  - Voice dots: each listener receives `{p:0, v:false}` for sources it cannot hear. This
     changes the protocol payload only; there is no config change.
-- **`3618e9a` (O-75), released in 1.1.0**
+- **`3618e9a`, released in 1.1.0**
   - **A participant whose PeerConnection never comes up is reaped** `JS_JOIN_MEDIA_TIMEOUT_S`
     (default 30 s) after joining, logging `[slvoice] <display> reaped from room <id>: no media <n>s
     after join`. Before, it held its roster row and mix slot, and kept the room from its grace destroy,
     for as long as its Janus session lived. This default deliberately changes behaviour: it is the fix.
     `JS_JOIN_MEDIA_TIMEOUT_S=0` restores the old behaviour. A participant that had media and lost it is
-    unaffected (the O-56 hangup path).
-- **`b96e7b3` (slice 6m) + hotfix 6m-1**
-  - **Blank `JS_API_SECRET` or `JS_ADMIN_SECRET` now refuses to start (O-65).**
+    unaffected (the hangup path).
+- **`b96e7b3` and its follow-up hotfix `8d56823`**
+  - **Blank `JS_API_SECRET` or `JS_ADMIN_SECRET` now refuses to start.**
     `[entrypoint] FATAL: … empty; refusing to start. Set JS_API_SECRET=<the sim's
     APIToken> and JS_ADMIN_SECRET=<the sim's AdminAPIToken> in .env, or set
     ALLOW_INSECURE_DEV=true in .env …`. Set both secrets. `ALLOW_INSECURE_DEV=true`
     is for a throwaway dev box only.
   - The plugin's full offer/answer SDP dumps moved from INFO to VERB, with ICE
-    credentials redacted (O-66). Log content only.
+    credentials redacted. Log content only.
   - New start-up log lines: the effective-value INFO block, the "admin API is
     reachable on all interfaces" WARNING when `JS_ADMIN_BIND` is unset, and the
     private-only `nat_1_1_mapping` WARNING. Log content only.
-  - Slice 6m alone also bound admin to `127.0.0.1` and turned WebSockets off.
-    Hotfix 6m-1 reverted both, so upgrading straight to 6m-1 changes neither.
-- **`1859a7f` (slice 5)**: empty non-permanent rooms are destroyed after
+  - `b96e7b3` alone also bound admin to `127.0.0.1` and turned WebSockets off.
+    `8d56823` reverted both, so upgrading straight to `8d56823` changes neither.
+- **`1859a7f`**: empty non-permanent rooms are destroyed after
   `JS_EMPTY_ROOM_GRACE_S` (60 s); `0` restores rooms that live until restart.
 - **`fc39fb5` (v0.3.1)**: `keep_private_host` defaults to `true` when a public
   address is set.
 
 ## One-time migrations
 
-- **Slice A.1:** none required. An install that added its router's public IPv4 to
+- **Public address discovery:** none required. An install that added its router's public IPv4 to
   `JS_NAT_EXTRA_IPS` only to work around a hairpinned DDNS name can remove it once the start log
   shows discovery finding that address (the static value goes stale when the IP changes).
 - **Regionserver build 1.1.392+ (connectors):** connector NPC ids are now derived
   and stable. On the first restart after upgrading, each NPC's id changes once, so
   re-edit `DISPLAY` in `recorder.env` / `injector.env` one last time. See
   `connectors/README.md`.
-- Mixer configuration: none for hotfix 6m-1. An install upgrading from before
+- Mixer configuration: none for `8d56823`. An install upgrading from before
   `b96e7b3` with a blank secret must set it (above).
 
 ### External access: public hostname and split-horizon ICE
@@ -848,7 +849,7 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
 
 - **`JS_PUBLIC_HOST`**: a DNS/DDNS hostname (e.g. `grid.example.org`). `JS_PUBLIC_IP` may
   also hold one when `JS_PUBLIC_HOST` is unset. `nat_1_1_mapping` needs an **IP literal**, so the
-  entrypoint **discovers the name's public address at start** (slice A.1).
+  entrypoint **discovers the name's public address at start**.
 
   **Sources.** With `JS_PUBLIC_IP_DISCOVERY=auto` (the default) it asks three sources, in order,
   and logs what each returned:
@@ -859,7 +860,7 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
      resolver.
   3. **The container resolver,** last. A router that hairpins its own DDNS name, or a
      split-horizon/hosts pin, answers it with the LAN address. For example `grid.example.org`
-     → `192.168.0.225`, which is why the pre-A.1 resolution produced a private-only mapping.
+     → `192.168.0.225`, which is why the earlier resolution produced a private-only mapping.
 
   **Winner.** The first public answer wins. If no source gives a public answer, the first answer of
   any kind is used and the verdict says so. The start log reads:
@@ -872,7 +873,7 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
   ```
 
   **Other modes.** `stun` and `dns` use that source only. `static` uses the container resolver
-  alone, once, as before A.1. If no source answers, the container **refuses to start** (`FATAL:
+  alone, once, as before discovery existed. If no source answers, the container **refuses to start** (`FATAL:
   could not discover an IPv4 address for JS_PUBLIC_HOST=…`) rather than coming up silently broken.
   A literal `JS_PUBLIC_IP` is kept after the discovered address (for LAN viewers), then
   `JS_NAT_EXTRA_IPS`.
@@ -964,7 +965,7 @@ depend on ICE. Only the WebRTC media leg needs the mapping.
 `docker-compose.yml` — it skips the proxy entirely and lets Janus read the host
 interfaces directly for ICE. That block is kept commented for exactly this case.
 
-## Source addresses (A.6)
+## Source addresses
 
 **The question.** Does a viewer's real address reach Janus, or does the path in front of the container rewrite it?
 It decides whether the ICE diagnostics can say relay or direct, and whether anything in the mixer could ever act on
@@ -982,15 +983,15 @@ Janus's selected pair is compared with the addresses the peer holds. The Linux c
 | (c) `network_mode: host`, Linux dockerd | `172.31.66.10:10019 [host,udp] <-> 172.31.66.20:44865 [host,udp]` | **preserved** | `direct` |
 
 The Docker Desktop row ran against a production mixer (image `1e40da39`); the classifier reads prflx on the
-peer's side as `undetermined` in both images. An earlier pass of the three Linux cases with the A.5 image found the
+peer's side as `undetermined` in both images. An earlier pass of the three Linux cases with the earlier image found the
 same pairs' shape (prflx/host, prflx/host, host/host), which that image's classifier still called `undetermined` for
-(a) and (b). That underclaim is why A.6 changed the classifier.
+(a) and (b). That underclaim is why the classifier now reads the peer's side.
 
 **What this means:**
 - **It is not a container limitation. It is Docker Desktop's.** Docker Desktop forwards a published port from
   Windows into its VM with its own proxy, and every viewer then reaches Janus from `172.30.0.1`. A Linux host's
   published ports use DNAT, and the viewer's own address arrives. Janus's *local* side still reads prflx there,
-  because the DNAT changes Janus's address, not the peer's; the classifier reads the peer's side (A.6).
+  because the DNAT changes Janus's address, not the peer's; the classifier reads the peer's side.
 - **Product limitation on Docker Desktop:** no per-viewer address reaches the mixer, so the diagnostics path is
   always `undetermined` and relay cannot be told from direct. Media works regardless.
 - **Not measured:** (b) and (c) on Docker Desktop. Each needs an engine restart, which would have stopped the
@@ -1003,7 +1004,7 @@ same pairs' shape (prflx/host, prflx/host, host/host), which that image's classi
 |---|---|---|---|
 | (a) published ports (shipped) | full: each port is published, and `JS_ADMIN_BIND` narrows the admin port | one `docker-proxy` process per published port and family: 46 and 48 counted in two runs of the 23-port test mixer (the shipped 204 ports mean hundreds) | Docker Desktop (Windows, macOS) and Linux |
 | (b) `userland-proxy: false` | as (a) | a **daemon-wide** setting in `/etc/docker/daemon.json` that changes every container on the host; `docker-proxy` processes fell to 2; `127.0.0.1:24223` from the Docker host still answered | Linux (Docker Desktop not measured) |
-| (c) `network_mode: host` | **none**: Janus binds HTTP, admin and WebSockets on every host interface; `JS_ADMIN_BIND` has no effect, and only a host firewall narrows them; ports can collide with host services | no proxies, no port publishing | Linux only. On Docker Desktop the ports land in the VM and the Windows host cannot reach them (verified before A.1) |
+| (c) `network_mode: host` | **none**: Janus binds HTTP, admin and WebSockets on every host interface; `JS_ADMIN_BIND` has no effect, and only a host firewall narrows them; ports can collide with host services | no proxies, no port publishing | Linux only. On Docker Desktop the ports land in the VM and the Windows host cannot reach them (verified before address discovery existed) |
 
 **Recommendation.**
 - **The shipped compose file stays on published ports (a).** It is the only mode that works on Docker Desktop,

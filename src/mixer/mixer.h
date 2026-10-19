@@ -8,7 +8,7 @@
  * \brief    Per-region spatial voice mixer — model declarations (design record)
  *
  * \details  This header captured the tick model BEFORE the mixer existed, to
- * agree the shape of the Phase-2 work. That model is now REALISED (Phase 2,
+ * agree the shape of the mixer work. That model is now REALISED (in
  * v0.6.0), but on the plugin's own `janus_slvoice_room` / `janus_slvoice_session`
  * structs in src/janus_slvoice.c rather than on the aspirational \ref slv_region
  * / \ref slv_participant types below — those structs already carry every piece
@@ -32,8 +32,8 @@
  * constants below are the canonical tick parameters (mirrored in the plugin as
  * SLV_TICK_MS / SLV_RATE / SLV_FRAME_SAMPLES). The slv_region / slv_participant
  * struct + function declarations that follow are a SUPERSEDED design record,
- * kept for provenance; they are not compiled into the plugin and Phase 3
- * (spatialization) extends the shipping room/session structs, not these.
+ * kept for provenance; they are not compiled into the plugin and
+ * spatialization extends the shipping room/session structs, not these.
  *
  * Written against the Janus 1.4.1 plugin API; forward-declares the Janus
  * types it will need rather than pulling the whole core in here.
@@ -89,7 +89,7 @@ typedef struct slv_participant {
 
 	/*! \brief Latest spatial position from the data channel (region-local). */
 	slv_position position;
-	/*! \brief Facing/orientation, if provided; reserved for Phase 1 panning. */
+	/*! \brief Facing/orientation, if provided; reserved for panning. */
 	slv_position facing;
 
 	/*! \brief Linear gain applied to this participant as a SOURCE (0.0–1.0). */
@@ -98,7 +98,7 @@ typedef struct slv_participant {
 	gboolean muted;
 
 	/*! \brief Opaque per-participant jitter buffer of decoded PCM frames.
-	 * Defined and managed in the Phase-1 implementation. */
+	 * Defined and managed in the implementation. */
 	void *jitter;
 
 	/*! \brief Refcount / lifecycle guards (mirrors the plugin session pattern). */
@@ -134,7 +134,7 @@ typedef struct slv_region {
 	janus_refcount ref;
 } slv_region;
 
-/* ---- Region lifecycle (Phase 1: to be implemented) ------------------------ */
+/* ---- Region lifecycle (to be implemented) -------------------------------- */
 
 /*! \brief Create a region mixing domain and (optionally) start its tick thread. */
 slv_region *slv_region_create(const char *region_id, gint64 room);
@@ -145,7 +145,7 @@ gboolean slv_region_start(slv_region *region);
 /*! \brief Ask the tick thread to stop and join it. */
 void slv_region_stop(slv_region *region);
 
-/* ---- Participant lifecycle (Phase 1: to be implemented) ------------------- */
+/* ---- Participant lifecycle (to be implemented) --------------------------- */
 
 /*! \brief Create a participant bound to a Janus handle. */
 slv_participant *slv_participant_create(guint64 id, janus_plugin_session *handle, const char *display);
@@ -156,14 +156,14 @@ gboolean slv_region_add_participant(slv_region *region, slv_participant *partici
 /*! \brief Remove a participant from a region. */
 void slv_region_remove_participant(slv_region *region, slv_participant *participant);
 
-/* ---- The tick (Phase 1: the actual mixer) --------------------------------- */
+/* ---- The tick (the actual mixer) ------------------------------------------- */
 
 /*! \brief Produce one 20ms mixed frame per active listener and relay it.
  *
  * Called once per ::SLV_TICK_INTERVAL_MS by the region's tick thread. For each
  * listener it sums the (gained, spatialised) contributions of the other
  * participants, encodes, and relays via the Janus core. Pure declaration for
- * now; the implementation is the core of Phase 1. */
+ * now; the implementation is the core of the mixer. */
 void slv_region_tick(slv_region *region);
 
 #endif /* JANUS_SLVOICE_MIXER_H */

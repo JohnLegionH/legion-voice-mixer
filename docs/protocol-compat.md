@@ -31,17 +31,17 @@ construct:
 | `leave`    | `room`, `id` | `AudioBridgeLeaveRoomReq` |
 | `list`     | — (console only) | `AudioBridgeListRoomsReq` |
 | `listparticipants` | `room` (console only) | `AudioBridgeListParticipantsReq` |
-| `configure`| — | `AudioBridgeConfigRoomReq` — **dead code**, never constructed (§2.5/§3.2) |
+| `configure`| — | `AudioBridgeConfigRoomReq` — **dead code**, never constructed (`current-architecture.md` §2.5/§3.2) |
 
 Session-level ICE `trickle` is core Janus (not a plugin request) and is
 unaffected by this constraint.
 
-> **Reconciled (Phase 1; still true at 1.1.0).** The plugin implements exactly these shapes and the
+> **Reconciled (still true at 1.1.0).** The plugin implements exactly these shapes and the
 > audiobridge **response** envelopes (top-level `audiobridge` key, `error_code`
 > matching audiobridge's numeric codes — incl. `create` on an existing room
 > returning **486**, which `JanusAudioBridge.CreateRoom` treats as success,
-> §3.3). `configure` is accepted defensively but the C# side never sends it.
-> Note (§4): the OpenSim side does **not** touch the data channel — it forwards
+> `current-architecture.md` §3.3). `configure` is accepted defensively but the C# side never sends it.
+> Note (`current-architecture.md` §4): the OpenSim side does **not** touch the data channel — it forwards
 > the viewer SDP (incl. `m=application`) verbatim — so the plugin answers the
 > data channel and parses SLData itself.
 

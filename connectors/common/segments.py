@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""WAV segment writer for the connector peers (docs/voice/connector-build-plan.md;
-written for the S-CON-4 recorder, reused by the S-CON-6 injector's RECORD=1).
+"""WAV segment writer for the connector peers (written for the recorder,
+reused by the injector's RECORD=1).
 
 Deliberately dependency-free (stdlib only) so the rollover and header behaviour is
 unit-testable without aiortc/av installed. One segment file per SEGMENT_SECONDS of
@@ -25,7 +25,7 @@ def frame_pcm(plane_bytes: bytes, samples: int, channels: int) -> bytes:
     Decoder-allocated planes are oversized — libopus sizes the buffer for its 120 ms
     maximum frame (5760 samples), a 20 ms decode fills 960 and leaves the slack
     zeroed. Serialising the whole plane appends that slack, observed live as 4800
-    zero samples after every 960 (62a32383_20260901-034027.wav, non-zero fraction
+    zero samples after every 960 (non-zero fraction
     exactly 1/6). Always slice to the frame's own sample count.
     """
     return plane_bytes[: samples * channels * 2]

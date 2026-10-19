@@ -1,12 +1,12 @@
-# Design Brief — Phase 3b: Spatial DSP
+# Design Brief — Spatial DSP (distance attenuation and panning)
 
 > **THIS DOCUMENT DESCRIBES A DESIGN THAT HAS SINCE SHIPPED. DO NOT READ IT AS CURRENT
 > STATE.**
 >
-> Phase 3b is **implemented** as of `janus.plugin.slvoice` **v0.9.0**
+> This design is **implemented** as of `janus.plugin.slvoice` **v0.9.0**
 > (`src/janus_slvoice.c:73`). Distance cull with hysteresis, distance attenuation and
 > constant-power azimuth panning all run in `janus_slvoice_room_tick`, driven by
-> viewer-supplied SLData geometry with the §7.1 camera leash applied in
+> viewer-supplied SLData geometry with the camera leash (`webrtc-voice-spec.md` §7.1) applied in
 > `janus_slvoice_snapshot_geometry_locked`.
 >
 > The body below is the **pre-implementation** design, verified against
@@ -30,14 +30,16 @@ rewritten.
 **Frozen:** 2026-08-18.
 **Authority:** `docs/voice/webrtc-voice-spec.md` §5 (`:97`), §6 (`:110`), §7.1
 (`:125`); `docs/voice/mixer-feed-protocol.md` §6 (`:420`–`:436`).
+Bare section numbers elsewhere in this document (§3.3, §5, §6, §7.1) refer to
+`docs/voice/webrtc-voice-spec.md`.
 **Verified against:** `legion-voice-mixer @ c03de3a`, `tranquillity-develop @
 f8fcb34653`, the Firestorm viewer source (read-only reference).
 
 ## Purpose
 
 Make voice spatial. This is the original complaint that motivated building a mixer
-rather than using AudioBridge, and it is the headline feature. Phase 3a closed the
-parcel/estate semantics slice; nothing audible has changed yet.
+rather than using AudioBridge, and it is the headline feature. Sim-authoritative
+per-listener visibility is already delivered; nothing audible has changed yet.
 
 ## What already exists
 
@@ -72,7 +74,7 @@ Adequate for amplitude panning; revisit before anything leans on `lh` for HRTF.
 
 ## Position authority
 
-Audibility is sim-authoritative (§3.3) and 3a delivered it. Spatial *rendering* is a
+Audibility is sim-authoritative (§3.3) and the visibility feed already delivers it. Spatial *rendering* is a
 separate question the spec leaves open.
 
 All geometry is viewer-supplied over SLData today. `VoiceStateFeeder` carries
@@ -87,7 +89,7 @@ cannot make an avatar audible where they were not permitted. It can only alter
 rendering *within an already-permitted set*. This holds structurally: exclusion is
 applied as a hard drop (`janus_slvoice.c:2009`–`:2010`) and excluded sources never
 reach the sum (`mix.h:22`–`:28`), so no spatial gain can attenuate-but-not-silence
-them. **3b must keep exclusion a hard drop and never fold it into the spatial gain
+them. **Spatial rendering must keep exclusion a hard drop and never fold it into the spatial gain
 vector.**
 
 **Decision:** ship on viewer-supplied geometry. The sim position feed is a later
@@ -96,7 +98,7 @@ estate-level leash configuration.
 
 ## Scope
 
-**First slice:**
+**Initial scope:**
 
 1. Geometry snapshot pass, tick-owned, including the per-participant `lp` self-clamp
    (§7.1 leash)
@@ -108,10 +110,10 @@ estate-level leash configuration.
 **Deferred, each because §6 itself conditions it on occupancy or on HRTF existing:**
 
 - **HRTF and ITD** (§6 near tier) — needs an HRIR set, convolution, allocation
-  discipline. Its own phase.
+  discipline. A separate piece of work.
 - **Azimuth binning and crossfades** — §6 states binning only pays above a
-  talker-count threshold and that low-occupancy regions never run that path. Legion
-  is low-occupancy; building it now adds artifacts and buys nothing.
+  talker-count threshold and that low-occupancy regions never run that path. The target
+  deployments are low-occupancy; building it now adds artifacts and buys nothing.
 - **Far-tier mono ambience sum** — a load optimisation, premature before a crowded
   region exists.
 - **Dirty-flagged coefficient recompute** — optimises HRIR selection, which does not
@@ -132,7 +134,7 @@ estate-level leash configuration.
 - **Allocation-free after session setup** (§6). Per-(listener, source) state — including
   the cull hysteresis flag — in flat preallocated arrays sized at setup. This state
   belongs in the existing per-listener inner loop (`:1988`–`:2011`) alongside the
-  mute and gain build; the slice adds computation there, not a new loop.
+  mute and gain build; this work adds computation there, not a new loop.
 - **20 ms tick budget.** A spatial path that pushes `ge20ms` or `overruns` off zero is
   a failure regardless of how it sounds.
 - **No server-side NS or AGC, ever** (§5). **48 kHz float end-to-end, no resampling
@@ -152,7 +154,7 @@ origin from L's avatar `sp` while distance comes from `lp` makes camming incoher
 the source would pan from the avatar but attenuate from the camera. A single origin
 keeps §7.1 camming behaviour consistent.
 
-`S.sh` is unused in this slice; basic azimuth panning does not need the talker's
+`S.sh` is unused in this scope; basic azimuth panning does not need the talker's
 facing.
 
 ## Attenuation model and configuration
@@ -202,9 +204,9 @@ requested camera position onto a 50 m sphere around the avatar before
 therefore spoofable; SL's server re-tethers independently for exactly that reason
 (`:1224`–`:1230`). A modified viewer can send unclamped `lp`, and a mixer
 spatialising from raw `lp` would follow the camera arbitrarily far — still bounded by
-3a, but able to render a permitted-but-distant talker from an arbitrary vantage.
+the visibility feed, but able to render a permitted-but-distant talker from an arbitrary vantage.
 
-**Included in the first slice**, not deferred: it is a per-participant self-clamp —
+**Included in the initial scope**, not deferred: it is a per-participant self-clamp —
 for each participant P, clamp `P.lp` to within `MAX_AUDIO_DIST` of `P.sp`, projection
 lifted from `:1213`, in the ×100 unit (5000). It lives naturally in the geometry
 snapshot pass, applied once per tick before any listener reads it, with no extra
@@ -217,7 +219,7 @@ config lands.
 **Composite reach — expected, not a leash failure.** Leash (camera ≤ 50 m from
 avatar) plus cutoff (source ≤ 60 m from camera) means a camming listener can render a
 talker up to ~110 m from their own avatar. Within §7.1's intent and safe under the
-security model: permission derives from the avatar's authoritative position via 3a,
+security model: permission derives from the avatar's authoritative position via the visibility feed,
 so this affects only rendering of already-permitted talkers.
 
 ## Acceptance
@@ -229,21 +231,22 @@ tick histogram shows no `ge20ms` and no `overruns` across the session.
 **Plus a structural regression assertion, not a listening test:** an excluded source
 must contribute *exactly zero* to the mix — RMS-0, not summed — verified structurally.
 A bug that reintroduces an excluded source as a quiet signal rather than silence is
-inaudible in casual testing and would silently undo 3a. Re-run the
-`parcel-voice-semantics.md` §O procedure to confirm enforcement is unchanged.
+inaudible in casual testing and would silently undo sim-authoritative visibility. Re-run the
+exclusion enforcement checks (an excluded avatar is inaudible to the listener) to confirm
+enforcement is unchanged.
 
 ## Open question — non-blocking
 
 **Do neighbour-room handles carry `sp`?** `query_session` exposes
 `last_data_fields_seen` per handle, so this is one read on a handle in a neighbouring region with
-avatars online. **The answer does not change this slice:** even if neighbour handles
+avatars online. **The answer does not change this scope:** even if neighbour handles
 carry `sp`, it is in the *neighbour region's* coordinate frame, so cross-region
 spatialisation needs a region-offset transform regardless. This is a second
 independent reason cross-region and child-agent spatial belongs with the sim-position
 feed, and it confirms same-region-two-avatars as the right first cut — it sidesteps
 both the frame transform and the child-position gap.
 
-**Correction (2026-09-19, slice 0.8g, from the viewer source): the frame premise above is wrong.** The viewer does not
+**Correction (2026-09-19, from the viewer source): the frame premise above is wrong.** The viewer does not
 send region-local positions. Firestorm (`indra/newview/llvoicewebrtc.cpp`) builds `sp` from
 `gAgentAvatarp->getPositionGlobal()` plus a 1 m head bump (`:1108`, `:1111`) and `lp` from
 `region->getPosGlobalFromRegion(camera origin)` (`:1119`), both **global**, ×100 (`:1241-1256`), and sends the
@@ -253,14 +256,14 @@ SLData, and the mixer stores the values as they arrive (`sldata.c:134-146`). Bec
 global frame and the mixer only uses differences, **avatar-to-avatar distance across a region border is already
 correct** - no region-offset transform is needed. (The mixer's `sldata.h:59` comment "region-local metres" is wrong
 on both counts: global, and ×100.) The one party this breaks is a peer that sends a REGION-LOCAL position: a
-connector fixing O-62 must send global centimetres (region origin + its Position), or it is off by the region's global
+connector must send global centimetres (region origin + its Position), or it is off by the region's global
 origin from every avatar and always culled. The child-position gap is unaffected by this correction.
 
 ---
 
 ## AMENDMENT 1 — per-pair state must be UUID-keyed (2026-08-18)
 
-Recon for slice one item 1 surfaced a constraint the body does not pin.
+Recon for scope item 1 (geometry snapshot) surfaced a constraint the body does not pin.
 
 The Constraints section requires per-(listener, source) state in "flat preallocated arrays sized at setup." That wording permits, and a naive reading suggests, an array indexed by source position in the tick's `sess[]` array. **That would be wrong.** `sess[]` is populated from `room->participants` hash iteration (`janus_slvoice.c:1946`-`:1960`), whose order changes across ticks as participants join and leave, so a position-indexed slot refers to a different pair each tick.
 
@@ -271,13 +274,13 @@ It also cannot reuse `peer_ctl`: that array is `SLV_MAX_PEER_ADJ` = 32 (`sldata.
 **Also recorded from the same recon:**
 
 - The geometry snapshot is inline struct fields on the session, not a heap buffer. This is stronger than the `decbuf` pattern the body names — zero allocation ever, rather than allocation at join — and adds nothing to `media_alloc_locked`.
-- The repo has **no** vector or quaternion math helpers (`sldata.h:60`, `:63` define the types as plain aggregates; no `vec3_`/`quat_`/dot/cross/normalize exists anywhere). Slice one writes the first ones: subtract, magnitude, and scaled-add for the leash projection.
+- The repo has **no** vector or quaternion math helpers (`sldata.h:60`, `:63` define the types as plain aggregates; no `vec3_`/`quat_`/dot/cross/normalize exists anywhere). This work writes the first ones: subtract, magnitude, and scaled-add for the leash projection.
 
 ---
 
 ## AMENDMENT 2 — per-pair state requires LRU eviction (2026-08-18)
 
-Recon for slice one item 2 surfaced a gap Amendment 1 did not address.
+Recon for scope item 2 (distance culling) surfaced a gap Amendment 1 did not address.
 
 Amendment 1 pinned per-(listener, source) state as a flat, UUID-keyed array sized `SLV_MAX_MIX` (64). It did not specify behaviour when the number of *distinct* UUIDs seen over a session exceeds the slot count, which join/leave/rejoin churn guarantees.
 
@@ -297,13 +300,13 @@ Amendment 1 pinned per-(listener, source) state as a flat, UUID-keyed array size
 
 ## AMENDMENT 3 — the config surface does not exist as the body assumes (2026-08-18)
 
-Recon for slice one item 3 surfaced a conflict between the body and the mixer's architecture.
+Recon for scope item 3 (distance attenuation) surfaced a conflict between the body and the mixer's architecture.
 
 The body's attenuation section specifies configuration as "plugin jcfg, per-region, expressed in metres." **There is no per-region config channel in the mixer.** `janus_slvoice_init` reads a single process-wide `janus.plugin.slvoice.jcfg`, extracts exactly two things — static rooms and `general.echo_autostart` — and then frees the config without retaining a settings struct. Rooms are created dynamically, so nothing associates configuration with a region.
 
 Adding `general.*` items would therefore ship **process-wide** configuration while the body claims per-region, which is worse than shipping neither.
 
-**Decision:** spatial constants remain compile-time `#define`s through slice one, matching the leash, cutoff, and re-add constants already there. The per-region config surface is deferred to a dedicated item, which must first reconcile per-region intent against a one-jcfg, dynamically-created-room mixer. The body's "per-region" wording stands as intent, not as a description of what slice one ships.
+**Decision:** spatial constants remain compile-time `#define`s in this first implementation, matching the leash, cutoff, and re-add constants already there. The per-region config surface is deferred to a dedicated item, which must first reconcile per-region intent against a one-jcfg, dynamically-created-room mixer. The body's "per-region" wording stands as intent, not as a description of what this first implementation ships.
 
 **Also recorded from the same recon:**
 
@@ -316,15 +319,15 @@ Adding `general.*` items would therefore ship **process-wide** configuration whi
 
 ## AMENDMENT 4 — panning conventions, pinned (2026-08-18)
 
-Recon for slice one item 4 found that none of the conventions panning depends on are established anywhere in the repo. They are pinned here so the implementation cannot settle them by accident.
+Recon for scope item 4 (panning) found that none of the conventions panning depends on are established anywhere in the repo. They are pinned here so the implementation cannot settle them by accident.
 
 **Stereo pan sign — DECIDED:** a source to the listener's **right** is louder in the **right** output channel. Nothing in the repo, the viewer, or the docs fixed this; it is chosen here explicitly.
 
 **Frame:** `sp` and `lp` are **global** coordinates, ×100 (centimetres), integers on the wire - NOT region-local, and
-the `sldata.h:59` comment that said so was wrong and is corrected (slice 0.8h). Firestorm builds `sp` from
+the `sldata.h:59` comment that said so was wrong and is corrected. Firestorm builds `sp` from
 `gAgentAvatarp->getPositionGlobal()` and `lp` from `region->getPosGlobalFromRegion(camera)`
 (`llvoicewebrtc.cpp:1108`, `:1119`, `:1241-1256`). The mixer only ever uses differences, so every participant must be
-in this one frame: a connector sends (region global origin + its Position) x 100 (O-62, slice 0.8h). Axis semantics are SL/OpenSim convention, external to this repo: X east, Y north, Z up, right-handed. Azimuth uses `S.sp − L.lp`, so the origin is immaterial and only axis directions matter.
+in this one frame: a connector sends (region global origin + its Position) x 100. Axis semantics are SL/OpenSim convention, external to this repo: X east, Y north, Z up, right-handed. Azimuth uses `S.sp − L.lp`, so the origin is immaterial and only axis directions matter.
 
 **Orientation:** `lh` is the listener/camera orientation, set from `setListenerPosition`'s rot (`llvoicewebrtc.cpp:1156`, `:1168`); `sh` is the avatar's (`:1173`, `:1193`). `slv_quat{x,y,z,w}` maps to `LLQuaternion (x,y,z,w)`, confirmed by the viewer's serialization order (`:1260`-`:1263`). Forward is local +X rotated by the orientation — at identity, forward is +X (east). Positive rotation about +Z is counter-clockwise viewed from above. These are external SL conventions, not repo-established.
 
@@ -356,13 +359,13 @@ Mapping azimuth linearly to pan position would be **discontinuous at ±π**: a s
 
 ---
 
-## AMENDMENT 6 — slice one complete; the constant-power level change (2026-08-18)
+## AMENDMENT 6 — first implementation complete; the constant-power level change (2026-08-18)
 
-Slice one is built, deployed, and verified: geometry snapshot with the §7.1 camera leash, distance culling with hysteresis, distance attenuation, and constant-power amplitude panning.
+The first implementation is built, deployed, and verified: geometry snapshot with the §7.1 camera leash, distance culling with hysteresis, distance attenuation, and constant-power amplitude panning.
 
 **Verification was numeric throughout, per Amendment 4.** Attenuation was confirmed by `last_mix_rms` falling from 0.19 to 0.027 as the listener moved to roughly 40 m from a fixed talker, against a predicted gain of 0.16. Panning was confirmed by rotating a stationary listener through a full circle beside a fixed talker and observing `last_mix_rms_l` / `last_mix_rms_r` sweep from a ratio of ~200:1 (hard left) through parity to ~1:9000 (hard right) and back. No listening test was used at any point.
 
-**A centred source is approximately 3 dB quieter than before slice one.** Previously both channels received the full scalar gain, so a source contributed `2g²` of power. Under constant-power panning a centred source contributes `2(0.707g)² = g²`. This is inherent to any constant-power pan law — the previous behaviour was double-mono, which is 3 dB hot relative to a correct pan — and must **not** be "corrected" by scaling the pan gains, which would break the `L² + R² = 1` property `tests/test_pan.c` asserts. If overall level needs raising, that is a separate output-gain decision, not a pan-law change.
+**A centred source is approximately 3 dB quieter than before this change.** Previously both channels received the full scalar gain, so a source contributed `2g²` of power. Under constant-power panning a centred source contributes `2(0.707g)² = g²`. This is inherent to any constant-power pan law — the previous behaviour was double-mono, which is 3 dB hot relative to a correct pan — and must **not** be "corrected" by scaling the pan gains, which would break the `L² + R² = 1` property `tests/test_pan.c` asserts. If overall level needs raising, that is a separate output-gain decision, not a pan-law change.
 
 **Mutation testing found a decorative test.** `test_pitch_independent` as originally written could not fail: its source was level and on the pitch axis, so a dropped horizontal projection left it passing. Review by hand had not caught this. Where unit tests are the acceptance criteria, verifying that they can fail is part of writing them.
 
@@ -370,7 +373,7 @@ Slice one is built, deployed, and verified: geometry snapshot with the §7.1 cam
 
 ## AMENDMENT 7 — the exclusion feed names avatars, not handles (2026-08-18)
 
-Recon for the §M collision fix established the boundary that decides its design.
+Recon for the fix to two sessions colliding on one display name established the boundary that decides its design.
 
 **Agent UUID is the only identifier either feed carries.** The visibility batch is keyed purely by agent UUID (`visbatch.h:16`-`:17`, `:58`-`:60`), and the viewer's peer_ctl feed likewise (`sldata.h:74`-`:80`). Neither carries a handle, session, or connection id.
 

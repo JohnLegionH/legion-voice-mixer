@@ -1,13 +1,10 @@
-# Voice connector — recorder peer (S-CON-4)
+# Voice connector — recorder peer
 
 A headless WebRTC peer (Python 3.12 + aiortc) that joins one `janus.plugin.slvoice`
 room as a sim-registered connector NPC identity and writes the received room
-mixdown to rolling WAV segments. Design and authority:
-`docs/voice/connector-build-plan.md` S-CON-4, `docs/voice/connector-assessment-20260831.md` §2,
-`docs/voice/connector-design-brief.md` Amendment 2.
+mixdown to rolling WAV segments. Design: `docs/voice/connector-design-brief.md`.
 
-It **never sends audio or SLData** — it is the silent participant the assessment
-describes, and its recording is subject to parcel/estate exclusions because the sim
+It **never sends audio or SLData** — it is a silent participant, and its recording is subject to parcel/estate exclusions because the sim
 registered the NPC identity it joins under (the mixer fans the NPC's exclusion
 column out to this peer by `display`).
 
@@ -22,9 +19,9 @@ DISPLAY is stable across regionserver restarts from build 1.1.392-alpha+d3471022
 
 Copy `npc=` into `DISPLAY` and `room=` into `ROOM`. Do **not** invent a DISPLAY:
 the sim's policy record owns the identity; an unregistered UUID records without
-exclusions (and is exactly the O-46 shape the ledger tracks).
+exclusions.
 
-## Recording opt-in (SC-96)
+## Recording opt-in
 
 The recorder **refuses to start** unless `RECORDING_OPT_IN=yes`. The default is off. Its first log
 line prints the effective value, e.g. `recorder: RECORDING_OPT_IN=<unset> (recording opt-in,
@@ -32,8 +29,8 @@ default off)`, followed by a FATAL line and a non-zero exit when the gate refuse
 applies the same gate when `RECORD=1`.
 
 Setting `RECORDING_OPT_IN=yes` is the operator's statement that the people in the room have been
-told they are being recorded and have agreed (spec §3.5). The gate does not collect consent
-from each participant; that needs the sim (see the ledger). It only stops an accidental or
+told they are being recorded and have agreed (`docs/voice/webrtc-voice-spec.md` §3.5). The gate does not collect consent
+from each participant; that needs the sim. It only stops an accidental or
 unreviewed start.
 
 A running recorder declares itself at join (`"recorder": true`), and the mixer marks it:
@@ -43,11 +40,11 @@ A running recorder declares itself at join (`"recorder": true`), and the mixer m
 The in-world disclosure that participants see comes from the sim registering the connector NPC
 (the `[CONNECTOR]` record), so still join under the registered `DISPLAY`.
 
-## Join capability (slice 0.7b)
+## Join capability
 
 Against a mixer with `JS_JOIN_CAP_REQUIRED=1`, set `CONNECTOR_CAP_URL` (the region's
 `/voice/connector/<name>/join-cap`) and `CONNECTOR_CAP_SECRET` (the record's `CapabilitySecret`) in `recorder.env`,
-both or neither; see [../README.md](../README.md#join-capability-slice-07b). The recorder then fetches a capability
+both or neither; see [../README.md](../README.md#join-capability). The recorder then fetches a capability
 before every join and never joins without one. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network.
 
 ## Running
@@ -90,10 +87,10 @@ segments are unaffected.
 The segment writer (rollover, format-change roll, RIFF validity) is stdlib-only
 and tests without aiortc installed.
 
-## Layout note (S-CON-6)
+## Layout note
 
 The Janus session/join/poll/keepalive/teardown plumbing and the segment writer
-moved to `connectors/common/`, shared with the S-CON-6 injector peer; this
+live in `connectors/common/`, shared with the injector peer; this
 directory keeps only the recorder's own media behaviour. Behaviour is
 unchanged. The compose build context is `connectors/` so the image carries
 `common/`.

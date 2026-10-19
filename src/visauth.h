@@ -24,22 +24,22 @@
 #include <string.h>
 #include <strings.h>
 
-/*! \brief The wire protocol a mixer advertises in every peer_ctl_batch and heartbeat reply (§3). 2: understands
+/*! \brief The wire protocol a mixer advertises in every peer_ctl_batch and heartbeat reply. 2: understands
  * peer_ctl_heartbeat. 3: also understands peer_pos (src/possync.h), a sim's report of where each participant is. */
 #define SLV_VIS_PROTOCOL 3
 
-/*! \brief JS_VIS_STALE_MS default (§5). */
+/*! \brief JS_VIS_STALE_MS default. */
 #define SLV_VIS_STALE_MS_DEFAULT 8000
 /*! \brief Largest accepted JS_VIS_STALE_MS; anything above is ignored with a WARN. */
 #define SLV_VIS_STALE_MS_MAX 600000
-/*! \brief The sim's heartbeat interval (§3, VisAuthority.HeartbeatIntervalMs), used for the startup clamp. */
+/*! \brief The sim's heartbeat interval (VisAuthority.HeartbeatIntervalMs), used for the startup clamp. */
 #define SLV_VIS_HEARTBEAT_MS 1000
-/*! \brief The sim's admin round-trip bound ([JanusWebRtcVoice] AdminTimeoutMs, §5). */
+/*! \brief The sim's admin round-trip bound ([JanusWebRtcVoice] AdminTimeoutMs). */
 #define SLV_VIS_ADMIN_TIMEOUT_MS 5000
-/*! \brief One feeder tick of scheduling slip ([WebRtcVoice] VisibilityTickMs, §5). */
+/*! \brief One feeder tick of scheduling slip ([WebRtcVoice] VisibilityTickMs). */
 #define SLV_VIS_TICK_SLIP_MS 250
 
-/*! \brief The §5 constraint: the smallest staleness window a heartbeat interval allows,
+/*! \brief The staleness constraint: the smallest staleness window a heartbeat interval allows,
  * 2 x interval + 5000 + 250. For the sim's 1000 ms interval that is 7250 ms. */
 static inline uint64_t slv_vis_stale_min_ms(uint64_t interval_ms) {
 	return 2u * interval_ms + SLV_VIS_ADMIN_TIMEOUT_MS + SLV_VIS_TICK_SLIP_MS;
@@ -76,7 +76,7 @@ static inline void slv_vis_format_epoch(uint64_t epoch, char out[17]) {
 	snprintf(out, 17, "%016" PRIx64, epoch);
 }
 
-/*! \brief The §1.1 adoption rule applied to one message carrying room_epoch. */
+/*! \brief The epoch adoption rule applied to one message carrying room_epoch. */
 typedef enum slv_vis_epoch_verdict {
 	SLV_VIS_EPOCH_EQUAL = 0,   /*!< the stored authority: normal processing */
 	SLV_VIS_EPOCH_ADOPT,       /*!< greater than stored, or nothing stored: adopt, disarm every record */
@@ -109,7 +109,7 @@ static inline const char *slv_vis_epoch_verdict_str(slv_vis_epoch_verdict v) {
 	}
 }
 
-/*! \brief The §4 listener rule: which row a display stands in.
+/*! \brief The listener rule: which row a display stands in.
  *   1: no record (unarmed)                        -> silence
  *   2: record from another epoch                  -> silence
  *   3: current epoch, marked stale or not
@@ -156,7 +156,7 @@ static inline uint64_t slv_vis_would_silence_pairs(uint64_t n, uint64_t good) {
 typedef enum slv_vis_knob_status {
 	SLV_VIS_KNOB_OK = 0,        /*!< unset (default used) or a valid value */
 	SLV_VIS_KNOB_INVALID,       /*!< not a valid value: ignored, default used (the caller WARNs) */
-	SLV_VIS_KNOB_CLAMPED,       /*!< valid but below the §5 constraint: raised to it (the caller WARNs) */
+	SLV_VIS_KNOB_CLAMPED,       /*!< valid but below the staleness constraint: raised to it (the caller WARNs) */
 } slv_vis_knob_status;
 
 /*! \brief JS_VIS_FAIL_CLOSED: 1/true/yes/on enable, 0/false/no/off or unset disable; anything else is

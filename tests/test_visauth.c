@@ -280,7 +280,7 @@ static json_t *admin(const char *fmt, ...) {
 	return reply;
 }
 
-/* An arming replace (§2): each named listener with both columns empty. b may be NULL. */
+/* An arming replace: each named listener with both columns empty. b may be NULL. */
 static json_t *arm(guint64 room, const char *epoch, int gen, const char *a, const char *b) {
 	if(b == NULL)
 		return admin("{\"request\":\"peer_ctl_batch\",\"op\":\"replace\",\"room\":%" G_GUINT64_FORMAT ",\"excl\":{\"%s\":[]},"
@@ -356,7 +356,7 @@ static void test_pure_rules(void) {
 		"would_silence_pairs: the ordered pairs with a side not in row 4");
 }
 
-/* §5, §6.1: the knobs, the computed minimum clamp, and the plugin's loader. */
+/* The knobs, the computed minimum clamp, and the plugin's loader. */
 static void test_knobs_and_clamp(void) {
 	int fc = -1;
 	unsigned ms = 0;
@@ -392,7 +392,7 @@ static void test_knobs_and_clamp(void) {
 	CHECK(!slv_vis_fail_closed && slv_vis_stale_ms == 8000, "loader: back to the defaults");
 }
 
-/* WORK 1: keyed per room by avatar. Two sessions of one display share a record; the same display in two rooms has two
+/* Keyed per room by avatar. Two sessions of one display share a record; the same display in two rooms has two
  * independent records; a reconnect (a new session for the same avatar) keeps the record. */
 static void test_keying(void) {
 	slv_vis_fail_closed = TRUE;
@@ -438,7 +438,7 @@ static void test_keying(void) {
 	slv_vis_fail_closed = FALSE;
 }
 
-/* WORK 2, §4 with fail-closed on in a declared room: each row, the pair rule, the staleness window, recovery,
+/* Fail-closed on in a declared room: each row, the pair rule, the staleness window, recovery,
  * per-listener staleness in a live room, and a new epoch. Audio is the listener's mixed output level. */
 static void test_decision_table(void) {
 	slv_vis_fail_closed = TRUE;
@@ -517,7 +517,7 @@ static void test_decision_table(void) {
 	sender_pass(room);
 	CHECK(got(l, "S", "l") && got(s, "L", "l"), "row 3: going stale emits leave presence both ways");
 
-	/* Recovery in the same epoch: heartbeats alone restore it (assertion 10). */
+	/* Recovery in the same epoch: heartbeats alone restore it. */
 	json_t *r = heartbeat(E1, 3101, "{\"L\":1,\"S\":2}", FALSE);
 	json_t *rr = room_reply(r, 3101);
 	CHECK(is_status(rr, "ok") && json_array_size(json_object_get(rr, "stale_listeners")) == 0
@@ -526,7 +526,7 @@ static void test_decision_table(void) {
 	run_ticks(room, &src, 1, 5);
 	CHECK(l->last_mix_rms > 0.05, "recovery: audible again without a new arming");
 
-	/* Row 3 by the stale mark, one listener in a live room (assertion 14). */
+	/* Row 3 by the stale mark, one listener in a live room. */
 	janus_slvoice_session *m = new_session("M");
 	join(room, m, NULL);
 	drop(arm(3101, E1, 3, "M", NULL));
@@ -542,7 +542,7 @@ static void test_decision_table(void) {
 	run_ticks(room, &src, 1, 5);
 	CHECK(l->last_mix_rms > 0.05 && row_of(room, "L") == 4, "row 3: a replace for L restores it");
 
-	/* A new-epoch heartbeat does not revalidate (assertion 11): every record is disarmed. */
+	/* A new-epoch heartbeat does not revalidate: every record is disarmed. */
 	r = heartbeat(E2, 3101, "{\"L\":4,\"S\":2,\"M\":3}", FALSE);
 	rr = room_reply(r, 3101);
 	CHECK(list_has(rr, "unarmed_listeners", "L") && list_has(rr, "unarmed_listeners", "S") && list_has(rr, "unarmed_listeners", "M")
@@ -552,7 +552,7 @@ static void test_decision_table(void) {
 	CHECK(l->last_mix_rms == 0.0 && row_of(room, "L") == 1, "new epoch: L is silent (row 1) despite matching generations");
 	drop(arm(3101, E2, 1, "L", "S"));
 	run_ticks(room, &src, 1, 5);
-	CHECK(l->last_mix_rms > 0.05, "new epoch: an arming replace in E2 makes L audible (assertion 12)");
+	CHECK(l->last_mix_rms > 0.05, "new epoch: an arming replace in E2 makes L audible");
 
 	/* A recorder tap, or any peer with no display, is never armed (silent until armed). */
 	CHECK(row_of(room, NULL) == 1, "a session without a display stands in row 1");
@@ -565,7 +565,7 @@ static void test_decision_table(void) {
 	slv_vis_fail_closed = FALSE;
 }
 
-/* §1.1 and §1.2 on batches, with fail-closed on, then the same out-of-order and base-mismatch batches in shadow mode. */
+/* Out-of-order and base-mismatch batches, with fail-closed on, then the same out-of-order and base-mismatch batches in shadow mode. */
 static void test_batch_rules(void) {
 	slv_vis_fail_closed = TRUE;
 	janus_slvoice_room *room = new_room(3201, TRUE);
@@ -646,7 +646,7 @@ static void test_batch_rules(void) {
 	free_session(s);
 }
 
-/* §3: confirm, omission, graceful stop, takeover after stop, unknown and undeclared rooms, the interval check. */
+/* Heartbeats: confirm, omission, graceful stop, takeover after stop, unknown and undeclared rooms, the interval check. */
 static void test_heartbeat(void) {
 	slv_vis_fail_closed = TRUE;
 	slv_vis_stale_ms = 8000;
@@ -673,7 +673,7 @@ static void test_heartbeat(void) {
 	drop(heartbeat(E1, 3301, "{\"S\":1}", FALSE));
 	run_ticks(room, &src, 1, 3);
 	CHECK(row_of(room, "L") == 1 && l->last_mix_rms == 0.0 && g_hash_table_size(room->vis_records) == 1,
-		"omission: a heartbeat that omits armed L disarms and silences it (assertion 15)");
+		"omission: a heartbeat that omits armed L disarms and silences it");
 	drop(arm(3301, E1, 2, "L", NULL));
 	run_ticks(room, &src, 1, 3);
 	CHECK(l->last_mix_rms > 0.05, "omission: re-arming restores L");
@@ -681,7 +681,7 @@ static void test_heartbeat(void) {
 	drop(heartbeat(E1, 3301, "{\"L\":2,\"S\":1}", TRUE));
 	run_ticks(room, &src, 1, 3);
 	CHECK(l->last_mix_rms == 0.0 && row_of(room, "L") == 3 && room->vis_auth_last_us == 0,
-		"graceful stop: stopping silences the room within 3 ticks, without the window (assertion 22)");
+		"graceful stop: stopping silences the room within 3 ticks, without the window");
 	r = arm(3301, E_LOWER, 1, "L", "S");
 	CHECK(is_status(r, "ok") && !strcmp(str_of(r, "authority_epoch"), E_LOWER), "graceful stop: a lower epoch may take over at once");
 	drop(r);
@@ -721,7 +721,7 @@ static void test_heartbeat(void) {
 	slv_vis_fail_closed = FALSE;
 }
 
-/* WORK 3: a room created without vis_authority behaves as today with fail-closed on: no arming, no heartbeat. */
+/* A room created without vis_authority behaves as today with fail-closed on: no arming, no heartbeat. */
 static void test_undeclared_room_unaffected(void) {
 	slv_vis_fail_closed = TRUE;
 	janus_slvoice_room *room = new_room(3401, FALSE);
@@ -751,7 +751,7 @@ static void test_undeclared_room_unaffected(void) {
 	slv_vis_fail_closed = FALSE;
 }
 
-/* WORK 5 and 6: fail-closed off (the shipped default). A declared room whose listener is never armed hears, sees and is
+/* Fail-closed off (the shipped default). A declared room whose listener is never armed hears, sees and is
  * sent exactly what the same room undeclared would, while would_silence counts it. */
 static void test_shadow_mode(void) {
 	slv_vis_fail_closed = FALSE;
@@ -830,7 +830,7 @@ static void test_shadow_mode(void) {
 	free_session(sd);
 }
 
-/* §2 pre-join arming, and §7.4 / open question 2: a rejoin takes the armed columns under fail-closed only. */
+/* Pre-join arming, and a rejoin: it takes the armed columns under fail-closed only. */
 static void test_prejoin_and_rejoin(void) {
 	slv_vis_fail_closed = TRUE;
 	janus_slvoice_room *room = new_room(3601, TRUE);
@@ -845,7 +845,7 @@ static void test_prejoin_and_rejoin(void) {
 	join(room, l, NULL);
 	CHECK(l->vis_ok_last, "pre-join: the joiner is armed from its join");
 	run_ticks(room, &src, 1, 3);
-	CHECK(l->last_mix_rms > 0.05, "pre-join: audible within 3 ticks of joining with no heartbeat (assertion 18)");
+	CHECK(l->last_mix_rms > 0.05, "pre-join: audible within 3 ticks of joining with no heartbeat");
 
 	/* The columns applied while L was present; L's session leaves (its sets reset) and a new one joins. */
 	drop(admin("{\"request\":\"peer_ctl_batch\",\"op\":\"replace\",\"room\":3601,\"excl\":{\"L\":[\"S\"]},\"mute\":{\"L\":[]},"
@@ -870,7 +870,7 @@ static void test_prejoin_and_rejoin(void) {
 	free_session(s);
 }
 
-/* WORK 4: the reply keys, to a stamped and an unstamped sender. */
+/* The reply keys, to a stamped and an unstamped sender. */
 static void test_replies(void) {
 	slv_vis_fail_closed = FALSE;
 	janus_slvoice_room *room = new_room(3701, TRUE);

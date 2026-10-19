@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""S-CON-4 recorder peer (docs/voice/connector-build-plan.md; connector-assessment §2).
+"""Recorder peer.
 
 A headless aiortc WebRTC peer that joins one janus.plugin.slvoice room as the
 sim-registered connector NPC identity (DISPLAY = the NPC's agent UUID from the
@@ -12,7 +12,7 @@ its exclusion column is applied by the mixer (fan-out by display), so the
 recording is subject to parcel/estate semantics by construction.
 
 The Janus session/join/poll/keepalive/teardown plumbing lives in
-common/peer.py (shared with the S-CON-6 injector); this module contributes
+common/peer.py (shared with the injector); this module contributes
 only the receive-and-record media behaviour.
 """
 

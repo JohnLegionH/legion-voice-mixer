@@ -10,7 +10,7 @@
  * \details  Plain C, links only libm. Built and run by `make test`. Expected
  * values are derived from the pan law and the right-to-right convention pinned in
  * docs/voice/phase3b-design-brief.md Amendments 4 and 5 — NOT from what the code
- * produces. Verification for Phase 3b item 4 is numeric (no listening tests are
+ * produces. Verification of the stereo pan is numeric (no listening tests are
  * available), so these ARE the acceptance criteria. Exit status is non-zero on any
  * failure so `make test` / the Docker build fails loudly.
  */
@@ -61,7 +61,7 @@ static void test_ahead_centred(void) {
 static void test_hard_right(void) {
 	printf("test_hard_right\n");
 	float l = -1.0f, r = -1.0f;
-	slv_pan(M_PI_2, &l, &r);   /* az = +pi/2, listener's right (Amendment 4) */
+	slv_pan(M_PI_2, &l, &r);   /* az = +pi/2, listener's right */
 	/* p = (sin(pi/2)+1)/2 = 1 -> a = pi/2 -> gainL = cos(pi/2) = 0, gainR = 1. */
 	CHECK(approx(l, 0.0), "hard right: left gain 0");
 	CHECK(approx(r, 1.0), "hard right: right gain 1");
@@ -77,7 +77,7 @@ static void test_hard_left(void) {
 	CHECK(approx(r, 0.0), "hard left: right gain 0");
 }
 
-/* ---- behind: centred, NOT lateralised (Amendment 5, honest limit) --------- */
+/* ---- behind: centred, NOT lateralised (honest limit) --------- */
 static void test_behind_centred(void) {
 	printf("test_behind_centred\n");
 	float l = -1.0f, r = -1.0f;
@@ -86,7 +86,7 @@ static void test_behind_centred(void) {
 	CHECK(approx(r, CENTRE), "behind: right gain = sin(pi/4)");
 	CHECK(approx(l, r), "behind: centred (L == R), amplitude pan cannot place front/back");
 	/* -pi is the SAME direction as +pi and must map to the same place: the pan
-	 * signal sin(az) is continuous across directly-behind (Amendment 5). */
+	 * signal sin(az) is continuous across directly-behind. */
 	float l2 = -1.0f, r2 = -1.0f;
 	slv_pan(-M_PI, &l2, &r2);
 	CHECK(approx(l, l2), "behind: +pi and -pi map to the same left gain");
@@ -98,7 +98,7 @@ static void test_partial_right_favours_right(void) {
 	printf("test_partial_right_favours_right\n");
 	float l = -1.0f, r = -1.0f;
 	slv_pan(M_PI_4, &l, &r);   /* +45 deg: to the right, but not hard */
-	CHECK(r > l, "azimuth right of centre -> right channel louder (Amendment 4)");
+	CHECK(r > l, "azimuth right of centre -> right channel louder");
 	CHECK(l > 0.0f && r < 1.0f, "partial pan: both channels present, neither extreme");
 }
 

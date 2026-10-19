@@ -60,7 +60,7 @@ POLL_STEP = 0.1
 READY_TIMEOUT = 15.0
 #: After the mixer has seen a peer's first RTP, the first frames still arrive into a filling jitter buffer and
 #: the mix can legitimately carry nothing for a tick or two. Settle once per peer, at readiness, so no
-#: assertion window pays for it (§9's timed windows have no budget to give).
+#: assertion window pays for it (the visibility scenarios' timed windows have no budget to give).
 MEDIA_SETTLE_S = 0.4
 #: last_mix_rms is a per-tick SAMPLE of the mix, so "audible" is a media health question, not a policy one:
 #: a lone 0.0 while the peer's rtp_in_count keeps climbing is a frame with nothing decoded in time. Hold
@@ -113,7 +113,7 @@ class Config:
     #: The mixer's JS_JOIN_CAP_SECRET, so the harness can mint join capabilities as the sim does.
     #: Empty = S22-S24 skip (they cannot mint what the mixer would accept).
     join_cap_secret: str = ""
-    #: The JS_VIS_STALE_MS this mixer was STARTED with, when that is below the §5 minimum.
+    #: The JS_VIS_STALE_MS this mixer was STARTED with, when that is below the minimum staleness window.
     #: S31 needs a mixer deliberately started under the clamp; 0 = it skips, because a correctly configured
     #: mixer cannot show the clamp.
     stale_ms_started_with: int = 0
@@ -141,7 +141,7 @@ def read_env(path: Path) -> dict:
 
 
 def new_display() -> str:
-    """A display is an agent UUID string, as the sim sets it (spec §3.2)."""
+    """A display is an agent UUID string, as the sim sets it."""
     return str(uuid.uuid4())
 
 
@@ -221,7 +221,7 @@ class GatedToneTrack(MediaStreamTrack):
     """A ToneTrack whose voice can be switched off at runtime, so a scenario can make peers TALK IN
     TURN. When `talking` is False it emits real silence frames rather than stopping: the RTP keeps
     flowing (no DTX gap to misread as a dead transport) and only the mix RMS goes to zero, which is
-    exactly the distinction P1.2G needed and a plain ToneTrack cannot express."""
+    exactly the distinction the turn-taking scenario needs and a plain ToneTrack cannot express."""
 
     kind = "audio"
     RATE = 48000
@@ -344,18 +344,18 @@ class TestPeer(ConnectorPeer):
         self.join_cap = join_cap
         self.session_id = session_id
         #: Join as a recording tap ("recorder": true). The mixer reads it at
-        #: join (janus_slvoice.c:3095) and reports it in query_session; §9 24 asserts a recorder in a declared
+        #: join (janus_slvoice.c:3095) and reports it in query_session; S30 asserts a recorder in a declared
         #: room is silent until armed, like any other participant.
         self.recorder = recorder
         #: The "joined" event as it arrived, including the initial roster the mixer built for THIS listener
         #: (janus_slvoice_join_commit_locked): filtered by the listener's own exclusion set and, under
-        #: fail-closed, by the pair rule. §9 6 reads "S is absent from L's roster" from here -- query_session
+        #: fail-closed, by the pair rule. S25 reads "S is absent from L's roster" from here -- query_session
         #: has no roster field, so this event is the only place that view exists.
         self.joined_event: dict | None = None
         self.crashed = False
         #: Every {p, v} this peer received for each source display, in arrival order.
         self.dots: dict[str, list] = {}
-        #: Phase 0: every presence notice this peer received, (display, "j" | "l"), in arrival order.
+        #: Every presence notice this peer received, (display, "j" | "l"), in arrival order.
         self.presence: list = []
         self._join_result: asyncio.Future = asyncio.get_running_loop().create_future()
         self._task: asyncio.Task | None = None
@@ -366,7 +366,7 @@ class TestPeer(ConnectorPeer):
 
     def join_extra(self) -> dict:
         """The join capability and the viewer-session id the sim sends, when this peer has them.
-        "recorder" for a recording tap (§9 24)."""
+        "recorder" for a recording tap."""
         extra = {}
         if self.join_cap is not None:
             extra["join_cap"] = self.join_cap
@@ -377,7 +377,7 @@ class TestPeer(ConnectorPeer):
         return extra
 
     def roster(self) -> list:
-        """The displays in the initial roster the mixer sent this peer at join (§9 6). Empty before the join
+        """The displays in the initial roster the mixer sent this peer at join. Empty before the join
         event arrives; a peer the mixer omitted is simply absent."""
         return [row.get("display") for row in ((self.joined_event or {}).get("participants") or [])]
 
@@ -402,7 +402,7 @@ class TestPeer(ConnectorPeer):
     def on_plugin_event(self, data: dict) -> None:
         if data.get("audiobridge") == "joined":
             #: Kept whether or not the future is already resolved: the roster rides this event and nothing
-            #: else carries it (§9 6).
+            #: else carries it.
             self.joined_event = data
         if self._join_result.done():
             return
@@ -687,8 +687,8 @@ class Admin:
         "listeners": {display: generation}}}.
 
         `feed_age_ms` is how old the sim says its own visibility feed was when it built the
-        body. None omits the key, which is what a pre-V1b sim sends and what every scenario written before this
-        slice therefore exercises."""
+        body. None omits the key, which is what an older sim sends and what every scenario written before this
+        field existed therefore exercises."""
         request = {"request": "peer_ctl_heartbeat", "room_epoch": epoch, "interval_ms": interval_ms,
                    "rooms": {str(room): body for room, body in rooms.items()}}
         if stopping:
@@ -810,8 +810,8 @@ class Heartbeater:
         self._room = room
         self.listeners = dict(listeners)
         self.generation = generation
-        #: The highest policy_generation this sender has had applied to the room, sent as "as_of" (the 0.7d
-        #: sim sends it). None omits the key, as a pre-0.7d sim does.
+        #: The highest policy_generation this sender has had applied to the room, sent as "as_of" (the
+        #: sim sends it). None omits the key, as an older sim does.
         self.as_of = as_of
         #: The feed age this sender reports, mutable while running so a scenario can make a
         #: healthy sim "stall" without stopping its heartbeat -- which is the whole shape of a starved feeder.
@@ -919,9 +919,9 @@ class Control:
         A declared room is remembered, because that is exactly where the mixer gates a join once
         JS_JOIN_CAP_REQUIRED is on, and so exactly where an ordinary join must carry a capability.
 
-        `sim_created` is the sim's marker (JanusMessages.AudioBridgeCreateRoomReq). From 1.4 the mixer
+        `sim_created` is the sim's marker (JanusMessages.AudioBridgeCreateRoomReq). The mixer
         gates a join on THIS rather than on the declaration, so a marked room - declared or not - is remembered as
-        gated too. A room created without it keeps the pre-1.4 rule, which is how an old sim behaves under a new
+        gated too. A room created without it keeps the earlier rule, which is how an old sim behaves under a new
         mixer (S44)."""
         if vis_authority or sim_created:
             self.declared.add(room)
@@ -1050,7 +1050,7 @@ class Ctx:
     def _auto_cap(self, room: int, display: str, join_cap, session_id, bare: bool):
         """What an ORDINARY join carries into a declared room. With no key configured, or for a room
         nobody declared, or when the scenario is driving the capability itself (it passed one, or asked for a bare
-        join), this changes nothing at all - the join goes out exactly as it did before 0.8e."""
+        join), this changes nothing at all - the join goes out exactly as it did before the harness minted capabilities."""
         if bare or join_cap is not None or session_id is not None or not self.cfg.join_cap_secret:
             return join_cap, session_id
         if room not in self.control.declared:
@@ -1064,7 +1064,7 @@ class Ctx:
                    recorder: bool = False, bare: bool = False, sim_created: bool = False,
                    gated: bool = False) -> TestPeer:
         """create (486 = already there) then join, the sim's order. Join_cap / session_id are what the
-        sim would send; both None is a pre-0.4 join. Recorder joins as a recording tap (§9 24).
+        sim would send; both None is a pre-0.4 join. Recorder joins as a recording tap.
         An ordinary join into a DECLARED room mints its own capability when --join-cap-secret-file was
         given, so a board can run against a mixer with JS_JOIN_CAP_REQUIRED on. `bare=True` keeps a join
         capability-less on purpose, which is what the capability scenarios themselves test."""

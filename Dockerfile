@@ -106,7 +106,7 @@ RUN mkdir -p /opt/janus/share/janus-templates \
 
 # --- Config-generating entrypoint (operators configure via env, not files) ---
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# Slice A.1: the public address library, its re-check watcher and the probe they call.
+# The public address library, its re-check watcher and the probe they call.
 COPY entrypoint/ /usr/local/lib/legion-voice/
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/* \
     && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-voice/addr_probe.py \
@@ -115,9 +115,9 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/lib/legion-v
     && ln -sf /usr/local/lib/legion-voice/selfcheck.py /usr/local/bin/legion-voice-selfcheck
 # Tests, all loopback or stubbed with no external network; a failure in any fails the image build:
 #  - address probe: STUN/DNS codecs, the participant poll;
-#  - self-check (A.2): every check's branches, the VPS shape, exit codes, the time bound;
-#  - ICE diagnostics (A.5): retention, the ring bound, the relay/direct caveat, no secrets or SDP, the CLI views;
-#  - entrypoint (the nat_1_1_mapping verdict, A.1 discovery and re-check, A.2 launch, A.5 events and the
+#  - self-check: every check's branches, the VPS shape, exit codes, the time bound;
+#  - ICE diagnostics: retention, the ring bound, the relay/direct caveat, no secrets or SDP, the CLI views;
+#  - entrypoint (the nat_1_1_mapping verdict, address discovery and re-check, self-check launch, diagnostics events and the
 #    debug-level guard): the baked scripts against the image's own templates, in a scratch dir with a stub Janus
 #    and a stub probe.
 RUN ADDR_PROBE_DIR=/usr/local/lib/legion-voice python3 /root/slvoice/tests/test_addr_probe.py \

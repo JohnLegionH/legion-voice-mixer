@@ -128,7 +128,7 @@ slv_sldata_status slv_sldata_parse(const char *buf, size_t len, slv_sldata *out)
 	double vec[4];
 
 	/* Presence markers: j / l. We record only that they appeared; their inner
-	 * shape (roster maps, etc.) is not decoded in Phase 1. */
+	 * shape (roster maps, etc.) is not decoded. */
 	if(json_object_get(root, "j") != NULL)
 		out->fields_seen |= SLV_FIELD_J;
 	if(json_object_get(root, "l") != NULL)

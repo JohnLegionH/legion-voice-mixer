@@ -5,7 +5,7 @@
 /*! \file    tests/test_joincap.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Unit tests for the sim-issued join capability (src/joincap.c, design §11).
+ * \brief    Unit tests for the sim-issued join capability (src/joincap.c).
  *
  * \details  Plain C, links OpenSSL and libc only (like test_deferred links nothing), built and run by
  * `make test`. The GOLDEN VECTOR below is the same capability the sim's JoinCapabilityTests mints from the
@@ -159,15 +159,15 @@ static void test_generation(void) {
 	 * one is provably an older authority, and only that refuses. */
 	CHECK(slv_joincap_generation(&c, EPOCH, GEN) == SLV_JOINCAP_OK, "same epoch, same generation: accepted");
 	CHECK(slv_joincap_generation(&c, EPOCH, GEN - 1) == SLV_JOINCAP_OK,
-		"same epoch, the capability's generation is AHEAD of what the mixer applied: accepted (O-96)");
+		"same epoch, the capability's generation is AHEAD of what the mixer applied: accepted");
 	CHECK(slv_joincap_generation(&c, EPOCH, GEN + 3) == SLV_JOINCAP_OK,
-		"same epoch, the capability's generation is BEHIND what the mixer applied: accepted (O-96)");
+		"same epoch, the capability's generation is BEHIND what the mixer applied: accepted");
 	CHECK(slv_joincap_generation(&c, EPOCH + 1, GEN) == SLV_JOINCAP_STALE_GENERATION,
-		"an epoch BELOW the room's adopted one is provably an older authority: cap_stale_generation (O-96)");
+		"an epoch BELOW the room's adopted one is provably an older authority: cap_stale_generation");
 	CHECK(slv_joincap_generation(&c, EPOCH - 1, GEN) == SLV_JOINCAP_OK,
-		"an epoch ABOVE the room's adopted one: accepted, the mixer is the one that is behind (O-96)");
+		"an epoch ABOVE the room's adopted one: accepted, the mixer is the one that is behind");
 	CHECK(slv_joincap_generation(&c, 0, 0) == SLV_JOINCAP_OK,
-		"a room that has adopted no epoch accepts: a capability admits, it does not adopt an epoch (O-96)");
+		"a room that has adopted no epoch accepts: a capability admits, it does not adopt an epoch");
 
 	/* Arming off on both sides: epoch 0 and generation 0 agree. */
 	slv_joincap plain = c;
@@ -179,7 +179,7 @@ static void test_generation(void) {
 	 * authority - and it is easily reached: the sim forgets a room while the mixer still holds its epoch through
 	 * the 60 s empty-room grace, and the same avatar rejoins. Only a NON-ZERO epoch below the adopted one refuses. */
 	CHECK(slv_joincap_generation(&plain, EPOCH, GEN) == SLV_JOINCAP_OK,
-		"a capability with no epoch at all, against a room that has adopted one: accepted (O-96, 0.8b)");
+		"a capability with no epoch at all, against a room that has adopted one: accepted");
 }
 
 /* What a difference that was ACCEPTED is counted as. The verdict above says nothing about which race
@@ -202,7 +202,7 @@ static void test_generation_notes(void) {
 	slv_joincap none = c;
 	none.epoch = 0;
 	CHECK(slv_joincap_generation_note(&none, EPOCH, GEN) == SLV_JOINCAP_GEN_NO_EPOCH,
-		"no epoch at all against an adopted one: cap_no_epoch (O-96, 0.8b)");
+		"no epoch at all against an adopted one: cap_no_epoch");
 	none.generation = 0;
 	CHECK(slv_joincap_generation_note(&none, 0, 0) == SLV_JOINCAP_GEN_MATCH,
 		"arming off on both sides is not cap_no_epoch: nothing to count");
@@ -226,7 +226,7 @@ static void test_nonce_store(void) {
 	CHECK(slv_joincap_nonce_take(&st, NONCE, 1000, 1001) == SLV_JOINCAP_OK && st.expired == 1,
 		"an entry past its window is swept");
 
-	/* Fill it: the next distinct nonce is refused rather than admitted unchecked (§11.6). */
+	/* Fill it: the next distinct nonce is refused rather than admitted unchecked. */
 	memset(&st, 0, sizeof(st));
 	char nonce[SLV_UUID_LEN];
 	for(int i = 0; i < SLV_JOINCAP_NONCE_MAX; i++) {

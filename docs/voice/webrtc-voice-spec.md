@@ -1,6 +1,6 @@
 # Spatial WebRTC Voice Service — Feature Specification
 
-**Status:** Draft for review; amended 2026-09-14, and again 2026-09-19 for Phase 0 enforcement (see the status block below)
+**Status:** Draft for review; amended 2026-09-14, and again 2026-09-19 for fail-closed enforcement (see the status block below)
 **Scope:** A server-side WebRTC voice service (mixer plugin + region/grid integration) implementing the published Second Life WebRTC voice protocol, for OpenSimulator-derived grids. Designed to run unchanged from a single-region standalone to a large multi-mixer grid. *[The large multi-mixer end is DESCOPED 2026-09-14: the scale tier is not needed for the target deployment.]*
 
 > **Status, 2026-09-14.** This spec is amended to match the service as built.
@@ -20,16 +20,13 @@
 >   identity. Recording needs an explicit operator opt-in.
 > - **Moderation:** per-parcel moderation mute and mute-everyone, enforced by the mixer.
 >
-> **Phase 0 is enforcing on the reference grid.** The simulator is the authority for who may
+> **Fail-closed enforcement is available.** The simulator is the authority for who may
 > hear whom: it arms every listener per room with an epoch and a generation and heartbeats that arming;
 > the mixer silences a listener or source it has not been told to carry (`JS_VIS_FAIL_CLOSED=1`); and a
-> join into such a room requires a sim-minted capability (`JS_JOIN_CAP_REQUIRED=1`). That changes the
-> verdict of the access-control claims - SC-30, SC-31 and SC-33 are **MET** as of that date (Pass 2) -
-> and it is the difference between permissions being computed on the server and permissions being
+> join into such a room requires a sim-minted capability (`JS_JOIN_CAP_REQUIRED=1`). That is the
+> difference between permissions being computed on the server and permissions being
 > enforced in the mix. Both knobs default off, so a deployment that has not enabled them behaves as the
 > previous release did.
->
-> The row-by-row state of every claim below is in `Docs/voice/spec-coverage-20260914.md`.
 
 ---
 
@@ -80,7 +77,7 @@ Every voice server instance is classified as **grid-operated** or **region-opera
 
 ### 3.3 Sim-authoritative permission enforcement **[ENG]**
 
-Parcel and estate audibility is always computed from the avatar's authoritative sim-side position and the sim's access lists. Access/visibility state is pushed from the simulator to the mixer with version epochs and **fails closed** on staleness. Client-reported listener position is accepted only as a rendering hint (§6.1), never as a permission input, because client positions are spoofable.
+Parcel and estate audibility is always computed from the avatar's authoritative sim-side position and the sim's access lists. Access/visibility state is pushed from the simulator to the mixer with version epochs and **fails closed** on staleness. Client-reported listener position is accepted only as a rendering hint (§6), never as a permission input, because client positions are spoofable.
 
 ### 3.4 Mixer output is the permission boundary **[ENG]**
 

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""addr_probe: address-discovery probes for the mixer entrypoint (slice A.1), reused by the self-check (A.2).
+"""addr_probe: address-discovery probes for the mixer entrypoint, reused by the self-check.
 
 Used by entrypoint/public-address.sh. One subcommand per source. Each prints ONE line and exits 0 on
 success, prints nothing on stdout and exits 1 when the source gave no usable answer, and exits 2 on a
@@ -227,7 +227,7 @@ def system_probe(name):
     return infos[0][4][0] if infos else None
 
 
-# ---- TURN (slice A.3) ---------------------------------------------------------------------------------------------
+# ---- TURN ---------------------------------------------------------------------------------------------
 
 STUN_ALLOCATE = 0x0003
 STUN_REFRESH = 0x0004

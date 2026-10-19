@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Streaming WAV parsing and 20 ms framing for the S-CON-6 injector
-(docs/voice/connector-build-plan.md: "audio source = a PCM/WAV pipe first —
-deliberately dumb; the TTS engine and the live mic are just different writers
-to the same pipe").
+"""Streaming WAV parsing and 20 ms framing for the injector.
+The audio source is a PCM/WAV pipe, deliberately dumb: a TTS engine or a live
+mic is just a different writer to the same pipe.
 
 Deliberately dependency-free (stdlib only) so the framing/resampling behaviour
 is unit-testable without aiortc/av installed — the same split as
@@ -80,7 +79,7 @@ class PcmFramer:
       position and the boundary samples carried across pushes (no seams — a
       chunked push produces byte-identical output to a single push);
     - get_frame() returns only COMPLETE frames (or None: the caller sends
-      SILENCE_FRAME, never a short/junk frame — the plan's empty-pipe rule);
+      SILENCE_FRAME, never a short/junk frame — the empty-pipe rule);
     - flush() zero-pads the buffered tail to a full frame at end-of-source.
 
     Not thread-safe; the caller serialises access (the injector guards it with

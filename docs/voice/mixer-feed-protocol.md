@@ -1,14 +1,13 @@
-# Mixer Feed Protocol — the C#→mixer visibility interface (Phase 3a)
+# Mixer Feed Protocol — the C#→mixer visibility interface
 
-**Status:** DRAFT / design-only. No code has crossed the boundary. This document defines the
-sim(C#)→mixer(plugin) interface for the **per-listener visibility matrix** *before* it is built,
-so both sides agree on the seam. It is the Phase-3a counterpart to the viewer→mixer data-channel
-format documented in [`../sldata-extensions.md`] and grounded in the sim-side inventory
-[`parcel-voice-semantics.md`] (read its **ADDENDUM** first — it corrects #12).
+**Status:** Design document, with notes on the shipped handler in §3.3.1 and §3.4. It defines the
+sim(C#)→mixer(plugin) interface for the **per-listener visibility matrix**, so both sides agree on
+the seam. It is the counterpart to the viewer→mixer data-channel format documented in
+[`../sldata-extensions.md`].
 
 > **Authority.** Where this doc and training disagree, the mixer repo's `docs/` win. Sim-side
-> `path:line` citations are relative to `parcel-voice-semantics.md`'s baseline; see that doc's
-> addendum for current line numbers. Nothing here is committed until reviewed.
+> `path:line` citations refer to the sim source as it stood when each passage was written, so line
+> numbers may have drifted.
 
 ---
 
@@ -16,16 +15,17 @@ format documented in [`../sldata-extensions.md`] and grounded in the sim-side in
 
 Every voice room today is a **flat, symmetric membership set**: `JanusRoom.JoinRoom` issues an
 identical `AudioBridgeJoinRoomReq(room, display)` for every session — no per-participant mute,
-hide, or allow list (`parcel-voice-semantics.md` §3.2). All parcels that resolve to the estate
+hide, or allow list. All parcels that resolve to the estate
 channel collapse onto one room (`REGION_ROOM_ID = -999`). The sim has rich per-avatar exclusion
 semantics (parcel ban/restrict, `SeeAVs` hiding, estate ban) but **no way to express them into a
-shared room** — which is exactly why #13 (estate-channel ban bypass) is a live bug: the only ban
+shared room** — which is exactly why the estate-channel ban bypass exists: the only ban
 check is a whole-session join gate for the *requesting* parcel, skipped entirely on the estate
-branch (`WebRtcVoiceRegionModule.cs:301`, the `else` of `:297`). Fixing #11/#13/#5 all require the
+branch (`WebRtcVoiceRegionModule.cs:301`, the `else` of `:297`). Per-listener audibility, the
+estate-channel ban and `SeeAVs` applied to voice all require the
 same missing thing: **a per-listener exclusion feed from the sim into the mixer.** This document
 specifies that feed.
 
-The mixer already *applies* per-listener exclusions — the Phase-2 `peer_ctl` map
+The mixer already *applies* per-listener exclusions — the existing `peer_ctl` map
 (`{uuid, has_mute, muted, has_gain, gain}` per listener, `sldata-extensions.md` §"Per-source mute
 and gain") drops/scales sources per listener in the mix loop. The visibility matrix reuses that
 application machinery; what's new is the **source** (the sim, not the viewer) and the **transport**
@@ -46,7 +46,7 @@ The sim produces exactly one per-region **visibility matrix** `V[L][S] ∈ {audi
    §"What's implemented"). An excluded S must not appear as a dot, must not animate, and must not
    emit a join notice to L.
 
-These **must not** be computed independently. The baseline's #14 divergence — coarse map dots
+These **must not** be computed independently. The sim's existing divergence — coarse map dots
 already ignore `SeeAVs` while full avatar data honours it (`SceneGraph.cs:256` vs the
 `ParcelHideThisAvatar` sites) — is the cautionary example: two code paths answering "is S visible
 to L?" drifted, and dots leaked through the hide boundary. If the mixer computes audio exclusion
@@ -63,16 +63,16 @@ second source of truth.
 ## 2. Sim side — the `VoiceStateFeeder`
 
 A single region-module component. **One code path produces the one matrix.** It exists because the
-sim's own parcel tracking is not uniform across root and child agents (baseline §2.1–§2.3).
+sim's own parcel tracking is not uniform across root and child agents.
 
 ### 2.1 Inputs (how the feeder learns each avatar's parcel)
 
 | Agent kind | Parcel source | Why |
 |---|---|---|
-| **Root** | event-driven: `OnAvatarEnteringNewParcel` (root-only, fired `LandManagementModule.cs:550`) refreshes that avatar; `ScenePresence.currentParcelUUID` is the cached value | Root agents get the crossing event and movement-driven `currentParcelUUID` updates. The event fires on **any** `GlobalID` change, including crossings between two parcels on the same channel (baseline §2.1(2)) — so same-channel moves are seen. |
-| **Child** | position-derived: `LandChannel.GetLandObject(x, y)` on `ScenePresence.AbsolutePosition`, evaluated on the **feeder tick** | Child agents receive **no** crossing event (guard `LandManagementModule.cs:538`) and their `currentParcelUUID` is unreliable / often `UUID.Zero` (baseline §2.2). They must be polled. This is expected, not a defect (baseline #9). |
+| **Root** | event-driven: `OnAvatarEnteringNewParcel` (root-only, fired `LandManagementModule.cs:550`) refreshes that avatar; `ScenePresence.currentParcelUUID` is the cached value | Root agents get the crossing event and movement-driven `currentParcelUUID` updates. The event fires on **any** `GlobalID` change, including crossings between two parcels on the same channel — so same-channel moves are seen. |
+| **Child** | position-derived: `LandChannel.GetLandObject(x, y)` on `ScenePresence.AbsolutePosition`, evaluated on the **feeder tick** | Child agents receive **no** crossing event (guard `LandManagementModule.cs:538`) and their `currentParcelUUID` is unreliable / often `UUID.Zero`. They must be polled. This is expected, not a defect. |
 
-Enumerate with `Scene.ForEachScenePresence` (children **included**; baseline §2.3) so cross-region
+Enumerate with `Scene.ForEachScenePresence` (children **included**) so cross-region
 audibility works. Root agents can be refreshed reactively on the event and only re-derived on tick
 as a cheap consistency check; child agents are re-derived every tick from position.
 
@@ -86,34 +86,33 @@ roster push — the feeder emits only on **change**, not every tick.
 For each ordered pair (listener L, source S) with parcels P_L, P_S, `V[L][S] = excluded` iff any:
 
 - **Parcel hide (`SeeAVs`)** — symmetric. If `P_S.SeeAVs == false` and `P_L ≠ P_S` and L is not a
-  god, S is hidden from L (baseline §1.2: `LandData.SeeAVs` → `ParcelHideThisAvatar`, predicate
+  god, S is hidden from L (`LandData.SeeAVs` → `ParcelHideThisAvatar`, predicate
   `currentParcelUUID != peer.currentParcelUUID && !peer.IsViewerUIGod`). Apply symmetrically (also
   hide L from S if `P_L.SeeAVs == false`) so the pair never has one-way audibility — see §3 on
   symmetric hiding.
 - **Parcel ban/restrict** — S banned or restricted from **L's** parcel P_L (and vice-versa):
   `IsBannedFromLand` / `IsRestrictedFromLand` / `IsEitherBannedOrRestricted`
-  (baseline §1.1, `LandObject.cs`). This is the data #13 needs but the current voice path skips on
-  the estate channel. Key change from today: the check is evaluated **per (L,S) pair against each
+  (`LandObject.cs`). This is the data the estate-channel ban needs but the current voice path skips. Key change from today: the check is evaluated **per (L,S) pair against each
   one's parcel**, not once for the requesting parcel at provision time.
-- **Estate ban** — `EstateSettings.IsBanned` (baseline §1.4). No current voice consumer; the
+- **Estate ban** — `EstateSettings.IsBanned`. No current voice consumer; the
   feeder is the first.
 - **Voice disabled** — if voice is off for P_S (`!EstateSettings.AllowVoice` OR, absent `TaxFree`,
-  `!(P_S.Flags & AllowVoiceChat)`; baseline §1.3/§3.1) S is a source to no one.
+  `!(P_S.Flags & AllowVoiceChat)`) S is a source to no one.
 
-**Exemptions** (baseline §1.1 preamble, applied consistently): estate `TaxFree`, admin
+**Exemptions** (applied consistently): estate `TaxFree`, admin
 (`IsAdministrator`), estate manager/owner (`IsEstateManagerOrOwner`), parcel owner
 (`LandData.OwnerID`) short-circuit the ban/restrict tests. `IsViewerUIGod` exempts the `SeeAVs`
 hide. Keep the exemption set identical to the sim's so voice never diverges from the visual model.
 
 > **Do not key voice on `CanBeOnThisLand`.** It enforces ban only below `BanLineSafeHeight` and
-> uses `else if` for restriction (baseline §1.1 height nuance) — a banned avatar above the ban line
+> uses `else if` for restriction — a banned avatar above the ban line
 > would leak. Use `IsBannedFromLand`/`IsRestrictedFromLand` directly.
 
 ### 2.3 Invalidation (when the feeder recomputes)
 
 | Change | Signal | Notes |
 |---|---|---|
-| Parcel flags / `SeeAVs` / access list / ban list | `OnLandObjectAdded` (covers "updated" too — forwards via `TriggerLandObjectUpdated`, baseline §2.4) | Rare. Recompute affected parcels' rows/cols. |
+| Parcel flags / `SeeAVs` / access list / ban list | `OnLandObjectAdded` (covers "updated" too — forwards via `TriggerLandObjectUpdated`) | Rare. Recompute affected parcels' rows/cols. |
 | Root avatar crosses a parcel boundary | `OnAvatarEnteringNewParcel` | Root only. |
 | Child avatar moves | feeder tick position re-derivation | The polling path; dominant driver. |
 | Estate ban/manager/`AllowVoice` change | `IEstateModule.OnEstateInfoChange` (see §5) | Coarse today — re-read `EstateSettings` and diff. |
@@ -125,11 +124,11 @@ hide. Keep the exemption set identical to the sim's so voice never diverges from
 ### 3.1 Transport is server-to-server, NOT the viewer data channel
 
 The viewer's `m`/`ug` ride the peer's WebRTC **data channel** (viewer→mixer). The visibility matrix
-must **not** — its source is the sim, and the whole point of #13 is that **the viewer's own
+must **not** — its source is the sim, and the whole point of the estate-channel ban fix is that **the viewer's own
 parcel/ban status cannot be trusted** (`WebRtcVoiceRegionModule.cs:245` already comments
 "*do fully not trust viewers voice parcel requests*"). The feed therefore travels over the
 **existing sim→Janus signaling path** the region module already uses to provision
-(`WebRtcVoiceServiceConnector` JSON-RPC → Robust service → Janus plugin; baseline §3.3), as a new
+(`WebRtcVoiceServiceConnector` JSON-RPC → Robust service → Janus plugin), as a new
 plugin **control request** addressed to the room/session. It is authenticated server-to-server and
 never exposed to the viewer. (Exact carrier — plugin request vs Janus admin API — is an
 implementation detail to confirm against the live path; the *shape* below is transport-agnostic.)
@@ -146,7 +145,7 @@ Two candidates were considered:
 **Recommend (B), with a bulk *snapshot* as a sub-mode of the same message (not a separate path).**
 Reasoning keyed to the update rate:
 
-- Parcel/estate **edits are rare** (#12/#2.4 events); but **avatar movement across parcels is
+- Parcel/estate **edits are rare**; but **avatar movement across parcels is
   frequent** and is the dominant driver (§2.1). A full O(N²) matrix on every crossing is wasteful —
   when one avatar crosses a boundary, only that avatar's row and column change. Delta cost scales
   with **avatars crossing**, not **avatars present**.
@@ -167,7 +166,7 @@ listeners' entries — it does not rely on the mixer to infer the reverse. This 
 rule dead simple ("exclude S from L's mix iff S ∈ L's exclusion set") and prevents one-way
 audibility. (Note the *visual* `SeeAVs` model is technically one-way at the source — an occupant of
 a hidden parcel is hidden from outsiders, but outsiders remain visible to the occupant, because
-`ParcelHideThisAvatar` derives from the *sender's* parcel; baseline §1.2. Voice deliberately
+`ParcelHideThisAvatar` derives from the *sender's* parcel. Voice deliberately
 chooses symmetric so a listener never hears someone they can't see. This is a design choice, called
 out here so it isn't mistaken for a mismatch with the visual code.)
 
@@ -413,7 +412,7 @@ silently dropped. `query_session`'s `visibility` object gains `deferred_current`
 sim ignores the extra reply key; an old mixer never emits it (a new sim must treat its absence as
 "no information").
 
-**(d) Presence delivery guarantee + counters (M-A2A-1, added 2026-08-30).** The joiner's `"j"` to
+**(d) Presence delivery guarantee + counters (added 2026-08-30).** The joiner's `"j"` to
 already-present members (`push_presence`) and the roster backlog a newly-writable listener receives
 are now provably complementary: `data_ready` flips the recipient's `dc_open` and takes the
 join-backlog snapshot in ONE critical section under `room->mutex` — the same mutex every
@@ -421,18 +420,18 @@ join-backlog snapshot in ONE critical section under `room->mutex` — the same m
 least one of {live push, backlog} delivers the `"j"`, by mutual exclusion alone (the three orderings
 are enumerated at the fence in `janus_slvoice_data_ready`). A duplicate (fence between insert and
 push) is benign: a second `"j"` is idempotent at the viewer. This matters most for rooms that
-receive **no** `peer_ctl_batch` (the avatar-to-avatar rooms, room model (a)), where the
+receive **no** `peer_ctl_batch` (the avatar-to-avatar rooms), where the
 visibility-transition repair path never runs and a dropped one-shot `"j"` used to be unrecoverable.
 `query_session` gains two additive per-session counters (this session as RECIPIENT):
 `presence_pushed` and `presence_dropped_dc_closed`; after the fence the dropped counter should only
 ever count a genuinely dead channel (PeerConnection down), never the join race. Old sims are
 unaffected; the fields are additive.
 
-**(e) Leave announcement on EVERY removal path + leave counter (M-A2A-2, added 2026-08-31).** The
+**(e) Leave announcement on EVERY removal path + leave counter (added 2026-08-31).** The
 leave presence (`"l"`) used to be pushed only by the `"leave"` request arm; a participant whose
 teardown arrived as PC-death + session-destroy was removed **silently**, so the remaining members
 never received `"l"` and a stock viewer's `hangup_on_last_leave` never fired — the remaining party
-of a two-party (A2A) call sat in the room until manual End Call (O-42c). The push now lives in
+of a two-party (A2A) call sat in the room until manual End Call. The push now lives in
 `janus_slvoice_leave_room` itself, before the participant is removed, so the `"leave"` request,
 `destroy_session`, and any future removal caller all announce; the room-transition guarantee makes
 it exactly-once per removal. A downed PeerConnection (`hangup_media`) deliberately does NOT
@@ -442,13 +441,13 @@ announce: it never removes the participant, and Janus can renegotiate media on t
 decompose pushed=N into joins vs leaves. `presence_pushed` itself now counts at the actual
 relay_data hand-off (a serialisation failure no longer inflates it).
 
-**(f) The viewer attach window + proof-of-attachment backlog re-send (M-A2A-3, added 2026-08-31).**
+**(f) The viewer attach window + proof-of-attachment backlog re-send (added 2026-08-31).**
 The stock viewer discards data-channel frames that arrive before its data observer is attached
 (`llwebrtc.cpp:1763-1771` — an observer list with no buffering, attached via a main-thread hop after
 `OnDataChannelReady`). The join backlog fires at SERVER-side `data_ready`, inside that window, so a
 delivered-and-counted `"j"` can be silently lost viewer-side — the peer never enters the viewer's
-participant map and a later `"l"` no-ops, leaving `hangup_on_last_leave` unfired (the O-42c
-falsifier: `presence_leave_pushed=1` with no hangup). The viewer's own `"j"` SLData (`sendJoin`) is
+participant map and a later `"l"` no-ops, leaving `hangup_on_last_leave` unfired (the
+observed failure: `presence_leave_pushed=1` with no hangup). The viewer's own `"j"` SLData (`sendJoin`) is
 sent only after its data interface is set — proof the window has closed — so on receiving it the
 mixer re-sends that participant the roster backlog, once per attachment (CAS-guarded
 `backlog_confirmed`, cleared with `dc_open` on `hangup_media` and on leave, idempotent at the
@@ -460,14 +459,14 @@ per attachment). Old viewers/sims unaffected.
 
 ## 4. Mixer side — folding visibility into the existing per-listener map
 
-No new per-listener structure. Extend the Phase-2 record
+No new per-listener structure. Extend the existing record
 (`{uuid, has_mute, muted, has_gain, gain}`) with `{has_vis, visible}`:
 
 - **Mix loop** — for listener L, source S: S contributes iff `visible != false` **and**
   `muted != true`. Visibility is an AND-gate on top of mute; a viewer's own mute still works, and a
   sim exclusion the viewer cannot see or override still works. Exclusion is enforced **in the mix**
-  (like mute, `spec §3.4`) so a modified viewer cannot defeat it — which is precisely what #13
-  requires.
+  (like mute, `webrtc-voice-spec.md` §3.4) so a modified viewer cannot defeat it — which is
+  precisely what the estate-channel ban requires.
 - **Roster / data-channel push** — the per-peer batch builder skips any S with `visible == false`
   for that L: no `p`/`v` entry, no `j` join notice, and an `l` (leave) is synthesized for a source
   that transitions visible→excluded so L's dot for S disappears (single-source-of-truth §1). This
@@ -476,8 +475,8 @@ No new per-listener structure. Extend the Phase-2 record
   touches only `has_vis`/`visible`; `replace` for a listener rewrites only that listener's vis
   dimension.
 
-This closes #11 (per-listener audibility), #13 (estate-channel ban), and #5 (`SeeAVs` applied
-to voice) from one feed - **but only for agents that are in the room the feed is addressed
+This closes per-listener audibility, the estate-channel ban, and `SeeAVs` applied
+to voice from one feed - **but only for agents that are in the room the feed is addressed
 to.** See the correction immediately below.
 
 > **CORRECTION - the "regardless of room sharing" claim was wrong.** Verified against mixer
@@ -489,22 +488,21 @@ to.** See the correction immediately below.
 > deliberately room-agnostic, so this is the **only** room the matrix is ever delivered to.
 > An agent provisioned onto a per-parcel room (`UseEstateVoiceChan` clear) therefore receives
 > no exclusion batch at all: its column is computed and sent to a room it is not in, where
-> the mixer drops it as an absent listener (§3.3.1). **#11, #13 and #5 are closed by this
-> feed on the estate channel only.**
+> the mixer drops it as an absent listener (§3.3.1). **Per-listener audibility, the
+> estate-channel ban and `SeeAVs` for voice are closed by this feed on the estate channel only.**
 >
-> #13 also had a second, independent half on the sim side that this feed never touched: the
+> The estate-channel ban also had a second, independent half on the sim side that this feed never touched: the
 > provisioning ban/restrict check was chained as the `else` of the `UseEstateVoiceChan`
 > room-selection branch, so setting the estate-channel flag skipped it entirely. That half
 > was fixed by de-chaining the check in commit `ec3ad9b2f2`
 > (`WebRtcVoiceRegionModule.cs`), not by this feed. The `TaxFree` short-circuit in
-> `LandObject.IsBannedFromLand` remains a third, still-open problem (see
-> `parcel-voice-semantics.md` addendum §E).
+> `LandObject.IsBannedFromLand` remains a third, still-open problem.
 
 ---
 
-## 5. The `OnEstateSettingsChanged` event (#12) — standalone, upstreamable
+## 5. The `OnEstateSettingsChanged` event — standalone, upstreamable
 
-**Correction carried from the re-baseline (see `parcel-voice-semantics.md` addendum D):** an estate
+**Note:** an estate
 event already exists — `IEstateModule.OnEstateInfoChange` (`ChangeDelegate(UUID regionID)`,
 `IEstateModule.cs:41`), fired on estate access deltas including bans/managers
 (`EstateManagementModule.cs:871`) and owner/name/link/settings changes
@@ -521,7 +519,7 @@ flag reaches an `OnEstateInfoChange` fire site on both transports:
   `StoreEstateSettings` `:2246` → `TriggerEstateInfoChange()` `:2250`.
 
 Both fire *after* the store, so a subscriber reads committed state. The feeder's subscription to
-`OnEstateInfoChange` therefore catches voice-enable/disable (row 6), estate bans/managers
+`OnEstateInfoChange` therefore catches voice-enable/disable, estate bans/managers
 (`:871`), and owner/name/link changes — every estate input the matrix needs.
 
 **What's missing is granularity, not coverage.** `OnEstateInfoChange` carries only the region UUID
@@ -530,11 +528,11 @@ Both fire *after* the store, so a subscriber reads committed state. The feeder's
 upstreamable addition is therefore a **payload-carrying** estate event, not a brand-new
 subscription point.
 
-### Design (shareable with Iain)
+### Design (shareable upstream)
 
 - **Name / home.** Add `OnEstateSettingsChanged` alongside the existing `OnEstateInfoChange`. Prefer
   extending the estate seam (`IEstateModule` / `EventManager`) rather than a voice-private hook, so
-  it is upstreamable and Iain's planned version and this one converge on one event.
+  it is upstreamable and any upstream version of this event converges with this one.
 - **Fire sites.** The same points that already call `TriggerEstateInfoChange` /
   `OnEstateInfoChange.Invoke` — critically `ExecDeltaRequests` (`EstateManagementModule.cs:871`,
   ban/manager deltas) and the estate-settings save paths (`:2221`, `:2250`, `:370`, `:414`, `:443`).
@@ -554,13 +552,13 @@ recompute), so adopting the richer event later needs no mixer change.
 
 ---
 
-## 6. Forward-compatibility with Phase 3b (spatial DSP) — no v2 needed
+## 6. Forward-compatibility with spatial DSP — no v2 needed
 
-Phase 3b adds distance attenuation / panning / HRTF. What it needs from feeds, and why this protocol
+Spatial DSP adds distance attenuation / panning / HRTF. What it needs from feeds, and why this protocol
 already covers it:
 
 - **Geometry (`sp/sh/lp/lh`)** — already **viewer-supplied** over the data channel and stored per
-  participant (`sldata-extensions.md`: parser stores them as int = value×100; flat until 3b). No sim
+  participant (`sldata-extensions.md`: parser stores them as int = value×100; flat until spatial DSP). No sim
   feed required for root-agent-controlled geometry.
 - **Child-agent positions** — the one gap. A child avatar's `AbsolutePosition` is already resolved
   every feeder tick to derive its parcel (§2.1); the same tick can carry position for spatial math
@@ -569,10 +567,10 @@ already covers it:
   is a per-listener/per-source map already flowing at movement cadence, adding an optional
   `pos:[x,y,z]` per source is an additive field, not a protocol v2.
 - **Visibility precedes spatialization** — an excluded source is dropped from the mix *before* any
-  DSP, so 3b never spatializes audio a listener shouldn't hear. Ordering: matrix exclusion → mute →
+  DSP, so spatial DSP never spatializes audio a listener shouldn't hear. Ordering: matrix exclusion → mute →
   gain → spatial. The single-source-of-truth rule (§1) still governs.
 
-**Conclusion:** the visibility feed (§3) and the feeder tick (§2.1) are the same plumbing 3b needs
+**Conclusion:** the visibility feed (§3) and the feeder tick (§2.1) are the same plumbing spatial DSP needs
 for child positions; keep the `slvoice_vis` message extensible (optional per-source fields) and no
 v2 is forced when spatial DSP arrives.
 
@@ -581,7 +579,7 @@ v2 is forced when spatial DSP arrives.
 ## Open items to confirm in code review (not blockers to the design)
 
 1. **Exact transport carrier** for `slvoice_vis` (plugin request vs Janus admin API) against the
-   live `WebRtcVoiceServiceConnector` path (baseline §3.3 flags two provisioning overloads).
+   live `WebRtcVoiceServiceConnector` path (the connector has two provisioning overloads).
 2. ~~**`AllowVoice` fire path**~~ **RESOLVED** — the "Voice Enabled" toggle reaches
    `OnEstateInfoChange` on both viewer paths (UDP `:2221`, CAP `:2250`); see §5.
 3. **Feeder tick default** (250–500 ms) — tune against child-agent movement responsiveness vs

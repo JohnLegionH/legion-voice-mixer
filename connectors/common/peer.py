@@ -240,7 +240,7 @@ class ConnectorPeer:
             track = self.local_track()
             if track is None:
                 # One audio transceiver, sendrecv with NO local track: we negotiate
-                # the m-line but never emit a frame (assessment §2).
+                # the m-line but never emit a frame.
                 self._pc.addTransceiver("audio", direction="sendrecv")
             else:
                 # addTrack negotiates the same sendrecv m-line, carrying the track.

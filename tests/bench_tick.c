@@ -8,7 +8,7 @@
  * \brief    Tick benchmark harness — measures janus_slvoice_room_tick wall time
  *           at a chosen occupancy (N participants, A active talkers).
  *
- * \details  Per docs/voice/scaling-assessment.md, the pinned measurement is the
+ * \details  The pinned measurement is the
  * per-tick cost at N≈110. This harness reaches the tick by #including the plugin
  * source (the room/session structs and the tick are static), provides the Janus
  * core symbols the plugin leaves undefined (the core supplies them in production),
@@ -147,7 +147,7 @@ static janus_slvoice_session *bench_make_session(janus_slvoice_room *room, int i
 	janus_mutex_unlock(&s->mutex);
 	g_atomic_int_set(&s->webrtc_up, 1);   /* pass-2 listener gate (setup_media in prod) */
 
-	/* Geometry. Camera at the avatar (lp=sp, so no §7.1 leash effect); identity
+	/* Geometry. Camera at the avatar (lp=sp, so no camera-leash effect); identity
 	 * heading (azimuth then varies with relative position). x100 units throughout. */
 	if(mode == GEO_SPREAD) {
 		/* Distribute across one 256x256 m region on a near-square row-major grid, so

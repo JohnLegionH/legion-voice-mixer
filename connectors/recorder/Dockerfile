@@ -1,4 +1,4 @@
-# S-CON-4 recorder peer (docs/voice/connector-build-plan.md).
+# Recorder peer.
 # Build context is connectors/ (compose sets it) so the shared common/ package
 # ships in the image alongside the recorder package.
 FROM python:3.12-slim

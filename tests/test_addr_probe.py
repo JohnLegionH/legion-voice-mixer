@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""Unit tests for entrypoint/addr_probe.py (slice A.1): STUN and DNS codecs, the participant sum, and
+"""Unit tests for entrypoint/addr_probe.py: STUN and DNS codecs, the participant sum, and
 both probes end to end against throwaway loopback UDP servers. There are no external network calls,
 so the image build can run this:
 
@@ -160,7 +160,7 @@ class Participants(unittest.TestCase):
 
 
 class ParticipantsPoll(unittest.TestCase):
-    """The poll the A.1 restart action waits on (A.2 carry-over): a failed or unauthorised poll is never a count."""
+    """The poll the address-change restart action waits on: a failed or unauthorised poll is never a count."""
 
     def setUp(self):
         self.janus = fakes.FakeJanusHTTP(secret="s3cret", rooms=(2, 1))

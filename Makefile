@@ -33,7 +33,7 @@ PKGCONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config
 
 # janus-gateway pulls in glib-2.0 and jansson via its Requires:; we name them
 # explicitly too so a build still works if only their .pc files are present.
-# Phase 1B echoes audio, so opus (decode/encode) is a dependency again.
+# The echo test sends audio back, so opus (decode/encode) is a dependency.
 # openssl: the join capability verifies an HMAC-SHA256 with a constant-time compare
 # (src/joincap.c). Janus already links OpenSSL for DTLS, so this adds no new runtime dependency.
 PKGS := janus-gateway glib-2.0 jansson opus openssl
@@ -53,7 +53,7 @@ CFLAGS  += -std=gnu11 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(JANUS_PREFIX
 LDFLAGS += -shared
 LDLIBS  += $(PKG_LIBS)
 
-# Phase 2 adds the per-room N-minus-one mixer; the pure mixing math lives in
+# The per-room N-minus-one mixer; the pure mixing math lives in
 # src/mixer/mix.c (Janus/Opus-free) so it is shared with the unit test below.
 SRCS := src/janus_slvoice.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/joincap.c src/mixer/mix.c
 OBJS := $(SRCS:.c=.o)
@@ -151,7 +151,7 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN
 $(TEST_JOINCAP_BIN): $(TEST_JOINCAP_SRCS) src/joincap.h
 	$(CC) $(TEST_SSL_CFLAGS) -o $@ $(TEST_JOINCAP_SRCS) $(TEST_SSL_LIBS)
 
-# test_visauth: Phase 0 (keying, the decision table, staleness, replies, shadow counters). Like
+# test_visauth: visibility authority (keying, the decision table, staleness, replies, shadow counters). Like
 # test_room_lifecycle it #includes janus_slvoice.c and builds with the bench flags.
 $(TEST_VISAUTH_BIN): $(TEST_VISAUTH_SRCS) src/janus_slvoice.c src/visauth.h
 	$(CC) $(BENCH_CFLAGS) -o $@ $(TEST_VISAUTH_SRCS) $(BENCH_LIBS)
@@ -190,7 +190,7 @@ $(TEST_AZIMUTH_BIN): $(TEST_AZIMUTH_SRCS)
 $(TEST_PAN_BIN): $(TEST_PAN_SRCS)
 	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_PAN_SRCS) -lm
 
-# bench_tick: tick-cost load harness (docs/voice/scaling-assessment.md). Built ONLY
+# bench_tick: tick-cost load harness. Built ONLY
 # on demand (`make bench_tick`), never by `make test`. Sweep tuning via EXTRA_CFLAGS,
 # e.g. `make bench_tick EXTRA_CFLAGS='-DSLV_MAX_MIX=128 -DSLV_OPUS_COMPLEXITY=6'`.
 bench_tick: $(BENCH_TICK_BIN)

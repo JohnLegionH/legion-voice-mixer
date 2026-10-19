@@ -1,10 +1,10 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""S-CON-6 injector peer (docs/voice/connector-build-plan.md; brief Amendment 2).
+"""Injector peer.
 
 A headless aiortc WebRTC peer that joins one janus.plugin.slvoice room exactly
-as the S-CON-4 recorder does (display = the sim-registered connector NPC's
+as the recorder does (display = the sim-registered connector NPC's
 UUID, sendrecv) but SENDS audio: 20 ms mono 48 kHz Opus frames fed from a
 PCM/WAV pipe or file (SOURCE). When the source is exhausted or idle it sends
 silence frames — the track never stops. It also receives the room mixdown so
@@ -14,8 +14,8 @@ flows; presence_dropped_dc_closed stays quiet) and never written to.
 
 Sim-side prerequisite: the [VoiceConnector.<name>] record must carry
 MayInject=true — with MayInject=false the sim pushes a moderation mute at
-registration and NOBODY hears this peer (that silence is S-CON-5(e), the
-enforcement test, not a defect here). The NPC's own matrix row constrains the
+registration and NOBODY hears this peer (that silence is the moderation
+mute working as designed, not a defect here). The NPC's own matrix row constrains the
 injected audio like any avatar's (the inject-side mirror of the scope gate).
 
 The Janus session/join/poll/keepalive/teardown plumbing is shared with the
@@ -66,7 +66,7 @@ class SourceReader:
 
     A thread because FIFO open/read BLOCK until a writer appears, and that must
     never stall the event loop (keepalives, long-poll). Behaviour by source
-    kind, per the plan's pipe semantics:
+    kind, with these pipe semantics:
 
     - FIFO: EOF means the writer closed; reopen and wait for the next writer
       (repeated injections through one pipe), regardless of LOOP;

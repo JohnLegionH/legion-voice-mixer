@@ -17,7 +17,7 @@
  * test (tests/test_visbatch.c, `make test`). The buf/len interface hides jansson
  * from callers, matching slv_sldata_parse.
  *
- * Wire shape (spec §3.3), accepted either at top level or wrapped in "slvoice_vis":
+ * Wire shape (mixer-feed-protocol.md §3.3), accepted either at top level or wrapped in "slvoice_vis":
  *   { "op":"add|remove|replace", "room":<int>, "excl": { "<L>":["<S>",...], ... } }
  *
  * Resilience posture (matches the feeder's tick hardening): a batch that lacks a
@@ -71,7 +71,7 @@ typedef struct slv_vis_entry {
 	int n_excl;                        /*!< number of source UUIDs */
 } slv_vis_entry;
 
-/*! \brief Phase 0: the listener generation the sim believes the mixer
+/*! \brief The listener generation the sim believes the mixer
  * holds for one listener named by an add/remove. */
 typedef struct slv_vis_base {
 	char listener[SLV_UUID_LEN];
@@ -91,7 +91,7 @@ typedef struct slv_visbatch {
 	slv_vis_entry *mute_entries;       /*!< heap array of \c n_mute_entries moderation-mute updates */
 	int n_mute_entries;
 	int n_skipped;                     /*!< malformed listener/source items skipped (both channels) */
-	/* Phase 0 authority stamp. A batch from a sim without arming has
+	/* Authority stamp. A batch from a sim without arming has
 	 * none of these keys: has_epoch stays 0 and the batch is handled exactly as before. When room_epoch is
 	 * present it must be 16 hex digits and policy_generation an integer 1..2^32-1, else the batch is
 	 * MALFORMED. base is optional (a replace needs none). */

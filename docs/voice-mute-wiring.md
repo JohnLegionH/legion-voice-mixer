@@ -1,12 +1,11 @@
 # Firestorm WebRTC voice mute / gain wiring — source trace
 
-Read-only investigation of the Firestorm fork at `/d/phoenix-firestorm`
-(branch matching the local checkout). All line numbers below are quoted from
+Read-only investigation of a checkout of the Firestorm fork (`phoenix-firestorm`). All line numbers below are quoted from
 **that** tree. Goal: determine whether any stock-viewer user action causes the
 `"m"` (mute) or `"ug"` (gain) SLData messages to be emitted on the WebRTC voice
 data channel, which our server-side mixer reads.
 
-## TL;DR / Bottom line (answer to Q4)
+## TL;DR / Bottom line
 
 **Yes — stock Firestorm _does_ send `"m"` and `"ug"` on the WebRTC data
 channel.** The crux hypothesis ("FS voice mute is client-side playback-only and
@@ -39,7 +38,7 @@ observer.
 
 ---
 
-## 1. Who calls `setUserMute()` / `setUserVolume()`? (Q1)
+## 1. Who calls `setUserMute()` / `setUserVolume()`?
 
 ### `setUserMute` — emits `{"m": {"<uuid>": <bool>}}`
 
@@ -93,7 +92,7 @@ UI callers of `LLVoiceClient::setUserVolume` (**all wired to sliders**):
 
 ---
 
-## 2. What runs on right-click → "Mute"? (Q2)
+## 2. What runs on right-click → "Mute"?
 
 There are two distinct "mute" verbs in the UI, and it matters which one the user
 clicked:
@@ -154,13 +153,13 @@ Flags are **exceptions**: a set bit means "*don't* mute this aspect"; `mFlags==0
 means mute everything. That is why `onChangeDetailed` computes
 `muted = (mFlags & flagVoiceChat) == 0`.
 
-**Answer to Q2:** right-click "Mute"/"Block" runs `LLMuteList::add` (AGENT), which
+**Answer:** right-click "Mute"/"Block" runs `LLMuteList::add` (AGENT), which
 *does* reach `setUserMute` → emits `"m"`. It is **not** playback-only. The catch
 is that the general menu item is a *full block*, not a voice-only toggle.
 
 ---
 
-## 3. Per-avatar VOICE volume control (Q3)
+## 3. Per-avatar VOICE volume control
 
 Yes, it exists, but it is **not** in the general right-click menu — it is a popup:
 
@@ -188,7 +187,7 @@ There are also inline per-row voice sliders in avatar lists when the list has
 **Vintage skin sets `show_voice_volume="false"`** (`floater_fs_voice_controls.xml`
 vintage:96), which would hide those inline sliders.
 
-**Answer to Q3:** the per-avatar voice-volume slider exists and *does* emit
+**Answer:** the per-avatar voice-volume slider exists and *does* emit
 `"ug"`, but it is reached by clicking the **voice level icon** next to a
 participant (opening `floater_voice_volume`), not from the avatar right-click
 menu. If you can't find it, check that you're on a voice-enabled list, on the
@@ -291,7 +290,7 @@ which case you're in.*
 
 ---
 
-## Mixer side — viewer mutes vs sim moderation mutes (O-49, 2026-09-12)
+## Mixer side — viewer mutes vs sim moderation mutes
 
 The mixer keeps the two mute sources in **separate** structures. The mix silences a
 source for a listener when **either** one is set, and clearing one never clears the
@@ -300,9 +299,9 @@ other.
 | Source | Structure | Bound | Cleared on `leave_room` |
 |---|---|---|---|
 | Viewer `"m"` / `"ug"` (this document) | `session->peer_ctl[SLV_MAX_PEER_ADJ]` (32 slots: `muted`, `has_gain`, `gain`) | 32 targets; extras are dropped | no (unchanged) |
-| Sim moderation mute (`peer_ctl_batch` mute channel, Option A) | `session->mod_muted` — a `GHashTable` set of source UUIDs | none | **yes**, next to `excluded` |
+| Sim moderation mute (`peer_ctl_batch` mute channel) | `session->mod_muted` — a `GHashTable` set of source UUIDs | none | **yes**, next to `excluded` |
 
-**Why (O-49).** The moderation flag used to be a `mod_muted` member of
+**Why.** The moderation flag used to be a `mod_muted` member of
 `slv_peer_ctl`, so it shared those 32 slots with the viewer's own entries. A
 listener with 32 stored per-avatar volumes could not be given **any** sim moderation
 mute: `set_mod_muted_locked` returned FALSE ("table full: drop") and the source

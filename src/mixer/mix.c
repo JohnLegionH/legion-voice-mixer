@@ -61,7 +61,7 @@ int slv_mix_nminus1(float *out, size_t n,
                     const float *const *sources, const int *active,
                     const int *mutes, const float *gains,
                     int nsrc, int self) {
-	/* Thin wrapper (Amendment 5): the mono N-minus-one mix is the stereo mix with
+	/* Thin wrapper: the mono N-minus-one mix is the stereo mix with
 	 * left gain == right gain == the scalar gain. Multiplying by an exact 1.0f is
 	 * identity in IEEE float, so this reproduces the old unity fast path bit for
 	 * bit; the 26 existing test_mix checks pass unchanged. */

@@ -53,7 +53,7 @@ async def fetch_once(http: aiohttp.ClientSession, url: str, secret: str) -> dict
     if not grant["join_cap"] or not grant["session_id"] or not grant["display"]:
         raise CapabilityUnavailable("malformed 200 body")
     # The sim's optional position, GLOBAL centimetres as integers - the viewer's own SLData frame.
-    # Absent is normal (a pre-0.8h sim, or a record the sim cannot place): the peer is then mixed non-spatially. A
+    # Absent is normal (an older sim that sends no position, or a record the sim cannot place): the peer is then mixed non-spatially. A
     # malformed one is a malformed grant, like every other field here: a sim sending a broken position is a bug.
     pos = body.get("position")
     if pos is not None:

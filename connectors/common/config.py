@@ -9,7 +9,7 @@ import os
 import sys
 
 
-#: Recording opt-in (spec §3.5): writing room audio to disk needs this set to exactly "yes" (any case).
+#: Recording opt-in: writing room audio to disk needs this set to exactly "yes" (any case).
 RECORDING_OPT_IN_ENV = "RECORDING_OPT_IN"
 
 

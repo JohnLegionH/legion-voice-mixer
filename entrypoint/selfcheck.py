@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Legion Builds
 # SPDX-License-Identifier: GPL-3.0-only
 # Licensed under the GNU General Public License, version 3 only; see the LICENSE file in the repository root.
-"""legion-voice-selfcheck: reachability self-check for the mixer container (slices A.2, A.2b, A.3).
+"""legion-voice-selfcheck: reachability self-check for the mixer container.
 
-  C1   the advertised address is public (the A.1 state file); CGNAT is its own FAIL
+  C1   the advertised address is public (the address discovery state file); CGNAT is its own FAIL
   C2a  media path, outbound: STUN from the lowest, middle and highest port of JS_RTP_PORT_RANGE.
        Information about container-initiated UDP. A remapped source port is a WARN (normal for a
        published-port container); only no answer at all is a FAIL.
@@ -37,7 +37,7 @@ usage: legion-voice-selfcheck [--json] [--startup] [--timeout SECONDS]
                 from a device outside the network, and wait --seconds (default 120) for one. A receipt goes to
                 /run/legion-voice/selfcheck-inbound.json.
   --candidates  only the candidate-type report (JS_ADMIN_SECRET from the environment)
-  --sessions    recent slvoice sessions, live and ended, from the ICE diagnostics collector (slice A.5), newest first:
+  --sessions    recent slvoice sessions, live and ended, from the ICE diagnostics collector, newest first:
                 each one's outcome, agent, room, handle and path. --limit N (default 20, 0 = all); --agent filters by
                 agent UUID prefix, --room by room, --failed keeps FAIL and WARN.
   --session     one session in detail: agent, room, ICE and DTLS states, the selected pair with both candidate types,
@@ -254,7 +254,7 @@ def check_c1(state_path):
             raise ValueError("nat_1_1_mapping is not a list")
     except (OSError, ValueError, KeyError, TypeError) as err:
         return result("C1", INCONCLUSIVE, "cannot read the advertised address from %s (%s)" % (state_path, err),
-                      "the entrypoint writes this file at start (A.1): check the start log for "
+                      "the entrypoint writes this file at start: check the start log for "
                       "[entrypoint] ADDRESS_RESOLUTION", facts=facts)
     classes = [(str(ip), ipv4_class(str(ip))) for ip in mapping]
     public = [ip for ip, cls in classes if cls == "public"]
@@ -743,8 +743,8 @@ def check_c5(bind, port_text, base, public_addrs, budget, connect_map):
                       "set JS_ADMIN_PORT to the admin port number")
     if not public_addrs:
         return result("C5", INCONCLUSIVE, head + "; no public address to probe (see C1)",
-                      "fix C1 first; meanwhile make sure no router forward or firewall rule exposes TCP %d (A.6 "
-                      "recipes)" % port)
+                      "fix C1 first; meanwhile make sure no router forward or firewall rule exposes TCP %d (see the "
+                      "deployment recipes)" % port)
     if budget.expired():
         return not_run("C5", budget)
     janus, other, closed = [], [], []
@@ -769,7 +769,7 @@ def check_c5(bind, port_text, base, public_addrs, budget, connect_map):
                       "run legion-voice-selfcheck again, or raise JS_SELFCHECK_TIMEOUT_S")
     return result("C5", PASS, head + "; not reachable at %s (unreachable is the desired result)" % ", ".join(closed),
                   notes=["probed from inside the container through the public address; a router that does not "
-                         "hairpin TCP also reads as unreachable, so confirm from outside the network (A.6 recipes)"])
+                         "hairpin TCP also reads as unreachable, so confirm from outside the network (see the deployment recipes)"])
 
 
 # ---- C6: TURN for this server -------------------------------------------------------------------
@@ -807,7 +807,7 @@ def check_c6(jcfg_path, c1, budget):
         notes = [_turn_type_note("n/a (no TURN configured)")]
         if c1["status"] in (PASS, WARN) and public:
             notes.insert(0, "viewers whose own network blocks UDP need viewer-side TURN, which this component cannot "
-                            "provide (A.4)")
+                            "provide")
             return result("C6", PASS,
                           "no TURN configured, and this server is publicly reachable per C1 (%s): the server-side media "
                           "path is correct and complete without a relay" % ", ".join(public), notes=notes)

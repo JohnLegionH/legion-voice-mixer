@@ -12,8 +12,8 @@ same way on the line below, so it is no escape either. A POST's secret, by contr
 JSON body by the core (`vendor/janus-gateway/src/janus.c:978`).
 
 So these tests are a ratchet, not a fix: they fail if a POST ever starts carrying the secret in the URL, and
-they state the long-poll GET as the one documented exception. The mitigation for that exception is 0.8f's
-rule - a transport error is logged by status alone, never by URL (`common/joincap.py:30`, `:39`).
+they state the long-poll GET as the one documented exception. The mitigation for that exception is the
+rule that a transport error is logged by status alone, never by URL (`common/joincap.py:30`, `:39`).
 
 Run from connectors/: `python -m pytest common/` or `python -m common.test_apisecret`.
 """

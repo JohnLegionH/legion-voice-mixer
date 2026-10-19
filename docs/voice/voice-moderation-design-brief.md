@@ -1,12 +1,12 @@
 # Design Brief — Voice Moderation
 
-**Status:** Slice 1 complete and VERIFIED end to end (2026-08-22) — see the resolution at
+**Status:** First stage complete and VERIFIED end to end (2026-08-22) — see the resolution at
 the end, including the viewer requirement: the feature needs a Firestorm master-tracking
 build, not any release as of 7.2.4. Open Question 1 unanswered; Open Question 2 partially
 answered by the verification run.
 **Date:** 2026-08-21.
-**Basis:** CC recon 2026-08-21 against `tranquillity-develop` at `392c0efc1d` (*test(voice):
-engine coverage for the §E TaxFree ban path*) and the Firestorm viewer source (read-only
+**Basis:** recon 2026-08-21 against `tranquillity-develop` at `392c0efc1d` (*test(voice):
+engine coverage for the TaxFree ban path*) and the Firestorm viewer source (read-only
 reference); SL viewer release notes 26.1.0 and 26.2.0.
 **Target:** parity with the voice moderation LL shipped in viewer 26.1, Dec 2025.
 
@@ -30,7 +30,7 @@ everyone / individual mute, wired through `LLNearbyVoiceModeration` to a CAP POS
 
 **The body carries no parcel identifier.** Neither operand form names a parcel or region.
 The server therefore resolves the target parcel from the requesting agent's
-`ScenePresence` position at request time (see slice 1). This is not a defect in the
+`ScenePresence` position at request time (see Scope). This is not a defect in the
 protocol — it is what makes parcel scope achievable *without trusting the viewer*: the
 sim decides which parcel the moderator is standing on, so the viewer cannot widen the
 scope by lying about it.
@@ -81,7 +81,7 @@ avatar. That matches SL and is the desired behaviour; a later reader must not "f
 
 **Fan-out cost.** A source-side mute excludes that source in *every* listener's set — the
 same shape as an estate ban. So `mute_all` on a crowded parcel is an N-per-source fan-out
-into the peer_ctl feed. This is expected and is what acceptance §1's `excluded_entries`
+into the peer_ctl feed. This is expected and is what the first acceptance item's `excluded_entries`
 check observes; it is not a new cost class, but it should not surprise anyone.
 
 ## SETTLED: authorisation composes from existing pieces
@@ -106,7 +106,7 @@ against the parcel the moderator actually occupies.
 
 ## Scope
 
-**Slice 1 — the feature, in memory:**
+**First stage — the feature, in memory:**
 
 1. **Advertise and handle** the `SpatialVoiceModerationRequest` CAP, parsing all four
    operands. Advertising is not optional: the viewer calls
@@ -124,7 +124,7 @@ against the parcel the moderator actually occupies.
    in memory, so late joiners are muted for the process lifetime.
 5. **Feed the matrix** through the new source-side `ParcelView` predicate.
 
-**Slice 2, deferred:**
+**Second stage, deferred:**
 
 - **Persistence across restart.** `LandData` has no extensible field, so this means a
   scalar on the land row plus a `landvoicemoderation` table mirroring `landaccesslist` —
@@ -140,9 +140,9 @@ against the parcel the moderator actually occupies.
 - **Never trust the viewer's authorisation.** Re-check server-side on every operand,
   against the position-resolved parcel.
 - **The matrix is the single enforcement point.** Moderation must not be enforced at
-  provision time or anywhere else, for the same reason §E's TaxFree fix lives only in
+  provision time or anywhere else, for the same reason the TaxFree ban fix lives only in
   the matrix — one enforcement point or none.
-- **In-memory state is deliberate for slice 1** and must be recorded as non-persistent,
+- **In-memory state is deliberate for the first stage** and must be recorded as non-persistent,
   so nobody assumes a restart preserves a mute.
 
 ## Acceptance
@@ -157,7 +157,7 @@ Verifiable end to end in Firestorm 26.2.0 with no viewer change:
    rather than silently dropping it — per the ban-add instrumentation precedent, a silent
    refusal is a defect.
 
-## Open questions — answer in-world before freezing slice 1
+## Open questions — answer in-world before freezing the first stage
 
 1. **Does SL's `mute_all` scope agree with parcel?** The scope is already *settled by the
    body shape*: the CAP names no parcel, so the server resolves it from the moderator's
@@ -175,7 +175,7 @@ Verifiable end to end in Firestorm 26.2.0 with no viewer change:
 
 ---
 
-## Status: slice 1 complete and deployed; end-to-end verification BLOCKED on the viewer (2026-08-21)
+## Status: first stage complete and deployed; end-to-end verification BLOCKED on the viewer (2026-08-21)
 
 The moderation menu could not be made to appear in Firestorm 26.2.0 despite every documented
 gate condition being satisfied. Recorded here so the next attempt does not repeat today's
@@ -245,7 +245,7 @@ this flag has a real source, a real default, and a real operator control, unlike
 
 One caveat, an observation rather than a defect: because the default is `true`, a region advertises
 voice-enabled whether or not a voice backend is actually wired up. That is pre-existing OpenSim
-behaviour, orthogonal to this work, and not introduced by the moderation slice.
+behaviour, orthogonal to this work, and not introduced by the moderation work.
 
 ---
 
@@ -303,7 +303,7 @@ off the moderated parcel — created the condition. Clear ban entries between mo
 
 ## Moderation state is reported to no client — SL parity gap (2026-08-24)
 
-Slice 1 applies moderation correctly end to end: CAP → store → feeder → sender → mixer
+The first stage applies moderation correctly end to end: CAP → store → feeder → sender → mixer
 exclusion → audible silence, tracking the target's parcel position live. All of that was
 re-verified on net10 after the develop rebase.
 
@@ -327,7 +327,7 @@ moderation state.
 **In SL**, moderation state rides in the speaker/agent list, so every client's participant list
 reflects who is muted, and the mute/unmute control is correct by construction.
 
-**Relationship to slice 2.** Slice 2 plans persistence — a scalar on the `land` row plus a
+**Relationship to the second stage.** The second stage plans persistence — a scalar on the `land` row plus a
 `landvoicemoderation` table mirroring `landaccesslist`. Reporting state to clients needs the
 same underlying query: what is the current moderation state for this parcel. Worth designing
 them together rather than sequentially; the persistence work will otherwise be repeated when the

@@ -11,7 +11,7 @@ applied, and the one slvoice-specific **extension** it adds: the `echo` toggle.
 > (`j/l/sp/sh/lp/lh/m/ug`, "per the published format") and the Opus fmtp; §6
 > confirms `lh` is the listener-heading quaternion; §4.2 defines the echo test.
 > The plugin **merges** these values per participant (a message updates only the
-> fields it carries, O-64), and each room's mix tick uses the geometry to
+> fields it carries), and each room's mix tick uses the geometry to
 > spatialise the mix. Per `docs/voice/current-architecture.md` §4 the OpenSim
 > C# side does **not** interpret SLData at all — it forwards the viewer's SDP
 > (including the `m=application` data-channel section) verbatim — so this
@@ -51,12 +51,12 @@ Diagnostics: `query_session` reports `data_msgs_received`,
 `last_data_fields_seen` and `last_msg_fields_seen` (comma-separated lists such as
 `sp,sh,echo`) — see the next section for what each one means.
 
-### Persistent state across messages (O-64, 2026-09-12)
+### Persistent state across messages
 
 The viewer sends SLData **only on change**. Live read 2026-09-12: the stock viewer's
 geometry message always carries `sp,sh,lp,lh` together, while a volume-slider or
-mute change arrives as its own `{"ug":{...}}` / `{"m":{...}}` message. Until O-64 the
-plugin **replaced** `session->last_data` with each message, so a `ug`/`m` message
+mute change arrives as its own `{"ug":{...}}` / `{"m":{...}}` message. The plugin
+used to **replace** `session->last_data` with each message, so a `ug`/`m` message
 from a **stationary** user wiped `sp`/`lp`. `snapshot_geometry_locked` then marked
 the snapshot invalid and their mix went **flat** until they next moved.
 
@@ -76,7 +76,7 @@ Geometry therefore persists until the next geometry message overwrites it. A ses
 that never sent geometry stays invalid (flat), as before. Tests:
 `tests/test_sldata.c` `test_merge_*`.
 
-## Per-source mute and gain — `m` / `ug` (Phase 2, verified against the viewer)
+## Per-source mute and gain — `m` / `ug` (verified against the viewer)
 
 The published field list names `m` and `ug`, but **does not** describe their
 shape. Reading the actual viewer source (`phoenix-firestorm/indra/newview/
@@ -118,7 +118,7 @@ inconsistent: its *inbound* join-time gain restore (`OnDataReceivedImpl`) uses
 volume during a session). This is cosmetic for audibility and documented here so
 it isn't mistaken for a mixer bug.
 
-## Mixer→client format corrections (Phase 2, from the viewer parser)
+## Mixer→client format corrections (from the viewer parser)
 
 Reading the viewer's inbound parser (`OnDataReceivedImpl`) also corrected two
 mixer→client mistakes that were silently no-ops before:
@@ -133,9 +133,9 @@ mixer→client mistakes that were silently no-ops before:
   `{"<uuid>":{"j":{"p":true}}}` (single-region: every participant's primary
   server is this mixer). `l` (leave) remains a plain boolean.
 
-## Echo ↔ mix interaction (Phase 2)
+## Echo ↔ mix interaction
 
-Echo is retained from Phase 1 as a **diagnostic per-participant OUTPUT
+Echo is a **diagnostic per-participant OUTPUT
 override**, toggled exactly as before (`{"echo":true/false}` on SLData, or
 `SLV_ECHO_AUTOSTART` for a stock viewer). Its meaning under the real mixer:
 
@@ -212,8 +212,8 @@ batch `{ "<uuid>": {"p":<level*128>,"v":<VAD>} }`.
 - **`m`/`ug` acted on**: per-source mute/gain applied in the mix loop (above).
 - DTX/VAD cull (150 ms release hold) and encode-skip on silent mixes.
 - **Geometry** from `sp/sh/lp/lh` (each component an int = value×100 on the wire),
-  merged per field (O-64):
-  - a camera-position leash (§7.1);
+  merged per field:
+  - a camera-position leash (`docs/voice/webrtc-voice-spec.md` §7.1);
   - distance cull with hysteresis;
   - distance attenuation;
   - constant-power azimuth panning.
@@ -226,5 +226,5 @@ batch `{ "<uuid>": {"p":<level*128>,"v":<VAD>} }`.
 
 **Not implemented:**
 - HRTF, ITD, distance tiers and azimuth binning.
-- The `diag` state member pushed on the **data channel** (§4.1). Diagnostics are
+- The `diag` state member pushed on the **data channel** (`docs/voice/webrtc-voice-spec.md` §4.1). Diagnostics are
   exposed via `query_session` / the admin API.
