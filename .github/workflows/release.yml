@@ -1,12 +1,27 @@
 name: release
 
-# Build and publish the container image on every version tag (e.g. v0.1.0).
+# Build and publish the container image when a version tag is pushed (e.g. v1.2.0).
 # Operators then just `docker pull ghcr.io/johnlegionh/legion-voice-mixer` —
 # no clone, no submodules, no build tools.
+#
+# Two ways in:
+#   - push of a tag `vMAJOR.MINOR.PATCH` (optionally `-suffix`): build and PUSH.
+#     A plain version also moves `:latest` / `:debug`; a suffixed one (v1.2.0-rc1)
+#     pushes only its own version tags and leaves the moving tags alone.
+#   - manual run (Actions > release > Run workflow, or `gh workflow run release.yml`):
+#     a DRY RUN. It builds both images exactly as a tag would (Dockerfile, unit
+#     suites, submodule) but never logs in to the registry and never pushes.
+#     It can run from any branch, so the workflow can be proven without a tag.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the dry run, e.g. 1.2.0 (nothing is pushed)'
+        required: false
+        default: '0.0.0-dryrun'
 
 env:
   IMAGE: ghcr.io/johnlegionh/legion-voice-mixer
@@ -18,16 +33,21 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Only a pushed tag publishes; a manual run is always a dry run.
+      PUBLISH: ${{ github.event_name == 'push' }}
     strategy:
       matrix:
         include:
-          # The normal image: :{version} and :latest.
+          # The normal image: :{version} and, for a plain version, :latest.
           - platform: linux/amd64
             variant: release
             extra_cflags: ""
             moving_tag: latest
           # The packet-level media-logging image (-DSLV_DEBUG_MEDIA):
-          # :{version}-debug and :debug. Same Dockerfile; only EXTRA_CFLAGS differs.
+          # :{version}-debug and, for a plain version, :debug. Same Dockerfile;
+          # only EXTRA_CFLAGS differs.
           - platform: linux/amd64
             variant: debug
             extra_cflags: "-DSLV_DEBUG_MEDIA"
@@ -45,14 +65,51 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Derive version from tag
+      # A tag must look like a version; anything else fails here, before a build.
+      - name: Derive version and tags
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          VARIANT: ${{ matrix.variant }}
+          MOVING_TAG: ${{ matrix.moving_tag }}
+        run: |
+          set -eu
+          if [ "$PUBLISH" = "true" ]; then
+            version="${REF_NAME#v}"
+          else
+            version="${INPUT_VERSION:-0.0.0-dryrun}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$version' is not a version (expected MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-suffix)"
+            exit 1
+          fi
+          suffix=""
+          [ "$VARIANT" = "debug" ] && suffix="-debug"
+          tags="${IMAGE}:${version}${suffix}"
+          # Only a plain (not suffixed) version moves :latest / :debug.
+          case "$version" in
+            *-*) ;;
+            *) tags="${tags}"$'\n'"${IMAGE}:${MOVING_TAG}" ;;
+          esac
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF_TAGS"
+            echo "$tags"
+            echo "EOF_TAGS"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${VARIANT}: $([ "$PUBLISH" = "true" ] && echo 'will push' || echo 'dry run, pushes nothing')"
+            echo '```'
+            echo "$tags"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -60,20 +117,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Uses the repo Dockerfile unchanged (it builds Janus v1.4.1 from the
-      # submodule and already handles the CRLF + libtool fixes). The debug
-      # variant only differs by --build-arg SLV_EXTRA_CFLAGS=-DSLV_DEBUG_MEDIA.
-      - name: Build and push (${{ matrix.variant }})
+      # submodule, runs the unit suites and handles the CRLF + libtool fixes).
+      # The debug variant only differs by --build-arg SLV_EXTRA_CFLAGS=-DSLV_DEBUG_MEDIA.
+      # push is false on a manual run: everything is built, nothing leaves the runner.
+      - name: Build (pushes only for a version tag)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
-          push: true
+          push: ${{ env.PUBLISH == 'true' }}
           build-args: |
             SLV_EXTRA_CFLAGS=${{ matrix.extra_cflags }}
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}${{ matrix.variant == 'debug' && '-debug' || '' }}
-            ${{ env.IMAGE }}:${{ matrix.moving_tag }}
+          tags: ${{ steps.version.outputs.tags }}
           # Separate cache scope per variant so the two parallel builds don't
           # race writing the shared gha cache.
           cache-from: type=gha,scope=${{ matrix.variant }}
