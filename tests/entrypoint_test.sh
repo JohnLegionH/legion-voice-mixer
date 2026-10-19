@@ -509,5 +509,118 @@ sed -e 's/^\([[:space:]]*\)debug_level = 4/\1debug_level = 6/' "$TPL/janus.jcfg"
 run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_OVERRIDE_DIR="$OVR_DBG2"
 check "A.5 mounted janus.jcfg with debug_level 6 and no TURN REST -> no warning" '[ "$RC" -eq 0 ] && has " debug_level=6" && ! has "$GUARD"'
 
+# ---- Secret strength: a non-empty API, admin or join-capability secret under 32 characters is warned about ----
+# Fixed fake values of exact lengths. The WARNING names the knob, never the value and never the length.
+S31="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+S32="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+S32B="cccccccccccccccccccccccccccccccc"
+S32C="dddddddddddddddddddddddddddddddd"
+check "secret strength: the fixtures are 31 and 32 characters" '[ "${#S31}" -eq 31 ] && [ "${#S32}" -eq 32 ] && [ "${#S32B}" -eq 32 ] && [ "${#S32C}" -eq 32 ]'
+
+run_ep JS_PUBLIC_IP=203.0.113.7
+check "secret strength: short API and admin secrets -> a WARNING naming both, and the start goes on" '[ "$RC" -eq 0 ] && has "WARNING: JS_API_SECRET, JS_ADMIN_SECRET shorter than 32 characters" && has STUB-JANUS-RAN'
+check "secret strength: the warning does not name the join-capability secret when it is empty" '! has "JS_ADMIN_SECRET, JS_JOIN_CAP_SECRET" && ! has "JS_JOIN_CAP_SECRET shorter"'
+check "secret strength: the warning prints no secret value and no length" '! has "test-api-secret" && ! has "test-admin-secret" && ! printf "%s\n" "$OUT" | grep "shorter than 32" | sed "s/32//g" | grep -q "[0-9]"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S32" JS_ADMIN_SECRET="$S32B" JS_JOIN_CAP_SECRET="$S32C"
+check "secret strength: three 32-character secrets pass silently" '[ "$RC" -eq 0 ] && ! has "shorter than 32" && ! has "JS_WEAK_SECRET_FATAL=true" && has STUB-JANUS-RAN'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S32" JS_ADMIN_SECRET="$S32B" JS_JOIN_CAP_SECRET="$S31"
+check "secret strength: a 31-character join-capability secret alone is named, the 32-character ones are not" '[ "$RC" -eq 0 ] && has "WARNING: JS_JOIN_CAP_SECRET shorter than 32 characters" && ! has "JS_API_SECRET shorter" && ! has "JS_ADMIN_SECRET shorter" && ! has "$S31"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S31" JS_ADMIN_SECRET="$S32B"
+check "secret strength: a 31-character API secret alone is named" '[ "$RC" -eq 0 ] && has "WARNING: JS_API_SECRET shorter than 32 characters" && ! has "JS_ADMIN_SECRET shorter"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S32" JS_ADMIN_SECRET="$S32B" JS_WEAK_SECRET_FATAL=true
+check "secret strength: JS_WEAK_SECRET_FATAL=true with 32-character secrets and no join-capability secret -> starts, silent" '[ "$RC" -eq 0 ] && ! has "shorter than 32" && has STUB-JANUS-RAN'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S32" JS_ADMIN_SECRET="$S31" JS_JOIN_CAP_SECRET="$S31" JS_WEAK_SECRET_FATAL=true
+check "secret strength: JS_WEAK_SECRET_FATAL=true with short secrets -> FATAL exit 1 naming them, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_ADMIN_SECRET, JS_JOIN_CAP_SECRET shorter than 32 characters" && ! has STUB-JANUS-RAN && ! has "$S31" && ! has "JS_API_SECRET shorter"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_WEAK_SECRET_FATAL=yes
+check "secret strength: JS_WEAK_SECRET_FATAL accepts yes (the other knobs' true spellings)" '[ "$RC" -eq 1 ] && has "FATAL: JS_API_SECRET, JS_ADMIN_SECRET shorter than 32 characters"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_WEAK_SECRET_FATAL=false
+check "secret strength: JS_WEAK_SECRET_FATAL=false is the default behaviour (warn, start)" '[ "$RC" -eq 0 ] && has "WARNING: JS_API_SECRET, JS_ADMIN_SECRET shorter than 32 characters"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET="$S32" JS_ADMIN_SECRET="$S32B" JS_WEAK_SECRET_FATAL=true JS_JOIN_CAP_SECRET=
+check "secret strength: an empty join-capability secret is not a weak one" '[ "$RC" -eq 0 ] && ! has "shorter than 32"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_API_SECRET= JS_ADMIN_SECRET= JS_WEAK_SECRET_FATAL=true
+check "secret strength: empty API and admin secrets still hit the empty-secret FATAL, not the strength one" '[ "$RC" -eq 1 ] && has "FATAL: JS_API_SECRET and JS_ADMIN_SECRET empty" && ! has "shorter than 32"'
+
+if [ "$IMAGE_TPL" = yes ]; then
+	run_ep JS_PUBLIC_IP=203.0.113.7
+	check "secret strength: the warning changes no generated config (golden)" 'golden0'
+fi
+
+# ---- TLS for the API and admin API ----
+TLSDIR="$WORK/tls"; mkdir -p "$TLSDIR"
+TLS_CERT="$TLSDIR/cert.pem"; TLS_KEY="$TLSDIR/key.pem"
+printf 'stand-in certificate\n' > "$TLS_CERT"; printf 'stand-in key\n' > "$TLS_KEY"
+http_cfg() { cfg janus.transport.http.jcfg "$1" | sed 's/[[:space:]]*#.*$//'; }
+
+run_ep JS_PUBLIC_IP=203.0.113.7
+check "TLS: knobs unset -> tls=off reported, https stays false in both listeners" '[ "$RC" -eq 0 ] && has "INFO: tls=off plain_http=true admin_plain_http=true" && [ "$(http_cfg https)" = "https = false" ] && [ "$(http_cfg admin_https)" = "admin_https = false" ] && ! has "tls: https on"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "TLS: knobs unset -> janus.jcfg, both transport configs and effective-config.json are the golden" 'golden0'
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT= JS_TLS_KEY= JS_HTTPS_PORT=14224 JS_ADMIN_HTTPS_PORT=14226 JS_HTTP_PLAIN=true JS_ADMIN_HTTP_PLAIN=true
+check "TLS: knobs present at their defaults -> tls=off and Janus starts" '[ "$RC" -eq 0 ] && has "INFO: tls=off" && has STUB-JANUS-RAN'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "TLS: knobs present at their defaults -> the generated config is still the golden" 'golden0'
+fi
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY"
+check "TLS: certificate and key set -> https on both listeners, cert and key written, plain http left on" '[ "$RC" -eq 0 ] && has STUB-JANUS-RAN && [ "$(http_cfg https)" = "https = true" ] && [ "$(http_cfg secure_port)" = "secure_port = 14224" ] && [ "$(http_cfg admin_https)" = "admin_https = true" ] && [ "$(http_cfg admin_secure_port)" = "admin_secure_port = 14226" ] && [ "$(http_cfg cert_pem)" = "cert_pem = \"$TLS_CERT\"" ] && [ "$(http_cfg cert_key)" = "cert_key = \"$TLS_KEY\"" ] && [ "$(http_cfg http)" = "http = true" ] && [ "$(http_cfg admin_http)" = "admin_http = true" ] && [ "$(http_cfg port)" = "port = 14223" ] && [ "$(http_cfg admin_port)" = "admin_port = 14225" ]'
+check "TLS: on -> reported at start, with the file contents never printed" 'has "INFO: tls=on https_port=14224 admin_https_port=14226" && has "tls: https on port 14224/voice, admin https on port 14226/voiceAdmin, plain http=true admin plain http=true" && ! has "stand-in"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTPS_PORT=24224 JS_ADMIN_HTTPS_PORT=24226
+check "TLS: the https ports follow JS_HTTPS_PORT and JS_ADMIN_HTTPS_PORT" '[ "$RC" -eq 0 ] && [ "$(http_cfg secure_port)" = "secure_port = 24224" ] && [ "$(http_cfg admin_secure_port)" = "admin_secure_port = 24226" ]'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTP_PLAIN=false JS_ADMIN_HTTP_PLAIN=false
+check "TLS: plain http off for both -> http = false and admin_http = false, https stays on" '[ "$RC" -eq 0 ] && [ "$(http_cfg http)" = "http = false" ] && [ "$(http_cfg admin_http)" = "admin_http = false" ] && [ "$(http_cfg https)" = "https = true" ] && [ "$(http_cfg admin_https)" = "admin_https = true" ]'
+check "TLS: plain http off with the self-check off and diagnostics off -> no loopback-tools warning" '! has "a plain http listener is off"'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTP_PLAIN=false JS_ADMIN_HTTP_PLAIN=false JS_SELFCHECK=on
+check "TLS: plain http off with the self-check on -> a WARNING that the loopback tools lose Janus" 'has "WARNING: a plain http listener is off, and the startup self-check and the ICE diagnostics reach Janus over plain http on loopback"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTP_PLAIN=loopback JS_ADMIN_HTTP_PLAIN=loopback JS_SELFCHECK=on
+check "TLS: plain http on loopback only -> ip and admin_ip are 127.0.0.1, http stays on, no warning" '[ "$RC" -eq 0 ] && [ "$(http_cfg ip)" = "ip = \"127.0.0.1\"" ] && [ "$(http_cfg admin_ip)" = "admin_ip = \"127.0.0.1\"" ] && [ "$(http_cfg http)" = "http = true" ] && [ "$(http_cfg admin_http)" = "admin_http = true" ] && ! has "a plain http listener is off"'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTP_PLAIN=TRUE
+check "TLS: JS_HTTP_PLAIN is case-insensitive" '[ "$RC" -eq 0 ] && has "plain_http=true"'
+
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLSDIR/missing.pem" JS_TLS_KEY="$TLS_KEY"
+check "TLS: a missing certificate -> FATAL naming JS_TLS_CERT, exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_CERT=" && has "does not exist or is not a file; refusing to start" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLSDIR/missing.pem"
+check "TLS: a missing key -> FATAL naming JS_TLS_KEY, exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_KEY=" && has "does not exist or is not a file; refusing to start" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLSDIR" JS_TLS_KEY="$TLS_KEY"
+check "TLS: a certificate path that is a directory -> FATAL" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_CERT=" && ! has STUB-JANUS-RAN'
+UNREADABLE="$TLSDIR/unreadable.pem"; printf 'x\n' > "$UNREADABLE"; chmod 000 "$UNREADABLE" 2>/dev/null
+if [ -r "$UNREADABLE" ]; then
+	echo "skip TLS unreadable-file test (this user can read a mode 000 file: root, or a filesystem without modes)"
+else
+	run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$UNREADABLE"
+	check "TLS: an unreadable key -> FATAL naming JS_TLS_KEY, exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_KEY=" && has "is not readable by the mixer; refusing to start" && ! has STUB-JANUS-RAN'
+fi
+chmod 600 "$UNREADABLE" 2>/dev/null
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT"
+check "TLS: only the certificate set -> FATAL, exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_CERT is set without JS_TLS_KEY" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_KEY="$TLS_KEY"
+check "TLS: only the key set -> FATAL, exit 1, Janus not started" '[ "$RC" -eq 1 ] && has "FATAL: JS_TLS_KEY is set without JS_TLS_CERT" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT='/tls/ce"rt.pem' JS_TLS_KEY="$TLS_KEY"
+check "TLS: a path with a double quote -> FATAL (the config cannot hold it as written)" '[ "$RC" -eq 1 ] && has "contains a double quote or a backslash" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_HTTP_PLAIN=false
+check "TLS: plain http off while TLS is off -> FATAL (no way left to reach the API)" '[ "$RC" -eq 1 ] && has "FATAL: JS_HTTP_PLAIN or JS_ADMIN_HTTP_PLAIN is false but TLS is off" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_ADMIN_HTTP_PLAIN=false
+check "TLS: admin plain http off while TLS is off -> FATAL" '[ "$RC" -eq 1 ] && has "TLS is off" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_HTTP_PLAIN=maybe
+check "TLS: an unknown JS_HTTP_PLAIN value -> FATAL" '[ "$RC" -eq 1 ] && has "is not one of true, loopback, false" && has "JS_HTTP_PLAIN=" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTPS_PORT=notaport
+check "TLS: a non-numeric https port -> FATAL" '[ "$RC" -eq 1 ] && has "JS_HTTPS_PORT=" && has "is not a port number" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTPS_PORT=14223
+check "TLS: an https port equal to the plain http port -> FATAL" '[ "$RC" -eq 1 ] && has "equals a plain http port" && ! has STUB-JANUS-RAN'
+run_ep JS_PUBLIC_IP=203.0.113.7 JS_TLS_CERT="$TLS_CERT" JS_TLS_KEY="$TLS_KEY" JS_HTTPS_PORT=14230 JS_ADMIN_HTTPS_PORT=14230
+check "TLS: the two https ports equal -> FATAL" '[ "$RC" -eq 1 ] && has "JS_HTTPS_PORT and JS_ADMIN_HTTPS_PORT are both 14230" && ! has STUB-JANUS-RAN'
+
 echo "entrypoint_test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

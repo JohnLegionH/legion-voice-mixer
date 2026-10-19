@@ -55,6 +55,10 @@ services:
       - "${JS_ADMIN_BIND:+${JS_ADMIN_BIND:-}:}${JS_ADMIN_PORT:-14225}:${JS_ADMIN_PORT:-14225}/tcp" # Admin/monitor API (/voiceAdmin)
       - "${JS_WS_PORT:-8188}:${JS_WS_PORT:-8188}/tcp"                              # WebSockets signalling
       - "${JS_RTP_PORT_RANGE:-10000-10200}:${JS_RTP_PORT_RANGE:-10000-10200}/udp" # WebRTC media (RTP/RTCP)
+      # TLS (JS_TLS_CERT / JS_TLS_KEY in .env; docs/docker-notes.md, "TLS for the API and admin API"): add the https
+      # ports, and mount the certificate and key under `volumes:` below. Not published until you add them.
+      # - "${JS_HTTPS_PORT:-14224}:${JS_HTTPS_PORT:-14224}/tcp"                       # API over https
+      # - "${JS_ADMIN_BIND:+${JS_ADMIN_BIND:-}:}${JS_ADMIN_HTTPS_PORT:-14226}:${JS_ADMIN_HTTPS_PORT:-14226}/tcp" # admin API over https
 
     # ── Linux hosts (optional) ───────────────────────────────────────────────
     # On a native Linux host you may prefer host networking: it skips the
@@ -93,6 +97,7 @@ services:
     # Precedence: mounted file > env > default (see docs/docker-notes.md).
     # volumes:
     #   - ./janus.d:/opt/janus/etc/janus.d:ro
+    #   - ./tls:/opt/janus/tls:ro            # cert.pem and key.pem for JS_TLS_CERT / JS_TLS_KEY
 
   # ── Voice connector: recorder peer (S-CON-4) ───────────────────────────────
   # Headless aiortc peer that records one room's mixdown under a sim-registered
