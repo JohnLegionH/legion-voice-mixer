@@ -11,7 +11,8 @@
  * envelope (each required field, the wrong type of each), per-entry bounds (coordinates, speed, tolerance, UUID
  * shape, array length, non-integers), the size and entry caps, skip-and-count of a bad entry, the store (full
  * replaces, partial updates, case-insensitive lookup, capacity), the age arithmetic, and each observe counter:
- * would-clamp with the largest deviation, would-use-sim, and no-sim (missing and stale). Non-zero exit on failure.
+ * would-clamp with the largest deviation, would-use-sim, and no-sim (missing and stale); and enforcing: the per-claim decision, its counters, the
+ * effective mode and the three knobs. Non-zero exit on failure.
  */
 
 #include "../src/possync.h"
@@ -421,6 +422,160 @@ static void test_observe_no_sim(void) {
 		&& !strcmp(slv_pos_sim_state_str(SLV_POS_SIM_FRESH), "fresh"), "state names");
 }
 
+/* ---- enforcing ---- */
+
+static slv_pos_policy policy(slv_pos_fail fail, int64_t grace_ms) {
+	slv_pos_policy p;
+	p.mode = SLV_POS_MODE_ENFORCE;
+	p.fail = fail;
+	p.join_grace_ms = grace_ms;
+	return p;
+}
+
+static void test_decide_keeps_a_claim_within_tolerance(void) {
+	slv_pos_policy pol = policy(SLV_POS_FAIL_OPEN, 5000);
+	slv_pos_sim sim = fresh(10000, 10000, 2500, 800, 500, 0);
+	double near[3] = { 10300, 10400, 2500 };          /* 500 cm away: exactly the tolerance */
+	slv_pos_decision d = slv_pos_decide(&sim, 0, 1, 1, 1, near, &pol);
+	CHECK(d.action == SLV_POS_ACT_KEEP && !d.use_sim_sp && !d.lp_from_sp, "a claim exactly at the tolerance stands");
+	double beyond[3] = { 10300, 10401, 2500 };
+	d = slv_pos_decide(&sim, 0, 1, 1, 1, beyond, &pol);
+	CHECK(d.action == SLV_POS_ACT_CLAMP && d.use_sim_sp, "one centimetre beyond: corrected");
+	CHECK(d.sp[0] == 10000.0 && d.sp[1] == 10000.0 && d.sp[2] == 2500.0, "the corrected position is the sim's point, not a point on the tolerance sphere");
+	CHECK(!d.lp_from_sp, "the viewer's own camera point is kept (the camera leash applies to it later)");
+}
+
+static void test_decide_tolerance_grows_with_the_points_age(void) {
+	slv_pos_policy pol = policy(SLV_POS_FAIL_OPEN, 5000);
+	slv_pos_sim sim = fresh(0, 0, 0, 3000, 500, 0);   /* a fast vehicle: 30 m/s */
+	double c[3] = { 3000, 0, 0 };                      /* 30 m away */
+	CHECK(slv_pos_decide(&sim, 0, 1, 1, 1, c, &pol).action == SLV_POS_ACT_CLAMP, "a fresh point: 30 m is beyond 5 m");
+	CHECK(slv_pos_decide(&sim, 1000000, 1, 1, 1, c, &pol).action == SLV_POS_ACT_KEEP, "a second later the vehicle may be 35 m away: inside");
+	slv_pos_sim slow = fresh(0, 0, 0, 800, 500, 0);
+	CHECK(slv_pos_decide(&slow, 1000000, 1, 1, 1, c, &pol).action == SLV_POS_ACT_CLAMP, "a slow avatar's 13 m allowance does not cover 30 m");
+}
+
+static void test_decide_fills_what_the_viewer_did_not_send(void) {
+	slv_pos_policy pol = policy(SLV_POS_FAIL_OPEN, 5000);
+	slv_pos_sim sim = fresh(500, 600, 700, 800, 500, 0);
+	double none[3] = { 0, 0, 0 };
+	slv_pos_decision d = slv_pos_decide(&sim, 0, 1, 0, 0, none, &pol);
+	CHECK(d.action == SLV_POS_ACT_FILL && d.use_sim_sp && d.lp_from_sp, "no sp and no lp: both from the sim's point");
+	CHECK(d.sp[0] == 500.0 && d.sp[1] == 600.0 && d.sp[2] == 700.0, "the sim's point");
+	d = slv_pos_decide(&sim, 0, 1, 0, 1, none, &pol);
+	CHECK(d.action == SLV_POS_ACT_FILL && d.use_sim_sp && !d.lp_from_sp, "no sp but an lp: sp from the sim, lp kept");
+	double near[3] = { 500, 600, 700 };
+	d = slv_pos_decide(&sim, 0, 1, 1, 0, near, &pol);
+	CHECK(d.action == SLV_POS_ACT_FILL && !d.use_sim_sp && d.lp_from_sp, "an sp inside the tolerance but no lp: sp kept, lp is sp");
+	double far[3] = { 90000, 0, 0 };
+	d = slv_pos_decide(&sim, 0, 1, 1, 0, far, &pol);
+	CHECK(d.action == SLV_POS_ACT_CLAMP && d.use_sim_sp && d.lp_from_sp, "a far sp and no lp: both from the sim's point");
+}
+
+static void test_decide_without_a_sim_point(void) {
+	slv_pos_policy open = policy(SLV_POS_FAIL_OPEN, 5000), closed = policy(SLV_POS_FAIL_CLOSED, 5000);
+	double c[3] = { 1, 2, 3 };
+	int64_t join = 100000000;
+	CHECK(slv_pos_decide(NULL, join + 4999999, join, 1, 1, c, &closed).action == SLV_POS_ACT_GRACE, "no point, 1 us inside the join grace: the claim stands, counted as grace");
+	CHECK(slv_pos_decide(NULL, join + 5000000, join, 1, 1, c, &open).action == SLV_POS_ACT_FAIL_OPEN, "no point once the grace is over, fail open");
+	CHECK(slv_pos_decide(NULL, join + 5000000, join, 1, 1, c, &closed).action == SLV_POS_ACT_FAIL_CLOSED, "no point once the grace is over, fail closed");
+	slv_pos_policy nograce = policy(SLV_POS_FAIL_CLOSED, 0);
+	CHECK(slv_pos_decide(NULL, join, join, 1, 1, c, &nograce).action == SLV_POS_ACT_FAIL_CLOSED, "a grace of 0 is no grace");
+	CHECK(slv_pos_decide(NULL, join, 0, 1, 1, c, &closed).action == SLV_POS_ACT_FAIL_CLOSED, "an unknown join time gets no grace");
+	slv_pos_sim old = fresh(0, 0, 0, 800, 500, 0);
+	int64_t late = (int64_t)SLV_POS_STALE_MS * 1000 + 1;
+	CHECK(slv_pos_decide(&old, late, late - 1000, 1, 1, c, &open).action == SLV_POS_ACT_FAIL_OPEN, "a stale point is a missing point even inside the join grace: fail open");
+	CHECK(slv_pos_decide(&old, late, late - 1000, 1, 1, c, &closed).action == SLV_POS_ACT_FAIL_CLOSED, "and fail closed");
+	CHECK(slv_pos_decide(&old, (int64_t)SLV_POS_STALE_MS * 1000, 1, 1, 1, c, &closed).action != SLV_POS_ACT_FAIL_CLOSED, "exactly at the stale age the point is still fresh");
+}
+
+static void test_decide_a_claim_that_is_not_a_number_stands(void) {
+	slv_pos_policy pol = policy(SLV_POS_FAIL_OPEN, 5000);
+	slv_pos_sim sim = fresh(0, 0, 0, 800, 500, 0);
+	volatile double zero = 0.0;
+	double nanc[3] = { zero / zero, 0, 0 };
+	CHECK(slv_pos_decide(&sim, 0, 1, 1, 1, nanc, &pol).action == SLV_POS_ACT_KEEP, "a NaN claim is not compared (observe ignores it the same way)");
+}
+
+static void test_enforce_counters(void) {
+	slv_pos_part_stats ps;
+	slv_pos_room_stats rs;
+	memset(&ps, 0, sizeof(ps));
+	memset(&rs, 0, sizeof(rs));
+	slv_pos_room_tick_begin(&rs);
+	slv_pos_decision d;
+	memset(&d, 0, sizeof(d));
+	d.action = SLV_POS_ACT_KEEP;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	CHECK(ps.clamped == 0 && ps.filled == 0 && ps.grace == 0 && ps.fail_open == 0 && ps.fail_closed == 0, "a kept claim counts nothing");
+	d.action = SLV_POS_ACT_CLAMP;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	slv_pos_count_enforced(&ps, &rs, &d);
+	d.action = SLV_POS_ACT_FILL;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	d.action = SLV_POS_ACT_GRACE;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	d.action = SLV_POS_ACT_FAIL_OPEN;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	d.action = SLV_POS_ACT_FAIL_CLOSED;
+	slv_pos_count_enforced(&ps, &rs, &d);
+	CHECK(ps.clamped == 2 && ps.filled == 1 && ps.grace == 1 && ps.fail_open == 1 && ps.fail_closed == 1, "each action counts in its own counter");
+	CHECK(rs.clamped_ticks == 2 && rs.filled_ticks == 1 && rs.grace_ticks == 1 && rs.fail_open_ticks == 1 && rs.fail_closed_ticks == 1,
+		"and in the room's totals");
+	CHECK(rs.corrected_now == 3, "participants whose position was replaced at this tick: 2 clamps and 1 fill");
+	CHECK(rs.fail_closed_now == 1, "one participant dropped from spatial pairs at this tick");
+	slv_pos_room_tick_begin(&rs);
+	CHECK(rs.corrected_now == 0 && rs.fail_closed_now == 0 && rs.clamped_ticks == 2, "the per-tick gauges reset, the totals do not");
+}
+
+static void test_effective_mode(void) {
+	slv_pos_room_stats rs;
+	memset(&rs, 0, sizeof(rs));
+	slv_pos_policy obs = policy(SLV_POS_FAIL_OPEN, 5000), enf = policy(SLV_POS_FAIL_OPEN, 5000);
+	obs.mode = SLV_POS_MODE_OBSERVE;
+	CHECK(!slv_pos_enforcing(&enf, &rs), "a room that has accepted no request is never enforced");
+	rs.have_batch = 1;
+	CHECK(!slv_pos_enforcing(&enf, &rs), "an accepted request that did not ask for enforce: observed");
+	rs.enforce_wanted = 1;
+	CHECK(slv_pos_enforcing(&enf, &rs), "enforced only when the mixer allows it and the sim asked for it");
+	CHECK(!slv_pos_enforcing(&obs, &rs), "a mixer left in observe never enforces, whatever the sim asks");
+	rs.enforce_wanted = 0;
+	CHECK(!slv_pos_enforcing(&enf, &rs), "the sim going back to observe stops it at the next request");
+}
+
+static void test_batch_records_the_requested_mode(void) {
+	slv_posbatch b;
+	CHECK(parse("{\"request\":\"peer_pos\",\"room\":7,\"seq\":1,\"full\":true,\"mode\":\"enforce\",\"pos\":{}}", &b) == SLV_POS_OK
+		&& b.enforce_requested, "mode enforce is read");
+	slv_posbatch_free(&b);
+	CHECK(parse("{\"request\":\"peer_pos\",\"room\":7,\"seq\":1,\"full\":true,\"pos\":{}}", &b) == SLV_POS_OK
+		&& !b.enforce_requested, "no mode means observe");
+	slv_posbatch_free(&b);
+}
+
+static void test_knobs(void) {
+	slv_pos_mode mode = SLV_POS_MODE_ENFORCE;
+	CHECK(slv_pos_mode_from_env(NULL, &mode) == SLV_VIS_KNOB_OK && mode == SLV_POS_MODE_OBSERVE, "JS_POS_MODE unset: observe");
+	CHECK(slv_pos_mode_from_env("", &mode) == SLV_VIS_KNOB_OK && mode == SLV_POS_MODE_OBSERVE, "empty: observe");
+	CHECK(slv_pos_mode_from_env("enforce", &mode) == SLV_VIS_KNOB_OK && mode == SLV_POS_MODE_ENFORCE, "enforce");
+	CHECK(slv_pos_mode_from_env("ENFORCE", &mode) == SLV_VIS_KNOB_OK && mode == SLV_POS_MODE_ENFORCE, "case does not matter");
+	CHECK(slv_pos_mode_from_env("observe", &mode) == SLV_VIS_KNOB_OK && mode == SLV_POS_MODE_OBSERVE, "observe");
+	CHECK(slv_pos_mode_from_env("on", &mode) == SLV_VIS_KNOB_INVALID && mode == SLV_POS_MODE_OBSERVE, "anything else is invalid and observes");
+	slv_pos_fail fail = SLV_POS_FAIL_CLOSED;
+	CHECK(slv_pos_fail_from_env(NULL, &fail) == SLV_VIS_KNOB_OK && fail == SLV_POS_FAIL_OPEN, "JS_POS_FAIL unset: open");
+	CHECK(slv_pos_fail_from_env("closed", &fail) == SLV_VIS_KNOB_OK && fail == SLV_POS_FAIL_CLOSED, "closed");
+	CHECK(slv_pos_fail_from_env("open", &fail) == SLV_VIS_KNOB_OK && fail == SLV_POS_FAIL_OPEN, "open");
+	CHECK(slv_pos_fail_from_env("shut", &fail) == SLV_VIS_KNOB_INVALID && fail == SLV_POS_FAIL_OPEN, "anything else is invalid and stays open");
+	int64_t ms = 1;
+	CHECK(slv_pos_grace_ms_from_env(NULL, &ms) == SLV_VIS_KNOB_OK && ms == SLV_POS_JOIN_GRACE_MS_DEFAULT, "JS_POS_JOIN_GRACE_MS unset: the default");
+	CHECK(slv_pos_grace_ms_from_env("0", &ms) == SLV_VIS_KNOB_OK && ms == 0, "0 is allowed");
+	CHECK(slv_pos_grace_ms_from_env("2500", &ms) == SLV_VIS_KNOB_OK && ms == 2500, "a value");
+	CHECK(slv_pos_grace_ms_from_env("60000", &ms) == SLV_VIS_KNOB_OK && ms == 60000, "the top of the range");
+	CHECK(slv_pos_grace_ms_from_env("60001", &ms) == SLV_VIS_KNOB_INVALID && ms == SLV_POS_JOIN_GRACE_MS_DEFAULT, "above the range: invalid, default");
+	CHECK(slv_pos_grace_ms_from_env("-1", &ms) == SLV_VIS_KNOB_INVALID && ms == SLV_POS_JOIN_GRACE_MS_DEFAULT, "negative: invalid");
+	CHECK(slv_pos_grace_ms_from_env("5s", &ms) == SLV_VIS_KNOB_INVALID && ms == SLV_POS_JOIN_GRACE_MS_DEFAULT, "trailing text: invalid");
+}
+
 int main(void) {
 	test_valid();
 	test_envelope();
@@ -434,6 +589,15 @@ int main(void) {
 	test_observe_age_widens_tolerance();
 	test_observe_would_use_sim();
 	test_observe_no_sim();
+	test_decide_keeps_a_claim_within_tolerance();
+	test_decide_tolerance_grows_with_the_points_age();
+	test_decide_fills_what_the_viewer_did_not_send();
+	test_decide_without_a_sim_point();
+	test_decide_a_claim_that_is_not_a_number_stands();
+	test_enforce_counters();
+	test_effective_mode();
+	test_batch_records_the_requested_mode();
+	test_knobs();
 	printf("test_possync: %d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

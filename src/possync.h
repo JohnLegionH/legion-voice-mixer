@@ -5,12 +5,14 @@
 /*! \file    possync.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Sim-reported participant positions ("peer_pos", vis_protocol 3): the parser, the per-room store
- *           and the observe-only comparison with the position a viewer claims for itself.
+ * \brief    Sim-reported participant positions ("peer_pos", vis_protocol 3): the parser, the per-room store,
+ *           the comparison with the position a viewer claims for itself, and the optional correction.
  *
  * \details  A simulator that knows where each avatar really is can tell the mixer, so the mixer can compare
- * that with the "sp" a viewer reports in its SLData. This revision only OBSERVES: it counts what correcting a
- * viewer's claim would do and changes nothing in the mix.
+ * that with the "sp" a viewer reports in its SLData. By default the mixer only OBSERVES: it counts what correcting
+ * a viewer's claim would do and changes nothing in the mix. A room is ENFORCED only when both sides ask for it:
+ * the mixer's operator (JS_POS_MODE=enforce) and the sim (its latest peer_pos says "mode":"enforce"). Then a claim
+ * beyond the tolerance is replaced by the sim's point, for that participant as a speaker and as a listener alike.
  *
  * Wire shape (admin API, same envelope as peer_ctl_batch), accepted at top level:
  *   { "request":"peer_pos", "room":<int>, "seq":<int>, "full":<bool>, "mode":"observe|enforce",
@@ -37,6 +39,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "visauth.h"   /* slv_vis_knob_status, the result of reading a knob */
 
 #ifndef SLV_UUID_LEN
 #define SLV_UUID_LEN 40
@@ -82,7 +86,7 @@ typedef struct slv_posbatch {
 	int64_t room;
 	int64_t seq;
 	int full;
-	int enforce_requested;     /*!< "mode" was "enforce" (the sim asking; this mixer only observes) */
+	int enforce_requested;     /*!< "mode" was "enforce" (the sim asking; it takes effect only if the mixer allows it) */
 	int has_epoch;
 	uint64_t room_epoch;
 	slv_pos_entry *entries;
@@ -142,6 +146,12 @@ typedef struct slv_pos_part_stats {
 	uint64_t would_use_sim;         /*!< ticks the viewer had no usable position and a fresh sim point existed */
 	uint64_t no_sim;                /*!< ticks with no fresh sim point while the room was reporting positions */
 	uint64_t no_sim_stale;          /*!< the subset of no_sim where a point existed but was stale */
+	/* What ENFORCING did for this participant, per tick (all zero while the room is only observed). */
+	uint64_t clamped;               /*!< claim beyond the tolerance: the sim's point was used */
+	uint64_t filled;                /*!< the viewer sent no sp or no lp: filled in from the sim's point */
+	uint64_t grace;                 /*!< no sim point yet, inside the join grace: the claim stood */
+	uint64_t fail_open;             /*!< no usable sim point after the grace, JS_POS_FAIL=open: the claim stood */
+	uint64_t fail_closed;           /*!< no usable sim point after the grace, JS_POS_FAIL=closed: left out of spatial pairs */
 } slv_pos_part_stats;
 
 /*! \brief The same, per room: totals over every participant and tick, and the request counters. */
@@ -167,6 +177,15 @@ typedef struct slv_pos_room_stats {
 	uint32_t would_clamp_now;       /*!< participants over the tolerance at the last tick */
 	uint32_t would_use_sim_now;
 	uint32_t no_sim_now;
+	int enforce_wanted;             /*!< the last accepted request asked for "enforce" */
+	int enforcing;                  /*!< the room was enforced at the last tick (the mixer allows it and the sim asked) */
+	uint64_t clamped_ticks;         /*!< participant-ticks, as in slv_pos_part_stats */
+	uint64_t filled_ticks;
+	uint64_t grace_ticks;
+	uint64_t fail_open_ticks;
+	uint64_t fail_closed_ticks;
+	uint32_t corrected_now;         /*!< participants whose position was replaced (clamped or filled) at the last tick */
+	uint32_t fail_closed_now;       /*!< participants left out of spatial pairs at the last tick */
 } slv_pos_room_stats;
 
 /*! \brief Zero the per-tick gauges; call once before observing a tick's participants. */
@@ -178,5 +197,68 @@ void slv_pos_room_tick_begin(slv_pos_room_stats *rs);
  * \param claim_sp the claim in centimetres (x, y, z) */
 void slv_pos_observe(slv_pos_part_stats *ps, slv_pos_room_stats *rs, const slv_pos_sim *sim, int64_t now_us,
 		int has_sp, int has_lp, const double claim_sp[3]);
+
+/* ---- enforcing ---- */
+
+/*! \brief JS_POS_JOIN_GRACE_MS default: how long a participant with no sim point yet keeps its own claim. The sim's first
+ * point follows a join by at most one feed tick; this is several times that. */
+#define SLV_POS_JOIN_GRACE_MS_DEFAULT 5000
+/*! \brief Largest accepted JS_POS_JOIN_GRACE_MS. */
+#define SLV_POS_JOIN_GRACE_MS_MAX 60000
+
+typedef enum slv_pos_mode {
+	SLV_POS_MODE_OBSERVE = 0,   /*!< count only (the default) */
+	SLV_POS_MODE_ENFORCE        /*!< allow a room whose sim asks for it to be corrected */
+} slv_pos_mode;
+
+typedef enum slv_pos_fail {
+	SLV_POS_FAIL_OPEN = 0,      /*!< no usable sim point after the grace: the viewer's claim stands (the default) */
+	SLV_POS_FAIL_CLOSED         /*!< no usable sim point after the grace: left out of spatial pairs until one arrives */
+} slv_pos_fail;
+
+/*! \brief The mixer-wide settings, read once at start from JS_POS_MODE, JS_POS_FAIL and JS_POS_JOIN_GRACE_MS. */
+typedef struct slv_pos_policy {
+	slv_pos_mode mode;
+	slv_pos_fail fail;
+	int64_t join_grace_ms;
+} slv_pos_policy;
+
+/*! \brief JS_POS_MODE: observe or enforce, either case; unset or empty is observe, anything else is invalid and observes. */
+slv_vis_knob_status slv_pos_mode_from_env(const char *v, slv_pos_mode *out);
+/*! \brief JS_POS_FAIL: open or closed, either case; unset or empty is open, anything else is invalid and stays open. */
+slv_vis_knob_status slv_pos_fail_from_env(const char *v, slv_pos_fail *out);
+/*! \brief JS_POS_JOIN_GRACE_MS: an integer 0..SLV_POS_JOIN_GRACE_MS_MAX; unset or invalid gives the default. */
+slv_vis_knob_status slv_pos_grace_ms_from_env(const char *v, int64_t *out);
+
+/*! \brief Whether a room is enforced now: the mixer allows it, the room has accepted a request, and the latest one asked
+ * for "enforce". The sim returning to observe therefore takes effect with its next request. */
+int slv_pos_enforcing(const slv_pos_policy *pol, const slv_pos_room_stats *rs);
+
+typedef enum slv_pos_action {
+	SLV_POS_ACT_KEEP = 0,   /*!< the claim stands: within the tolerance */
+	SLV_POS_ACT_CLAMP,      /*!< the claim is beyond the tolerance: use the sim's point */
+	SLV_POS_ACT_FILL,       /*!< the viewer sent no sp or no lp: fill it in */
+	SLV_POS_ACT_GRACE,      /*!< no sim point yet, inside the join grace: the claim stands */
+	SLV_POS_ACT_FAIL_OPEN,  /*!< no usable sim point after the grace: the claim stands */
+	SLV_POS_ACT_FAIL_CLOSED /*!< no usable sim point after the grace: leave the participant out of spatial pairs */
+} slv_pos_action;
+
+/*! \brief What to do with one participant at one tick. */
+typedef struct slv_pos_decision {
+	slv_pos_action action;
+	int use_sim_sp;         /*!< replace the claimed sp with \c sp */
+	int lp_from_sp;         /*!< the viewer has no usable lp: use the sp that results */
+	double sp[3];           /*!< the sim's point, centimetres (valid when use_sim_sp) */
+} slv_pos_decision;
+
+/*! \brief Decide, without changing anything. The tolerance is the sim's own (its tolerance plus its speed allowance times
+ * the point's age); a claim within it, or exactly on it, stands. The sim's point replaces the claim as a whole, not a point
+ * on the edge of the tolerance. A point older than SLV_POS_STALE_MS counts as missing.
+ * \param join_us the participant's join time on the mixer's monotonic clock, or 0 when unknown (no grace) */
+slv_pos_decision slv_pos_decide(const slv_pos_sim *sim, int64_t now_us, int64_t join_us, int has_sp, int has_lp,
+		const double claim_sp[3], const slv_pos_policy *pol);
+
+/*! \brief Count what an enforced decision did, for the participant and the room. */
+void slv_pos_count_enforced(slv_pos_part_stats *ps, slv_pos_room_stats *rs, const slv_pos_decision *d);
 
 #endif /* SLV_POSSYNC_H */

@@ -384,6 +384,9 @@ static volatile gint slv_join_cap_seen;        /* joins that carried a capabilit
 /* vis_protocol 3: peer_pos refusals that name no room (an unparseable body has none, an unknown room has none to charge),
  * shown in every room's positions block. */
 static volatile gint slv_pos_malformed_total, slv_pos_toobig_total, slv_pos_unknown_room_total;
+/* JS_POS_MODE, JS_POS_FAIL and JS_POS_JOIN_GRACE_MS, read once at load (janus_slvoice_pos_load_knobs). The defaults
+ * observe only, so a mixer with the knobs unset never changes what anyone hears. */
+static slv_pos_policy slv_pos_pol = { SLV_POS_MODE_OBSERVE, SLV_POS_FAIL_OPEN, SLV_POS_JOIN_GRACE_MS_DEFAULT };
 static volatile gint slv_join_cap_accepted;    /* verified, in context, fresh, unspent, current generation */
 static volatile gint slv_join_cap_enforced;    /* joins actually refused (knob on, declared room) */
 static volatile gint slv_join_cap_skewed;      /* accepted only because of the skew tolerance */
@@ -582,6 +585,7 @@ typedef struct janus_slvoice_session {
 	slv_vec3 snap_lp;            /* listener (camera) position, leash-clamped, ×100 */
 	slv_quat snap_lh;            /* listener heading/orientation, ×100 (identity if absent) */
 	gboolean snap_valid;         /* sp AND lp present this tick -> snap usable for distance */
+	gboolean pos_closed;         /* enforcing with JS_POS_FAIL=closed and no usable sim point: left out of spatial pairs */
 	/* Per-listener distance-cull hysteresis, keyed by source UUID,
 	 * sized to the participant cap, LRU-evicted. Inline, no
 	 * allocation — a parallel to peer_ctl above; touched only in pass 2 under mutex. */
@@ -907,6 +911,7 @@ static void janus_slvoice_reset_room_state_locked(janus_slvoice_session *s) {
 	memset(&s->snap_lp, 0, sizeof(s->snap_lp));
 	s->snap_lh = (slv_quat){ 0.0, 0.0, 0.0, 1.0 };
 	s->snap_valid = FALSE;
+	s->pos_closed = FALSE;
 	memset(&s->pos, 0, sizeof(s->pos));
 	memset(&s->last_data.sp, 0, sizeof(s->last_data.sp));
 	memset(&s->last_data.sh, 0, sizeof(s->last_data.sh));
@@ -1372,6 +1377,32 @@ static void janus_slvoice_vis_load_knobs(void) {
 			"epochs and staleness are tracked and counted (would_silence_*); audio is unaffected\n", JANUS_SLVOICE_PACKAGE);
 }
 
+/* The position knobs from the process env. Invalid values are ignored with a WARN and the default stays. */
+static void janus_slvoice_pos_load_knobs(void) {
+	const char *mode_env = getenv("JS_POS_MODE");
+	const char *fail_env = getenv("JS_POS_FAIL");
+	const char *grace_env = getenv("JS_POS_JOIN_GRACE_MS");
+	slv_pos_policy pol = { SLV_POS_MODE_OBSERVE, SLV_POS_FAIL_OPEN, SLV_POS_JOIN_GRACE_MS_DEFAULT };
+	if(slv_pos_mode_from_env(mode_env, &pol.mode) == SLV_VIS_KNOB_INVALID)
+		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_POS_MODE='%s' (want observe or enforce); observing only\n",
+			JANUS_SLVOICE_PACKAGE, mode_env);
+	if(slv_pos_fail_from_env(fail_env, &pol.fail) == SLV_VIS_KNOB_INVALID)
+		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_POS_FAIL='%s' (want open or closed); using open\n",
+			JANUS_SLVOICE_PACKAGE, fail_env);
+	if(slv_pos_grace_ms_from_env(grace_env, &pol.join_grace_ms) == SLV_VIS_KNOB_INVALID)
+		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_POS_JOIN_GRACE_MS='%s' (want an integer 0-%d); using %d ms\n",
+			JANUS_SLVOICE_PACKAGE, grace_env, SLV_POS_JOIN_GRACE_MS_MAX, SLV_POS_JOIN_GRACE_MS_DEFAULT);
+	slv_pos_pol = pol;
+	if(pol.mode == SLV_POS_MODE_ENFORCE)
+		JANUS_LOG(LOG_INFO, "[%s] Sim positions: enforce ALLOWED (JS_POS_MODE=enforce): a room is corrected only while its sim's "
+			"latest peer_pos asks for enforce; no usable sim point after %d ms: %s\n", JANUS_SLVOICE_PACKAGE,
+			(int)pol.join_grace_ms, pol.fail == SLV_POS_FAIL_CLOSED ? "left out of spatial pairs (JS_POS_FAIL=closed)"
+			: "the viewer's own claim stands (JS_POS_FAIL=open)");
+	else
+		JANUS_LOG(LOG_INFO, "[%s] Sim positions: observe only (JS_POS_MODE unset or observe): counted, never applied to the mix\n",
+			JANUS_SLVOICE_PACKAGE);
+}
+
 /* The join-capability knobs from the process env (the entrypoint exports both and refuses to
  * start when the requirement is on with no key). The secret is read into memory and never logged. */
 static void janus_slvoice_joincap_load_knobs(void) {
@@ -1573,6 +1604,7 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 
 	/* JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS and mixer_instance. */
 	janus_slvoice_vis_load_knobs();
+	janus_slvoice_pos_load_knobs();
 	/* JS_JOIN_CAP_REQUIRED and JS_JOIN_CAP_SECRET. */
 	janus_slvoice_joincap_load_knobs();
 
@@ -1824,6 +1856,12 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 	json_object_set_new(po, "would_use_sim", json_integer((json_int_t)session->pos.would_use_sim));
 	json_object_set_new(po, "no_sim", json_integer((json_int_t)session->pos.no_sim));
 	json_object_set_new(po, "no_sim_stale", json_integer((json_int_t)session->pos.no_sim_stale));
+	/* What enforcing did (all zero while the room is only observed). */
+	json_object_set_new(po, "clamped", json_integer((json_int_t)session->pos.clamped));
+	json_object_set_new(po, "filled", json_integer((json_int_t)session->pos.filled));
+	json_object_set_new(po, "grace", json_integer((json_int_t)session->pos.grace));
+	json_object_set_new(po, "fail_open", json_integer((json_int_t)session->pos.fail_open));
+	json_object_set_new(po, "fail_closed", json_integer((json_int_t)session->pos.fail_closed));
 	json_object_set_new(info, "pos_observe", po);
 	gint64 uptime = (janus_get_monotonic_time() - session->created_ts) / G_USEC_PER_SEC;
 	json_object_set_new(info, "session_uptime", json_integer((json_int_t)uptime));
@@ -1965,7 +2003,19 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_t *pj = json_object();
 		char pepoch[17];
 		slv_vis_format_epoch(prs->epoch, pepoch);
-		json_object_set_new(pj, "mode", json_string("observe"));
+		/* "mode" is what this room does now; "mixer_mode" is JS_POS_MODE and "enforce_wanted" the sim's latest ask. */
+		json_object_set_new(pj, "mode", json_string(slv_pos_enforcing(&slv_pos_pol, prs) ? "enforce" : "observe"));
+		json_object_set_new(pj, "mixer_mode", json_string(slv_pos_pol.mode == SLV_POS_MODE_ENFORCE ? "enforce" : "observe"));
+		json_object_set_new(pj, "enforce_wanted", prs->enforce_wanted ? json_true() : json_false());
+		json_object_set_new(pj, "fail", json_string(slv_pos_pol.fail == SLV_POS_FAIL_CLOSED ? "closed" : "open"));
+		json_object_set_new(pj, "join_grace_ms", json_integer((json_int_t)slv_pos_pol.join_grace_ms));
+		json_object_set_new(pj, "clamped_ticks", json_integer((json_int_t)prs->clamped_ticks));
+		json_object_set_new(pj, "filled_ticks", json_integer((json_int_t)prs->filled_ticks));
+		json_object_set_new(pj, "grace_ticks", json_integer((json_int_t)prs->grace_ticks));
+		json_object_set_new(pj, "fail_open_ticks", json_integer((json_int_t)prs->fail_open_ticks));
+		json_object_set_new(pj, "fail_closed_ticks", json_integer((json_int_t)prs->fail_closed_ticks));
+		json_object_set_new(pj, "corrected_now", json_integer(prs->corrected_now));
+		json_object_set_new(pj, "fail_closed_now", json_integer(prs->fail_closed_now));
 		json_object_set_new(pj, "stale_ms", json_integer(SLV_POS_STALE_MS));
 		json_object_set_new(pj, "have_batch", prs->have_batch ? json_true() : json_false());
 		json_object_set_new(pj, "last_seq", json_integer((json_int_t)prs->last_seq));
@@ -2842,12 +2892,20 @@ static json_t *janus_slvoice_handle_peer_pos(json_t *message) {
 			rs->full_batches++;
 		if(pb.enforce_requested)
 			rs->enforce_requests++;
+		rs->enforce_wanted = pb.enforce_requested;   /* the latest request decides, so the sim can step back at any time */
 		rs->entries_applied += (guint64)stored;
 		rs->entries_skipped += (guint64)pb.n_skipped;
 		rs->entries_dropped_full += (guint64)dropped;
+		gboolean enforcing = slv_pos_enforcing(&slv_pos_pol, rs);
 		if(first)
-			JANUS_LOG(LOG_INFO, "[%s] room %"PRIu64": first peer_pos accepted (%d entr%s); positions are observed and counted, "
-				"never applied to the mix\n", JANUS_SLVOICE_PACKAGE, room->room_id, stored, stored == 1 ? "y" : "ies");
+			JANUS_LOG(LOG_INFO, "[%s] room %"PRIu64": first peer_pos accepted (%d entr%s); positions are %s\n",
+				JANUS_SLVOICE_PACKAGE, room->room_id, stored, stored == 1 ? "y" : "ies", enforcing
+				? "ENFORCED: a claim beyond the tolerance is replaced by the sim's point"
+				: "observed and counted, never applied to the mix");
+		else if(enforcing != (gboolean)rs->enforcing)
+			JANUS_LOG(LOG_INFO, "[%s] room %"PRIu64": positions are now %s\n", JANUS_SLVOICE_PACKAGE, room->room_id,
+				enforcing ? "ENFORCED" : "observed only");
+		rs->enforcing = enforcing;
 		json_object_set_new(response, "slvoice", json_string("applied"));
 		json_object_set_new(response, "op", json_string("pos"));
 		json_object_set_new(response, "room", json_integer((json_int_t)pb.room));
@@ -2856,7 +2914,7 @@ static json_t *janus_slvoice_handle_peer_pos(json_t *message) {
 		json_object_set_new(response, "entries", json_integer(stored));
 		json_object_set_new(response, "skipped", json_integer(pb.n_skipped));
 		json_object_set_new(response, "dropped", json_integer(dropped));
-		json_object_set_new(response, "pos_mode", json_string("observe"));
+		json_object_set_new(response, "pos_mode", json_string(enforcing ? "enforce" : "observe"));
 	}
 	janus_mutex_unlock(&room->mutex);
 	janus_refcount_decrease(&room->ref);
@@ -4200,14 +4258,24 @@ static void janus_slvoice_encode_relay(janus_slvoice_session *s, float *frame, i
  * as it reads decbuf. Copies sp/lp/lh from the last SLData gated on presence,
  * then applies the server-side camera leash to lp (the client clamp at
  * llvoicewebrtc.cpp:1203-1220 is spoofable, so we re-apply it here). Leaves the
- * snapshot marked invalid when the two positions are absent. */
-static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s) {
+ * snapshot marked invalid when the two positions are absent.
+ * `pd` is the enforced position decision (src/possync.h), or NULL when the room is only observed: the sim's point then
+ * replaces sp, and stands in for an lp the viewer did not send, before the leash below, so a sim-corrected participant
+ * is heard and hears from where the sim has it. FAIL_CLOSED marks the participant for pass 2 to leave out of spatial pairs. */
+static void janus_slvoice_snapshot_geometry_locked(janus_slvoice_session *s, const slv_pos_decision *pd) {
 	unsigned f = s->last_data_fields;
+	s->pos_closed = (pd != NULL && pd->action == SLV_POS_ACT_FAIL_CLOSED) ? TRUE : FALSE;
 	s->snap_valid = ((f & SLV_FIELD_SP) != 0) && ((f & SLV_FIELD_LP) != 0);
-	if(!s->snap_valid)
+	if(pd != NULL && (pd->use_sim_sp || pd->lp_from_sp)) {
+		s->snap_sp = pd->use_sim_sp ? (slv_vec3){ pd->sp[0], pd->sp[1], pd->sp[2] } : s->last_data.sp;
+		s->snap_lp = pd->lp_from_sp ? s->snap_sp : s->last_data.lp;
+		s->snap_valid = TRUE;
+	} else if(s->snap_valid) {
+		s->snap_sp = s->last_data.sp;
+		s->snap_lp = s->last_data.lp;
+	} else {
 		return;   /* no usable geometry this tick; the mix stays flat */
-	s->snap_sp = s->last_data.sp;
-	s->snap_lp = s->last_data.lp;
+	}
 	s->snap_lh = (f & SLV_FIELD_LH) ? s->last_data.lh
 	                                : (slv_quat){ 0.0, 0.0, 0.0, 1.0 };   /* identity if no heading */
 	/* Camera leash: clamp lp onto the slv_spatial.leash_dist sphere around sp
@@ -4229,6 +4297,18 @@ static void janus_slvoice_pos_observe_locked(janus_slvoice_room *room, janus_slv
 	double claim[3] = { s->last_data.sp.x, s->last_data.sp.y, s->last_data.sp.z };
 	slv_pos_observe(&s->pos, &room->pos_stats, sim, now, (s->last_data_fields & SLV_FIELD_SP) != 0,
 		(s->last_data_fields & SLV_FIELD_LP) != 0, claim);
+}
+
+/* The enforced counterpart, for a room whose positions are enforced (slv_pos_enforcing): decide what to do with this
+ * participant's claim and count it. The observe counters above run in either mode, so would_clamp keeps meaning "beyond
+ * the tolerance" whether or not it was acted on. session->mutex and room->mutex held. */
+static slv_pos_decision janus_slvoice_pos_decide_locked(janus_slvoice_room *room, janus_slvoice_session *s, gint64 now) {
+	const slv_pos_sim *sim = s->display != NULL ? slv_pos_store_find(&room->pos_store, s->display) : NULL;
+	double claim[3] = { s->last_data.sp.x, s->last_data.sp.y, s->last_data.sp.z };
+	slv_pos_decision d = slv_pos_decide(sim, now, s->join_ts, (s->last_data_fields & SLV_FIELD_SP) != 0,
+		(s->last_data_fields & SLV_FIELD_LP) != 0, claim, &slv_pos_pol);
+	slv_pos_count_enforced(&s->pos, &room->pos_stats, &d);
+	return d;
 }
 
 /* Per-listener distance cull with hysteresis. Returns TRUE if the
@@ -4287,6 +4367,10 @@ static gboolean janus_slvoice_spatial_pair_locked(janus_slvoice_room *room, janu
 	*gainR = gain;
 	if(!room->spatial_audio)
 		return FALSE;
+	/* An enforced participant with no usable sim point, under JS_POS_FAIL=closed, is neither heard nor hearing here: not
+	 * mixed flat either, because a flat mix would give a participant with no position the whole room. */
+	if(s->pos_closed || src->pos_closed)
+		return TRUE;
 	if(!s->snap_valid || !src->snap_valid)
 		return FALSE;
 	double dcull = slv_vec3_mag(slv_vec3_sub(s->snap_lp, src->snap_sp));
@@ -4340,6 +4424,8 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 
 	if(room->pos_stats.have_batch)
 		slv_pos_room_tick_begin(&room->pos_stats);
+	/* Enforced only while the mixer allows it (JS_POS_MODE) and the room's sim asked for it in its latest peer_pos. */
+	gboolean pos_enforcing = slv_pos_enforcing(&slv_pos_pol, &room->pos_stats) ? TRUE : FALSE;
 
 	/* Pass 1: decode each source once. */
 	for(int i = 0; i < count; i++) {
@@ -4348,8 +4434,11 @@ static void janus_slvoice_room_tick(janus_slvoice_room *room) {
 		janus_slvoice_tick_decode_locked(s, t0);
 		audible[i] = (s->dec_samples > 0) ? 1 : 0;
 		srcbuf[i] = s->decbuf;   /* tick-owned; stable for the rest of this tick */
-		janus_slvoice_snapshot_geometry_locked(s);   /* geometry + leash (tick-owned) */
-		janus_slvoice_pos_observe_locked(room, s, t0);   /* vis_protocol 3: count only, no audio change */
+		janus_slvoice_pos_observe_locked(room, s, t0);   /* vis_protocol 3: counted in either mode */
+		slv_pos_decision pos_decision = { SLV_POS_ACT_KEEP, 0, 0, { 0.0, 0.0, 0.0 } };
+		if(pos_enforcing)
+			pos_decision = janus_slvoice_pos_decide_locked(room, s, t0);
+		janus_slvoice_snapshot_geometry_locked(s, pos_enforcing ? &pos_decision : NULL);   /* geometry + leash (tick-owned) */
 		if(check_reap && s->join_ts != 0 && !g_atomic_int_get(&s->media_seen)
 				&& !g_atomic_int_get(&s->destroyed) && t0 - s->join_ts >= reap_after_us) {
 			janus_refcount_increase(&s->ref);

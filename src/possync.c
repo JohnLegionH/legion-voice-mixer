@@ -5,7 +5,7 @@
 /*! \file    possync.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    peer_pos parser, per-room store and observe-only comparison. See possync.h.
+ * \brief    peer_pos parser, per-room store, comparison and correction. See possync.h.
  */
 
 #include <math.h>
@@ -216,6 +216,8 @@ void slv_pos_room_tick_begin(slv_pos_room_stats *rs) {
 	rs->would_clamp_now = 0;
 	rs->would_use_sim_now = 0;
 	rs->no_sim_now = 0;
+	rs->corrected_now = 0;
+	rs->fail_closed_now = 0;
 }
 
 void slv_pos_observe(slv_pos_part_stats *ps, slv_pos_room_stats *rs, const slv_pos_sim *sim, int64_t now_us,
@@ -271,5 +273,114 @@ void slv_pos_observe(slv_pos_part_stats *ps, slv_pos_room_stats *rs, const slv_p
 			rs->would_clamp_max_dev_cm = dev;
 		if(excess > rs->would_clamp_max_excess_cm)
 			rs->would_clamp_max_excess_cm = excess;
+	}
+}
+
+/* ---- enforcing ---- */
+
+slv_vis_knob_status slv_pos_mode_from_env(const char *v, slv_pos_mode *out) {
+	*out = SLV_POS_MODE_OBSERVE;
+	if(v == NULL || *v == '\0' || !strcasecmp(v, "observe"))
+		return SLV_VIS_KNOB_OK;
+	if(!strcasecmp(v, "enforce")) {
+		*out = SLV_POS_MODE_ENFORCE;
+		return SLV_VIS_KNOB_OK;
+	}
+	return SLV_VIS_KNOB_INVALID;
+}
+
+slv_vis_knob_status slv_pos_fail_from_env(const char *v, slv_pos_fail *out) {
+	*out = SLV_POS_FAIL_OPEN;
+	if(v == NULL || *v == '\0' || !strcasecmp(v, "open"))
+		return SLV_VIS_KNOB_OK;
+	if(!strcasecmp(v, "closed")) {
+		*out = SLV_POS_FAIL_CLOSED;
+		return SLV_VIS_KNOB_OK;
+	}
+	return SLV_VIS_KNOB_INVALID;
+}
+
+slv_vis_knob_status slv_pos_grace_ms_from_env(const char *v, int64_t *out) {
+	*out = SLV_POS_JOIN_GRACE_MS_DEFAULT;
+	if(v == NULL || *v == '\0')
+		return SLV_VIS_KNOB_OK;
+	char *end = NULL;
+	long ms = strtol(v, &end, 10);
+	if(end == v || *end != '\0' || ms < 0 || ms > SLV_POS_JOIN_GRACE_MS_MAX)
+		return SLV_VIS_KNOB_INVALID;
+	*out = (int64_t)ms;
+	return SLV_VIS_KNOB_OK;
+}
+
+int slv_pos_enforcing(const slv_pos_policy *pol, const slv_pos_room_stats *rs) {
+	return pol->mode == SLV_POS_MODE_ENFORCE && rs->have_batch && rs->enforce_wanted;
+}
+
+slv_pos_decision slv_pos_decide(const slv_pos_sim *sim, int64_t now_us, int64_t join_us, int has_sp, int has_lp,
+		const double claim_sp[3], const slv_pos_policy *pol) {
+	slv_pos_decision d;
+	memset(&d, 0, sizeof(d));
+	d.action = SLV_POS_ACT_KEEP;
+	int64_t age_us = sim != NULL ? now_us - sim->recv_us : 0;
+	if(age_us < 0)
+		age_us = 0;
+	if(sim == NULL || age_us > (int64_t)SLV_POS_STALE_MS * 1000) {
+		/* No usable sim point. A participant who has only just joined has had no chance to be reported yet. */
+		if(sim == NULL && join_us > 0 && now_us - join_us < pol->join_grace_ms * 1000)
+			d.action = SLV_POS_ACT_GRACE;
+		else
+			d.action = pol->fail == SLV_POS_FAIL_CLOSED ? SLV_POS_ACT_FAIL_CLOSED : SLV_POS_ACT_FAIL_OPEN;
+		return d;
+	}
+	d.sp[0] = (double)sim->e.x;
+	d.sp[1] = (double)sim->e.y;
+	d.sp[2] = (double)sim->e.z;
+	if(!has_sp) {
+		d.action = SLV_POS_ACT_FILL;
+		d.use_sim_sp = 1;
+		d.lp_from_sp = !has_lp;
+		return d;
+	}
+	double dx = claim_sp[0] - d.sp[0], dy = claim_sp[1] - d.sp[1], dz = claim_sp[2] - d.sp[2];
+	double dev = sqrt(dx * dx + dy * dy + dz * dz);
+	if(isnan(dev))
+		return d;   /* nothing to compare; the SLData parser admits only JSON numbers, so none arrives */
+	if(dev > slv_pos_tolerance_now(sim, age_us)) {
+		d.action = SLV_POS_ACT_CLAMP;
+		d.use_sim_sp = 1;
+	} else if(!has_lp) {
+		d.action = SLV_POS_ACT_FILL;
+	}
+	d.lp_from_sp = !has_lp;
+	return d;
+}
+
+void slv_pos_count_enforced(slv_pos_part_stats *ps, slv_pos_room_stats *rs, const slv_pos_decision *d) {
+	switch(d->action) {
+		case SLV_POS_ACT_CLAMP:
+			ps->clamped++;
+			rs->clamped_ticks++;
+			rs->corrected_now++;
+			break;
+		case SLV_POS_ACT_FILL:
+			ps->filled++;
+			rs->filled_ticks++;
+			rs->corrected_now++;
+			break;
+		case SLV_POS_ACT_GRACE:
+			ps->grace++;
+			rs->grace_ticks++;
+			break;
+		case SLV_POS_ACT_FAIL_OPEN:
+			ps->fail_open++;
+			rs->fail_open_ticks++;
+			break;
+		case SLV_POS_ACT_FAIL_CLOSED:
+			ps->fail_closed++;
+			rs->fail_closed_ticks++;
+			rs->fail_closed_now++;
+			break;
+		default:
+			break;
 	}
 }
