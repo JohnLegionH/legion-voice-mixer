@@ -574,7 +574,7 @@ By default the mixer only observes, as above. **Enforcing** is a second, separat
 
 | Knob | Default | Effect |
 |---|---|---|
-| `JS_POS_MODE` | `observe` | `enforce` lets a room be corrected. It still takes effect only in a room whose sim's **latest** `peer_pos` carries `"mode":"enforce"` (the region's `PositionFeedMode`), so a mixer left in `observe` never changes what anyone hears, and the sim can step back with its next request |
+| `JS_POS_MODE` | `observe` | `enforce` lets a room be corrected, **but only while `JS_JOIN_CAP_REQUIRED=1`**: with it off the mixer logs one start-up WARNING naming both settings, stays in `observe` and reports `enforce_blocked` true. It still takes effect only in a room whose sim's **latest** `peer_pos` carries `"mode":"enforce"` (the region's `PositionFeedMode`), so a mixer left in `observe` never changes what anyone hears, and the sim can step back with its next request |
 | `JS_POS_FAIL` | `open` | What happens to a participant the sim has no usable point for once the join grace is over: `open` leaves the viewer's claim standing; `closed` leaves the participant out of spatial mixing (neither heard nor hearing, and not mixed flat) until a point arrives |
 | `JS_POS_JOIN_GRACE_MS` | `5000` | Milliseconds after a join during which a participant the sim has not reported yet keeps its own claim. `0` to `60000` |
 
@@ -597,7 +597,7 @@ counters keep running in both modes, so `would_clamp` still means "beyond the to
 A `peer_pos` reply carries `pos_mode`, the mode the room is in after that request.
 
 The identity of a participant is the display name it joined with, so correcting positions is only as strong as that
-binding: enforce it together with the join capability (`JS_JOIN_CAP_REQUIRED`).
+binding. That is why `JS_POS_MODE=enforce` requires the join capability (`JS_JOIN_CAP_REQUIRED=1`, which needs `JS_JOIN_CAP_SECRET`) and stays in observe without it.
 
 **Start-up lines.**
 - The entrypoint: `vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)`.

@@ -2980,6 +2980,31 @@ async def s62_the_sim_can_step_back_to_observe(ctx: Ctx) -> None:
     await ctx.until_info(a, _silent, "enforce again: corrected again")
 
 
+async def s63_enforce_without_the_join_check_stays_observe(ctx: Ctx) -> None:
+    """JS_POS_MODE=enforce on a mixer whose join capability is NOT required (JS_JOIN_CAP_REQUIRED off): the mixer stays in
+    observe and says why. Positions are matched to the agent id a viewer joined as, so without the join check the comparison
+    proves nothing. Needs exactly that setting (skips otherwise). A sim that asks for enforce is counted, not obeyed."""
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, g2 = await _two_rooms(ctx, ("A", "B"), claims)
+    a, b, a2 = g1["A"], g1["B"], g2["A"]
+    info = await ctx.until_info(a, lambda i: bool(_room_pos(i)), "A reports a positions block")
+    if _room_pos(info).get("enforce_blocked") is not True:
+        raise Skip("this scenario needs JS_POS_MODE=enforce with JS_JOIN_CAP_REQUIRED off; the mixer does not report enforce_blocked")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    first = await feeder.send_once()
+    if first.get("pos_mode") != "observe":
+        raise Fail("the reply says the room is observed", first)
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(b, lambda i: (_obs(i).get("would_clamp") or 0) >= 25, "B's far claim counted as would-clamp")
+    rp = _room_pos(await ctx.info(a))
+    if rp.get("mixer_mode") != "observe" or rp.get("mode") != "observe" or rp.get("clamped_ticks") != 0:
+        raise Fail("the mixer reports observe and corrects nothing", rp)
+    with_pos, without_pos = await _levels(ctx, a), await _levels(ctx, a2)
+    if not _same_mix(with_pos, without_pos):
+        raise Fail("A hears B at the level the claim alone gives", {"with_peer_pos": with_pos, "without": without_pos})
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "hangup frees the slot", s2_crash_without_leave),
@@ -3087,4 +3112,6 @@ SCENARIOS = [
              "peer_pos enforce: missing and stale points, closed", s61_no_sim_point_fails_closed),
     Scenario("S62", "enforce is the sim's ask request by request: observe stops the correction, enforce restarts it",
              "peer_pos enforce: the sim steps back", s62_the_sim_can_step_back_to_observe),
+    Scenario("S63", "enforce set but the join capability not required: the mixer stays in observe and says so",
+             "peer_pos enforce needs the join check", s63_enforce_without_the_join_check_stays_observe),
 ]

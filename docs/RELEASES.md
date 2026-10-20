@@ -50,7 +50,8 @@ configuration is byte-identical to the previous release's.
 - **Enforcing, off by default.** With `JS_POS_MODE=enforce` a room whose sim's latest `peer_pos` asks for enforce is
   corrected: a claim beyond the tolerance is replaced by the sim's point (as a speaker and as a listener), a viewer that
   sent no position is placed at the sim's point instead of being mixed flat, and `JS_POS_FAIL` / `JS_POS_JOIN_GRACE_MS`
-  say what happens to a participant the sim has no usable point for. With `JS_POS_MODE` unset the mixer observes exactly
+  say what happens to a participant the sim has no usable point for. It requires `JS_JOIN_CAP_REQUIRED=1`; without it the mixer logs a
+  warning and stays in observe. With `JS_POS_MODE` unset the mixer observes exactly
   as before. Counters, the knobs and the rules are in `docs/docker-notes.md`.
 
 ### Test harness
