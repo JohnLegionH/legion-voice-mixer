@@ -21,6 +21,8 @@ their changes are part of 1.2.0, and everything below is a change since 0.7.0.
   visibility arming, the recorder and injector connectors, and parcel-level moderation mutes. On a stock plugin the
   region server's switches for the mixer-only features log a warning and turn themselves off.
 - Parcel moderation also runs on the stock plugin, but there it mutes the participant rather than the parcel.
+- The region-server side of the mixer-only features is being contributed to OpenSim-NGC as separate pull requests,
+  each naming the mixer version it needs. It is not in NGC `develop` until those pull requests are merged.
 - Every region-server feature that talks to this mixer is off until the operator turns it on.
 
 ### Behaviour changes on upgrade
