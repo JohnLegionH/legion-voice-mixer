@@ -297,7 +297,7 @@ check "TURN: no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha2
 # JS_PUBLIC_IP=203.0.113.7 and this file's run_ep environment), plus that image's janus.plugin.slvoice.jcfg.
 GOLDEN0="$HERE/golden/phase0-knobs-off"
 VISSTUB="$WORK/janus-stub-vis"
-printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\n' > "$VISSTUB"
+printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\necho "STUB-POS JS_POS_MODE=${JS_POS_MODE-<unset>} JS_POS_FAIL=${JS_POS_FAIL-<unset>} JS_POS_JOIN_GRACE_MS=${JS_POS_JOIN_GRACE_MS-<unset>}"\n' > "$VISSTUB"
 chmod +x "$VISSTUB"
 golden0() {
 	cmp -s "$CONF/janus.jcfg" "$GOLDEN0/janus.jcfg" \
@@ -321,6 +321,14 @@ run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=0 JS_VIS
 check "visibility knobs: knobs set to their defaults -> the same export and banner" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000" && has "fail-closed DISABLED (shadow mode)"'
 if [ "$IMAGE_TPL" = yes ]; then
 	check "visibility knobs: knobs set to their defaults -> the generated config is still the golden" 'golden0'
+fi
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB"
+check "position knobs: knobs unset -> Janus runs with JS_POS_MODE=observe, JS_POS_FAIL=open and JS_POS_JOIN_GRACE_MS=5000" '[ "$RC" -eq 0 ] && has "STUB-POS JS_POS_MODE=observe JS_POS_FAIL=open JS_POS_JOIN_GRACE_MS=5000"'
+check "position knobs: knobs unset -> the banner says observe" 'has "INFO: pos_mode=observe pos_fail=open pos_join_grace_ms=5000"'
+run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_POS_MODE=enforce JS_POS_FAIL=closed JS_POS_JOIN_GRACE_MS=3000
+check "position knobs: set -> exported as given, and the banner repeats them" '[ "$RC" -eq 0 ] && has "STUB-POS JS_POS_MODE=enforce JS_POS_FAIL=closed JS_POS_JOIN_GRACE_MS=3000" && has "INFO: pos_mode=enforce pos_fail=closed pos_join_grace_ms=3000"'
+if [ "$IMAGE_TPL" = yes ]; then
+	check "position knobs: set -> the generated config is still the golden (the knobs are environment only)" 'golden0'
 fi
 run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB" JS_VIS_FAIL_CLOSED=1 JS_VIS_STALE_MS=9000
 check "visibility knobs: fail-closed on -> exported as given, and the banner says ENABLED" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=1 JS_VIS_STALE_MS=9000" && has "INFO: vis_fail_closed=1 vis_stale_ms=9000: fail-closed ENABLED" && ! has "shadow mode"'

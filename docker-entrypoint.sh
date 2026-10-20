@@ -82,6 +82,17 @@ export JS_JOIN_MEDIA_TIMEOUT_S
 export JS_VIS_FAIL_CLOSED
 : "${JS_VIS_STALE_MS:=8000}"
 export JS_VIS_STALE_MS
+# Sim-reported positions (peer_pos). JS_POS_MODE=observe (the default) only counts what a viewer's claimed position would
+# change; enforce lets a room be corrected, but only while the sim's own latest peer_pos asks for it. JS_POS_FAIL says what
+# happens to a participant the sim has no usable position for once JS_POS_JOIN_GRACE_MS has passed: open leaves the viewer's
+# claim standing (the default), closed leaves the participant out of spatial mixing. Read by the plugin from the process
+# environment; none of them changes a generated config file.
+: "${JS_POS_MODE:=observe}"
+export JS_POS_MODE
+: "${JS_POS_FAIL:=open}"
+export JS_POS_FAIL
+: "${JS_POS_JOIN_GRACE_MS:=5000}"
+export JS_POS_JOIN_GRACE_MS
 # The sim-issued join capability. 0 is shadow: a
 # capability that arrives is verified and counted, and no join is ever refused for it. 1 requires a valid one to
 # join a room the sim created with vis_authority, and nowhere else. JS_JOIN_CAP_SECRET is the HMAC key shared with
@@ -228,6 +239,7 @@ case "$(printf '%s' "$JS_VIS_FAIL_CLOSED" | tr '[:upper:]' '[:lower:]')" in
 	*)             vis_mode="fail-closed DISABLED (shadow mode)" ;;
 esac
 echo "[entrypoint] INFO: vis_fail_closed=${JS_VIS_FAIL_CLOSED} vis_stale_ms=${JS_VIS_STALE_MS}: ${vis_mode} (JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS; the plugin logs the effective values)"
+echo "[entrypoint] INFO: pos_mode=${JS_POS_MODE} pos_fail=${JS_POS_FAIL} pos_join_grace_ms=${JS_POS_JOIN_GRACE_MS} (JS_POS_MODE, JS_POS_FAIL, JS_POS_JOIN_GRACE_MS; the plugin logs the effective values)"
 case "$(printf '%s' "$JS_JOIN_CAP_REQUIRED" | tr '[:upper:]' '[:lower:]')" in
 	1|true|yes|on) cap_mode="join capability REQUIRED in rooms with vis_authority" ;;
 	*)             cap_mode="join capability shadow (verified and counted, never refused)" ;;
