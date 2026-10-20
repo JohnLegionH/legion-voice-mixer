@@ -39,7 +39,7 @@ configuration is byte-identical to the previous release's.
   empty room's grace period, so a room is not removed between a create and the join that follows it. A room created with `vis_authority` and left with no listeners is removed after the same grace
   and is armed again by the next join.
 
-### Positions, observe only
+### Positions
 
 - A sim can report where it holds each participant with the new admin request `peer_pos` (global centimetres, a speed
   allowance and a tolerance per participant). The mixer compares it every mix tick with the position the viewer
@@ -47,9 +47,18 @@ configuration is byte-identical to the previous release's.
   participant (`pos_observe`) and per room (`visibility.positions` in `handle_info`). It changes no audio.
 - A room that never receives `peer_pos` is not observed at all, so a sim that does not send it behaves exactly as
   before. Counters and request limits are in `docs/docker-notes.md`.
+- **Enforcing, off by default.** With `JS_POS_MODE=enforce` a room whose sim's latest `peer_pos` asks for enforce is
+  corrected: a claim beyond the tolerance is replaced by the sim's point (as a speaker and as a listener), a viewer that
+  sent no position is placed at the sim's point instead of being mixed flat, and `JS_POS_FAIL` / `JS_POS_JOIN_GRACE_MS`
+  say what happens to a participant the sim has no usable point for. With `JS_POS_MODE` unset the mixer observes exactly
+  as before. Counters, the knobs and the rules are in `docs/docker-notes.md`.
 
 ### Test harness
 
+- New scenarios S55 to S62 enforce: a mixer left in observe ignores a sim's ask; a speaker's and a listener's false
+  position are replaced by the sim's point; a fast mover inside its allowance is not corrected while a walker on the same
+  claim is; a viewer that sent no position is placed by the sim; a missing or stale point fails open or closed; and the
+  sim can step back to observe. They skip on a mixer that is not set the way they need.
 - New scenarios S50 to S54 act as a sim that reports positions: matching claims are accepted and counted as nothing;
   a far claim is counted as would-clamp and the audio equals that of a room without positions; a viewer with no
   position is counted as would-use-sim; an old sim that never sends `peer_pos` leaves behaviour unchanged; and a

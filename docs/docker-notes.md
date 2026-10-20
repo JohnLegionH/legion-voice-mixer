@@ -553,7 +553,7 @@ before, and joins, the mix, presence, the roster and dots are unchanged. What do
 - they count only rooms created with `vis_authority`. In steady state they read 0; a joiner is counted until its
   arming lands.
 
-**Sim positions (`peer_pos`, `vis_protocol` 3), observe only.** A simulator that knows where each avatar is can send the
+**Sim positions (`peer_pos`, `vis_protocol` 3).** A simulator that knows where each avatar is can send the
 mixer an admin request, `peer_pos`, naming per participant a global-centimetre point, a speed allowance (cm/s) and a
 tolerance (cm); the sim sends it only after a reply has advertised `vis_protocol` 3 or higher. The mixer stores the
 points per room and, on every mix tick, compares each point with the position the viewer claims in its own SLData
@@ -568,7 +568,36 @@ exactly as before. The counters are in `handle_info`: per participant in `plugin
 point and its age), per room in `plugin_specific.visibility.positions` (with the request counters: `batches`,
 `rejected_stale_seq`, `rejected_stale_epoch`, `entries_skipped`, and the process-wide `process_rejected_malformed` and
 `process_rejected_too_big`). A request is refused whole when malformed, over 64 KB or over 128 entries, and a single
-malformed entry is skipped and counted. Enforcement (clamping the claim to the sim point) is not built.
+malformed entry is skipped and counted.
+
+By default the mixer only observes, as above. **Enforcing** is a second, separate step that both sides must ask for:
+
+| Knob | Default | Effect |
+|---|---|---|
+| `JS_POS_MODE` | `observe` | `enforce` lets a room be corrected. It still takes effect only in a room whose sim's **latest** `peer_pos` carries `"mode":"enforce"` (the region's `PositionFeedMode`), so a mixer left in `observe` never changes what anyone hears, and the sim can step back with its next request |
+| `JS_POS_FAIL` | `open` | What happens to a participant the sim has no usable point for once the join grace is over: `open` leaves the viewer's claim standing; `closed` leaves the participant out of spatial mixing (neither heard nor hearing, and not mixed flat) until a point arrives |
+| `JS_POS_JOIN_GRACE_MS` | `5000` | Milliseconds after a join during which a participant the sim has not reported yet keeps its own claim. `0` to `60000` |
+
+In an enforced room, on every mix tick and for each participant:
+- a claim beyond the tolerance (the sim's tolerance plus its speed allowance times the point's age; a claim exactly on
+  the tolerance stands) is replaced by the sim's point. The sim's point replaces the claim as a whole, not a point on
+  the edge of the tolerance, and it applies to the participant as a speaker and as a listener alike. The tolerance is the
+  sim's own number: it is where the speed of the avatar or of what it sits on, capped at the physics engine's limit, enters;
+- a viewer that sent no `sp`, or no `lp`, is filled in from the sim's point instead of being mixed flat;
+- with no sim point yet, the claim stands for `JS_POS_JOIN_GRACE_MS`, counted as `grace`;
+- with no usable point after that, or a point older than 6 s (including when the whole feed stops), `JS_POS_FAIL` decides,
+  counted as `fail_open` or `fail_closed`.
+
+The camera leash is applied after the replacement, so a corrected participant's camera (`lp`) stays within the usual
+distance of the sim's point; a viewer's `lp` is otherwise left alone. What enforcing did is counted next to the observe
+counters: per participant in `pos_observe` (`clamped`, `filled`, `grace`, `fail_open`, `fail_closed`), per room in
+`visibility.positions` (the same as `*_ticks`, plus `corrected_now` and `fail_closed_now`, the effective `mode`,
+`mixer_mode` (`JS_POS_MODE`), `enforce_wanted` (what the sim last asked), `fail` and `join_grace_ms`). The observe
+counters keep running in both modes, so `would_clamp` still means "beyond the tolerance" whether or not it was acted on.
+A `peer_pos` reply carries `pos_mode`, the mode the room is in after that request.
+
+The identity of a participant is the display name it joined with, so correcting positions is only as strong as that
+binding: enforce it together with the join capability (`JS_JOIN_CAP_REQUIRED`).
 
 **Start-up lines.**
 - The entrypoint: `vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)`.
@@ -593,6 +622,9 @@ it.
 
 | Knob | Default | Effect |
 |---|---|---|
+| `JS_POS_MODE` | `observe` | no position correction: the sim's points were not used at all. `observe` counts what correcting would change and changes no audio; `enforce` only allows it, and only in a room whose sim asks (see "Sim positions") | `60d857c` |
+| `JS_POS_FAIL` | `open` | n/a. Only matters in an enforced room | `60d857c` |
+| `JS_POS_JOIN_GRACE_MS` | `5000` | n/a. Only matters in an enforced room | `60d857c` |
 | `JS_JOIN_CAP_REQUIRED` | `0` | `0` is shadow: a capability that arrives is verified and counted, and no join is ever refused for it. `1` requires a valid one to join any room **a simulator created** - that is, any room whose create carried `"sim_created": true` (spatial and `multiagent` alike), plus any room created with `vis_authority`. A room nobody marked - the harness's, a static room from the config file, or one an older simulator that does not send the marker created - is never gated. The knob has never shipped in a tagged release, so `0` is byte-identical to every published image |
 | `JS_JOIN_CAP_SECRET` | *(unset)* | the HMAC key, shared with the sim. Not `JS_API_SECRET`. With `JS_JOIN_CAP_REQUIRED=1` and no key the container refuses to start |
 | `JS_TLS_CERT`, `JS_TLS_KEY` | *(unset)*: plain http only; the generated `janus.transport.http.jcfg` is byte-identical | the API and admin API could only be served over plain http. Both set turns on Janus's https for both listeners; a missing or unreadable file refuses to start ("TLS for the API and admin API") | this release |
