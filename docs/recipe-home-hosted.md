@@ -20,7 +20,7 @@ A Linux home server differs in two places, both marked **Linux**.
 - **A DDNS name** that tracks the router's public address (e.g. `grid.example.org`), kept current by the router or
   a DDNS client.
 - **A fixed LAN address for the host** (a DHCP reservation on the router). This recipe calls it `HOST_LAN_IP`
-  (for example `192.168.0.225`).
+  (for example `10.0.0.225`).
 - **Docker:** Docker Desktop with the WSL2 backend (Windows), or Docker Engine with the compose plugin (**Linux**).
 - The two files from the repo, `docker-compose.yml` and `env.sample`, in an empty directory.
 - **A host that will not confine the grid to its slow cores** (Windows 11 with a hybrid Intel CPU: 12th gen or later,
@@ -171,7 +171,7 @@ This is a home-hosted grid's board from 2026-09-15, abridged to the status lines
 
 ```
 [selfcheck] C1  PASS         advertised address is public
-[selfcheck]     observed: nat_1_1_mapping 198.51.100.77,192.168.0.225; public: 198.51.100.77 (discovered by stun)
+[selfcheck]     observed: nat_1_1_mapping 198.51.100.77,10.0.0.225; public: 198.51.100.77 (discovered by stun)
 [selfcheck] C2a WARN         media path, outbound: UDP mapping from the RTP range (information)
 [selfcheck]     observed: container-initiated UDP is source-port remapped; ... local 10000 -> 198.51.100.77:63888; ...
 [selfcheck] C2b INCONCLUSIVE media path, inbound: UDP from outside reaches the RTP range

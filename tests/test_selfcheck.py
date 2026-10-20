@@ -115,7 +115,7 @@ class Base(unittest.TestCase):
 
 class C1(Base):
     def test_public_pass(self):
-        r = selfcheck.check_c1(self.state(["198.51.100.77", "192.168.0.225"]))
+        r = selfcheck.check_c1(self.state(["198.51.100.77", "10.0.0.225"]))
         self.assertEqual(r["status"], PASS)
         self.assertIn("public: 198.51.100.77 (discovered by stun)", r["observed"])
         self.assertIsNone(r["remediation"])
@@ -127,9 +127,9 @@ class C1(Base):
         self.assertIn("TURN", r["remediation"])
 
     def test_private_fail(self):
-        r = selfcheck.check_c1(self.state(["192.168.0.225"]))
+        r = selfcheck.check_c1(self.state(["10.0.0.225"]))
         self.assertEqual(r["status"], FAIL)
-        self.assertIn("has no public address (192.168.0.225 private)", r["observed"])
+        self.assertIn("has no public address (10.0.0.225 private)", r["observed"])
 
     def test_empty_mapping_fail(self):
         self.assertEqual(selfcheck.check_c1(self.state([]))["status"], FAIL)
@@ -251,7 +251,7 @@ class Listen(Base):
         super(Listen, self).setUp()
         self.lo, self.hi = free_udp_range(11)
         self.cfg = {"rtp_range": "%d-%d" % (self.lo, self.hi), "bind_host": "127.0.0.1",
-                    "state_file": self.state(["198.51.100.77", "192.168.0.225"]),
+                    "state_file": self.state(["198.51.100.77", "10.0.0.225"]),
                     "inbound_file": os.path.join(self.dir, "run", "selfcheck-inbound.json"),
                     "inbound_max_age_h": 168.0}
 
@@ -514,9 +514,9 @@ class C6(Base):
 
 class Candidates(Base):
     LIVE_LOCAL = ["1 1 udp 2015363327 198.51.100.77 10028 typ host", "1 1 udp 2015363327 172.30.0.2 10028 typ host",
-                  "1 1 udp 2015363327 192.168.0.225 10028 typ host"]
-    LIVE_REMOTE = ["a3ea 1 udp 2130706431 192.168.0.225 64602 typ host",
-                   "5253 1 udp 1694498815 198.51.100.77 64602 typ srflx raddr 192.168.0.225 rport 64602",
+                  "1 1 udp 2015363327 10.0.0.225 10028 typ host"]
+    LIVE_REMOTE = ["a3ea 1 udp 2130706431 10.0.0.225 64602 typ host",
+                   "5253 1 udp 1694498815 198.51.100.77 64602 typ srflx raddr 10.0.0.225 rport 64602",
                    "remote1 1 udp 1862270975 172.30.0.1 36103 typ prflx raddr 172.30.0.1 rport 36103\r\n"]
 
     def admin(self, secret="admin-s3cret"):
@@ -642,7 +642,7 @@ class WholeRun(Base):
         lo, hi = free_udp_range(21)
         janus = self.track(fakes.FakeJanusHTTP())
         stun = self.track(fakes.FakeStun(lambda ip, port: ("198.51.100.77", 50000 + (port % 1000))))
-        cfg = self.cfg(lo, hi, stun, janus.port, fakes.closed_tcp_port(), ["198.51.100.77", "192.168.0.225"])
+        cfg = self.cfg(lo, hi, stun, janus.port, fakes.closed_tcp_port(), ["198.51.100.77", "10.0.0.225"])
 
         before = selfcheck.run_checks(cfg, selfcheck.Budget(10))
         status = dict((r["id"], r["status"]) for r in before)

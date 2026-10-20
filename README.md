@@ -5,7 +5,7 @@ voice mixer for OpenSimulator grids**, speaking the **Second Life WebRTC voice
 protocol**. It is the server-side counterpart to the OpenSim `os-webrtc-janus`
 addon and a drop-in alternative to the stock `janus.plugin.audiobridge`.
 
-> **Status: 1.1.0, in production use.** Each viewer holds one
+> **Status: 1.2.0, in production use.** Each viewer holds one
 > PeerConnection (Opus + the SLData **DataChannel**) per region room.
 > - **Mixing:** every room runs a 20 ms tick that builds a **per-listener
 >   N-minus-one stereo mix**.
@@ -94,6 +94,8 @@ To stop / update:
 docker compose down
 docker compose pull && docker compose up -d   # upgrade to a newer image
 ```
+
+The compose file caps the container log at three files of 10 MB (json-file driver); Docker keeps an unbounded log by default, which a busy mixer would grow until the disk is full.
 
 ---
 

@@ -101,8 +101,8 @@ Config hygiene: the admin bind, WebSockets, fail-closed secrets and SDP logging.
   JS_ADMIN_SECRET only — firewall the port or set JS_ADMIN_BIND to the address the
   regionserver uses.` To narrow, set `JS_ADMIN_BIND` to the host address in the
   sim's `JanusGatewayAdminURI`. The sim uses that address even when it runs on the
-  same host (for example `http://192.168.0.225:24225/voiceAdmin` →
-  `JS_ADMIN_BIND=192.168.0.225`), and on a production server it is a different host.
+  same host (for example `http://192.0.2.10:24225/voiceAdmin` →
+  `JS_ADMIN_BIND=192.0.2.10`), and on a production server it is a different host.
   So `127.0.0.1` cuts the sim off: its visibility/moderation `peer_ctl_batch` calls
   are refused. An earlier release defaulted to `127.0.0.1` and did exactly that; the default
   was reverted. The HTTP
@@ -805,7 +805,7 @@ operator knobs.
     stays spatial; the first of these changes alone briefly made it flat.
   - Voice dots: each listener receives `{p:0, v:false}` for sources it cannot hear. This
     changes the protocol payload only; there is no config change.
-- **`3618e9a`, released in 1.1.0**
+- **`3618e9a`, first released in 1.2.0**
   - **A participant whose PeerConnection never comes up is reaped** `JS_JOIN_MEDIA_TIMEOUT_S`
     (default 30 s) after joining, logging `[slvoice] <display> reaped from room <id>: no media <n>s
     after join`. Before, it held its roster row and mix slot, and kept the room from its grace destroy,
@@ -860,7 +860,7 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
      resolver.
   3. **The container resolver,** last. A router that hairpins its own DDNS name, or a
      split-horizon/hosts pin, answers it with the LAN address. For example `grid.example.org`
-     → `192.168.0.225`, which is why the earlier resolution produced a private-only mapping.
+     → `10.0.0.225`, which is why the earlier resolution produced a private-only mapping.
 
   **Winner.** The first public answer wins. If no source gives a public answer, the first answer of
   any kind is used and the verdict says so. The start log reads:
@@ -868,7 +868,7 @@ ICE candidates (`nat_1_1_mapping`). Two knobs support this:
   ```
   [entrypoint] INFO: discovery source stun (stun.l.google.com:19302) -> 198.51.100.77 (public)
   [entrypoint] INFO: discovery source dns (resolver 1.1.1.1) -> 198.51.100.77 (public)
-  [entrypoint] INFO: discovery source container (container resolver) -> 192.168.0.225 (private)
+  [entrypoint] INFO: discovery source container (container resolver) -> 10.0.0.225 (private)
   [entrypoint] INFO: discovery winner: stun -> 198.51.100.77
   ```
 
@@ -982,7 +982,7 @@ Janus's selected pair is compared with the addresses the peer holds. The Linux c
 | (b) published ports, Linux dockerd, `userland-proxy: false` | `172.31.66.10:10001 [prflx,udp] <-> 172.31.66.20:40854 [host,udp]` | **preserved** | `direct` |
 | (c) `network_mode: host`, Linux dockerd | `172.31.66.10:10019 [host,udp] <-> 172.31.66.20:44865 [host,udp]` | **preserved** | `direct` |
 
-The Docker Desktop row ran against a production mixer (image `1e40da39`); the classifier reads prflx on the
+The Docker Desktop row ran against a running mixer; the classifier reads prflx on the
 peer's side as `undetermined` in both images. An earlier pass of the three Linux cases with the earlier image found the
 same pairs' shape (prflx/host, prflx/host, host/host), which that image's classifier still called `undetermined` for
 (a) and (b). That underclaim is why the classifier now reads the peer's side.
