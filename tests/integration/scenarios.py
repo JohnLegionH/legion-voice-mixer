@@ -2662,6 +2662,324 @@ async def s54_a_full_room_of_110(ctx: Ctx) -> None:
     if rp.get("store_size") != 128 or (rp.get("process_rejected_too_big") or 0) < 1:
         raise Fail("the refused request changed nothing and was counted", rp)
 
+# ---- S55-S62: the sim's positions, ENFORCED ------------------------------------------------------------------------------
+# A room is corrected only when the mixer allows it (JS_POS_MODE=enforce) and the sim's latest peer_pos asks for it
+# ("mode": "enforce"). S55 runs on a mixer left in observe; S56-S60 and S62 need JS_POS_MODE=enforce; S61 also needs
+# JS_POS_FAIL=closed. Each Skips on a mixer that is not set the way it needs, so one harness run per mixer setting covers all.
+
+async def _pos_config(ctx: Ctx, peer, mixer_mode: str, fail: str | None = None) -> dict:
+    """The mixer's position settings from the peer's handle_info; Skip when they are not what this scenario needs."""
+    info = await ctx.until_info(peer, lambda i: bool(_room_pos(i)),
+                                f"{peer.name} reports a positions block")
+    rp = _room_pos(info)
+    if "mixer_mode" not in rp:
+        raise Skip("the mixer predates enforcing positions")
+    if rp["mixer_mode"] != mixer_mode:
+        raise Skip(f"this scenario needs JS_POS_MODE={mixer_mode}; the mixer reports {rp['mixer_mode']}")
+    if fail is not None and rp.get("fail") != fail:
+        raise Skip(f"this scenario needs JS_POS_FAIL={fail}; the mixer reports {rp.get('fail')}")
+    return rp
+
+
+async def _two_rooms(ctx: Ctx, names: tuple, claims: dict):
+    """Two rooms with the same peers and the same claims: the first will receive positions, the second never does and is
+    the reference for what the claims alone give. `names` are the peer names; `claims` maps a name to its (x, y, z) in metres."""
+    r1, r2 = ctx.new_room(), ctx.new_room()
+    in1 = {n: await ctx.join(n, r1) for n in names}
+    in2 = {n: await ctx.join(n + "2", r2) for n in names}
+    await ctx.ready(*in1.values(), *in2.values())
+    for group in (in1, in2):
+        for n, p in group.items():
+            if n in claims:
+                p.send_geometry(*claims[n])
+    for p in (*[in1[n] for n in names if n in claims], *[in2[n] for n in names if n in claims]):
+        await ctx.until_info(p, _geometry_seen, f"{p.name}'s geometry reached the mixer")
+    return r1, r2, in1, in2
+
+
+async def _hold_silent(ctx: Ctx, peer, what: str, polls: int = 10) -> None:
+    """The listener hears exactly nothing on every one of `polls` consecutive reads (a leak is never jitter)."""
+    for _ in range(polls):
+        if (await ctx.info(peer)).get("last_mix_rms") != 0.0:
+            raise Fail(what)
+        await asyncio.sleep(0.1)
+
+
+async def s55_a_mixer_in_observe_ignores_the_sims_ask(ctx: Ctx) -> None:
+    """The sim asks for enforce but the mixer is left in observe (the default): the claim is counted and the audio is the same
+    as in a room that receives no positions. Nothing is corrected, and the reply says the room is observed."""
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, g2 = await _two_rooms(ctx, ("A", "B"), claims)
+    a, b, a2 = g1["A"], g1["B"], g2["A"]
+    await _pos_config(ctx, a, "observe")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    first = await feeder.send_once()
+    if first.get("pos_mode") != "observe":
+        raise Fail("the reply says this room is observed, although the sim asked for enforce", first)
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(b, lambda i: (_obs(i).get("would_clamp") or 0) >= 25, "B's far claim counted as would-clamp on 25 ticks")
+    po = _obs(await ctx.info(b))
+    if po.get("clamped") != 0 or po.get("filled") != 0 or po.get("fail_closed") != 0:
+        raise Fail("nothing is corrected on a mixer left in observe", po)
+    rp = _room_pos(await ctx.info(a))
+    if rp.get("mode") != "observe" or rp.get("enforce_wanted") is not True or rp.get("clamped_ticks") != 0:
+        raise Fail("the room reports observe, the sim's ask for enforce, and no correction", rp)
+    with_pos, without_pos = await _levels(ctx, a), await _levels(ctx, a2)
+    if not _same_mix(with_pos, without_pos):
+        raise Fail("A hears B at the level the claim alone gives", {"with_peer_pos": with_pos, "without": without_pos})
+
+
+async def s56_a_false_position_is_corrected_for_the_speaker(ctx: Ctx) -> None:
+    """Enforce, a speaker's false position. B claims to be 10 m from A; the sim has B 200 m away. A hears nothing, exactly 0 on
+    every read, while the reference room (no positions) hears B. Then the sim has B near A and the claim says 110 m: B is heard,
+    because the sim's point replaces the claim in both directions."""
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, g2 = await _two_rooms(ctx, ("A", "B"), claims)
+    a, b, a2 = g1["A"], g1["B"], g2["A"]
+    await _pos_config(ctx, a, "enforce")
+    await ctx.until_info(a2, lambda i: (i.get("last_mix_rms") or 0.0) > 0.01, "the reference room hears B at 10 m")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    first = await feeder.send_once()
+    if first.get("pos_mode") != "enforce":
+        raise Fail("the reply says this room is enforced", first)
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(a, _silent, "B's false position is corrected: A hears nothing")
+    await _hold_silent(ctx, a, "A never hears B while the sim has B 200 m away")
+    if not _audible(await ctx.info(a2)):
+        raise Fail("the reference room still hears B (the claim alone puts B at 10 m)")
+    ib = await ctx.info(b)
+    po = _obs(ib)
+    if (po.get("clamped") or 0) < 25 or abs((po.get("would_clamp_max_dev_cm") or 0.0) - 20000.0) > 1.0:
+        raise Fail("B is counted as corrected, 200 m from the sim's point", po)
+    if _obs(await ctx.info(a)).get("clamped") != 0:
+        raise Fail("A claims where the sim has it: nothing corrected for A")
+    rp = _room_pos(ib)
+    if rp.get("mode") != "enforce" or (rp.get("clamped_ticks") or 0) < 25 or rp.get("corrected_now") != 1:
+        raise Fail("the room reports enforce, the clamped ticks and one participant corrected now", rp)
+
+    # Second leg: the sim has B 10 m from A, the claim 110 m away (beyond the cull).
+    feeder.points[b.display] = (128.0, 138.0, 25.0)
+    await feeder.send_once()
+    b.send_geometry(128.0, 238.0, 25.0)
+    g2["B"].send_geometry(128.0, 238.0, 25.0)
+    await ctx.until_info(a, _audible, "B is heard where the sim has it, although the claim puts B beyond the cull")
+    await ctx.until_info(a2, _silent, "the reference room, which has only the claim, hears nothing")
+
+
+async def s57_a_false_position_is_corrected_for_the_listener(ctx: Ctx) -> None:
+    """Enforce, a listener's false position. A claims to stand beside B; the sim has A 200 m away. A hears nothing (a listener
+    cannot move itself next to a speaker), while the reference room hears B."""
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, g2 = await _two_rooms(ctx, ("A", "B"), claims)
+    a, b, a2 = g1["A"], g1["B"], g2["A"]
+    await _pos_config(ctx, a, "enforce")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 328.0, 25.0), b.display: (128.0, 138.0, 25.0)}, mode="enforce")
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(a, _silent, "A's false position is corrected: A hears nothing")
+    await _hold_silent(ctx, a, "A never hears B from where the sim has A")
+    if not _audible(await ctx.info(a2)):
+        raise Fail("the reference room still hears B")
+    po = _obs(await ctx.info(a))
+    if (po.get("clamped") or 0) < 25:
+        raise Fail("A is counted as corrected", po)
+    if _obs(await ctx.info(b)).get("clamped") != 0:
+        raise Fail("B claims where the sim has it: nothing corrected for B")
+
+
+async def s58_a_fast_mover_inside_its_allowance_is_not_corrected(ctx: Ctx) -> None:
+    """Enforce, the allowance. (1) A vehicle moving at 30 m/s whose claim lags the sim's point by 4.5 m, inside the 5 m margin, is
+    never corrected. (2) The sim's point is one second old or more: a claim 30 m from it is inside the allowance of a 30 m/s
+    mover (5 m + 30 m) and outside that of a walker (5 m + 8 m), so the mover is heard where it claims and the walker is
+    corrected to the sim's point (heard farther away, hence quieter)."""
+    names = ("A", "B")
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, g2 = await _two_rooms(ctx, names, claims)
+    a, b, a2 = g1["A"], g1["B"], g2["A"]
+    await _pos_config(ctx, a, "enforce")
+
+    # (1) continuous feed, claim 4.5 m behind the sim's point, along the line of travel
+    fast = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 142.5, 25.0)}, speed_cms=3000,
+                     mode="enforce")
+    await fast.send_once()
+    ctx.background.append(fast)
+    fast.start()
+    await ctx.until_info(b, lambda i: (_obs(i).get("ticks_observed") or 0) >= 100, "B observed for 100 ticks (two seconds)")
+    po = _obs(await ctx.info(b))
+    if po.get("clamped") != 0 or po.get("would_clamp") != 0:
+        raise Fail("a claim 4.5 m from a fresh point is inside the 5 m margin: never corrected", po)
+    await fast.stop()
+
+    # (2) one aged point, no refresh: the allowance grows with its age
+    r3, r4 = ctx.new_room(), ctx.new_room()
+    mover = {n: await ctx.join(n + "m", r3) for n in names}
+    walker = {n: await ctx.join(n + "w", r4) for n in names}
+    await ctx.ready(*mover.values(), *walker.values())
+    for group in (mover, walker):
+        group["A"].send_geometry(128.0, 128.0, 25.0)
+        group["B"].send_geometry(128.0, 138.0, 25.0)       # claimed 10 m from A
+    for p in (*mover.values(), *walker.values()):
+        await ctx.until_info(p, _geometry_seen, f"{p.name}'s geometry reached the mixer")
+    for room, group, speed in ((r3, mover, 3000), (r4, walker, 800)):
+        one_shot = PosFeeder(ctx.admin, room, {group["A"].display: (128.0, 128.0, 25.0), group["B"].display: (128.0, 168.0, 25.0)},
+                             speed_cms=speed, mode="enforce")                 # the sim has B 40 m away: 30 m from the claim
+        await one_shot.send_once()
+    await asyncio.sleep(1.1)                                  # the points are now more than a second old
+    base = {k: (_obs(await ctx.info(g["B"])).get("clamped") or 0) for k, g in (("mover", mover), ("walker", walker))}
+    levels = {"mover": await _levels(ctx, mover["A"], samples=6), "walker": await _levels(ctx, walker["A"], samples=6)}
+    now = {k: (_obs(await ctx.info(g["B"])).get("clamped") or 0) for k, g in (("mover", mover), ("walker", walker))}
+    if now["mover"] != base["mover"]:
+        raise Fail("the 30 m/s mover is not corrected once its point is a second old", {"before": base, "after": now})
+    if now["walker"] <= base["walker"]:
+        raise Fail("the walker is corrected on the same claim", {"before": base, "after": now})
+    if levels["walker"][0] >= 0.8 * levels["mover"][0]:
+        raise Fail("the walker is heard from the sim's point 40 m away, clearly quieter than the mover heard at 10 m", levels)
+
+
+async def s59_a_viewer_with_no_position_is_placed_by_the_sim(ctx: Ctx) -> None:
+    """Enforce. C never sends a position. Without positions it is mixed flat (heard at full level wherever it really is);
+    with the sim's point for it, 200 m from A, A hears nothing, and C is counted as filled in."""
+    r1, r2 = ctx.new_room(), ctx.new_room()
+    a, c = await ctx.join("A", r1), await ctx.join("C", r1)
+    a2, c2 = await ctx.join("A2", r2), await ctx.join("C2", r2)
+    await ctx.ready(a, c, a2, c2)
+    a.send_geometry(128.0, 128.0, 25.0)
+    a2.send_geometry(128.0, 128.0, 25.0)
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    await ctx.until_info(a2, _geometry_seen, "A2's geometry reached the mixer")
+    await _pos_config(ctx, a, "enforce")
+    await ctx.until_info(a2, _audible, "the reference room hears C flat")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), c.display: (128.0, 328.0, 25.0)}, mode="enforce")
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(a, _silent, "C is placed 200 m away by the sim: A hears nothing")
+    await _hold_silent(ctx, a, "A never hears C, which sent no position")
+    ic = await ctx.info(c)
+    if "sp" in fields(ic.get("last_data_fields_seen")):
+        raise Fail("C never sent a position (the premise of this scenario)", pick(ic))
+    if (_obs(ic).get("filled") or 0) < 25:
+        raise Fail("C is counted as filled in from the sim's point", _obs(ic))
+    if not _audible(await ctx.info(a2)):
+        raise Fail("the reference room still hears C flat")
+
+
+async def s60_no_sim_point_fails_open(ctx: Ctx) -> None:
+    """Enforce, JS_POS_FAIL=open. C joins a room whose sim never reports it. Inside the join grace the claim stands and is
+    counted as grace; afterwards it still stands, counted as fail-open. Then the whole feed stops: every point goes stale, the
+    claims still stand (open), and when the feed resumes the participants are corrected again."""
+    r = ctx.new_room()
+    a, b = await ctx.join("A", r), await ctx.join("B", r)
+    await ctx.ready(a, b)
+    a.send_geometry(128.0, 128.0, 25.0)
+    b.send_geometry(128.0, 338.0, 25.0)                    # claimed 210 m away: contributes nothing
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    rp = await _pos_config(ctx, a, "enforce", "open")
+    grace_ms = rp.get("join_grace_ms") or 0
+    if grace_ms < 4000:
+        raise Skip(f"this scenario needs JS_POS_JOIN_GRACE_MS of at least 4000 to observe the grace; the mixer reports {grace_ms}")
+    feeder = PosFeeder(ctx.admin, r, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    c = await ctx.join("C", r)
+    await ctx.ready(c)
+    c.send_geometry(128.0, 138.0, 25.0)                    # claimed 10 m from A; the sim does not know C
+    await ctx.until_info(a, _audible, "C is heard where it claims, inside its join grace")
+    await ctx.until_info(c, lambda i: (_obs(i).get("grace") or 0) >= 1, "C is counted as inside its grace")
+    await ctx.until_info(c, lambda i: (_obs(i).get("fail_open") or 0) >= 10, "C is counted as fail-open once the grace is over",
+                         timeout=grace_ms / 1000.0 + 5.0)
+    for _ in range(10):
+        if not _audible(await ctx.info(a)):
+            raise Fail("with no sim point for C and JS_POS_FAIL=open, C is still heard where it claims")
+        await asyncio.sleep(0.1)
+
+    # The whole feed stops; after the stale age every point is missing, and the claims stand.
+    await feeder.stop()
+    await ctx.until_info(b, lambda i: _obs(i).get("state") == "stale", "B's point goes stale", timeout=10.0)
+    ib = await ctx.info(b)
+    if (_obs(ib).get("fail_open") or 0) < 1 or _obs(ib).get("no_sim_stale", 0) < 1:
+        raise Fail("a stale point is counted as no usable sim point and fail-open", _obs(ib))
+    if not _audible(await ctx.info(a)):
+        raise Fail("with the feed stopped and JS_POS_FAIL=open the claims stand: C is still heard")
+
+    # The feed resumes; B's false position (nothing near A in the claim) is not the point: A is simply corrected again.
+    feeder.points[c.display] = (128.0, 338.0, 25.0)         # the sim now places C 210 m away
+    await feeder.send_once()
+    feeder.start()
+    await ctx.until_info(a, _silent, "the feed resumes and C is corrected to where the sim has it")
+
+
+async def s61_no_sim_point_fails_closed(ctx: Ctx) -> None:
+    """Enforce, JS_POS_FAIL=closed. C is unknown to the sim: heard inside the join grace, then left out of the spatial mix (not
+    mixed flat) until the sim reports it. When the whole feed goes stale nobody is heard, and when it resumes they are."""
+    r = ctx.new_room()
+    a, b = await ctx.join("A", r), await ctx.join("B", r)
+    await ctx.ready(a, b)
+    a.send_geometry(128.0, 128.0, 25.0)
+    b.send_geometry(128.0, 338.0, 25.0)
+    await ctx.until_info(a, _geometry_seen, "A's geometry reached the mixer")
+    rp = await _pos_config(ctx, a, "enforce", "closed")
+    grace_ms = rp.get("join_grace_ms") or 0
+    if grace_ms < 4000:
+        raise Skip(f"this scenario needs JS_POS_JOIN_GRACE_MS of at least 4000; the mixer reports {grace_ms}")
+    feeder = PosFeeder(ctx.admin, r, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    c = await ctx.join("C", r)
+    await ctx.ready(c)
+    c.send_geometry(128.0, 138.0, 25.0)
+    await ctx.until_info(a, _audible, "C is heard inside its join grace")
+    await ctx.until_info(a, _silent, "C is left out once the grace is over", timeout=grace_ms / 1000.0 + 5.0)
+    await _hold_silent(ctx, a, "with no sim point for C and JS_POS_FAIL=closed, C is not heard")
+    ic = await ctx.info(c)
+    if (_obs(ic).get("fail_closed") or 0) < 10 or _room_pos(ic).get("fail_closed_now") != 1:
+        raise Fail("C is counted as left out, and the room says one participant is", {"c": _obs(ic), "room": _room_pos(ic)})
+
+    feeder.points[c.display] = (128.0, 138.0, 25.0)         # the sim now reports C, 10 m from A
+    await feeder.send_once()
+    await ctx.until_info(a, _audible, "C is heard again as soon as the sim reports it")
+
+    await feeder.stop()
+    await ctx.until_info(a, _silent, "the feed stops and every point goes stale: C is left out again", timeout=12.0)
+    if (_obs(await ctx.info(c)).get("no_sim_stale") or 0) < 1:
+        raise Fail("C's point is counted as stale")
+    await feeder.send_once()
+    feeder.start()
+    await ctx.until_info(a, _audible, "the feed resumes and C is heard again")
+
+
+async def s62_the_sim_can_step_back_to_observe(ctx: Ctx) -> None:
+    """Enforce is the sim's ask, request by request. While it asks for enforce a false position is corrected; the next request
+    that says observe leaves the claim standing at once (the room reports observe and stops counting corrections); asking for
+    enforce again corrects it again."""
+    claims = {"A": (128.0, 128.0, 25.0), "B": (128.0, 138.0, 25.0)}
+    r1, _r2, g1, _g2 = await _two_rooms(ctx, ("A", "B"), claims)
+    a, b = g1["A"], g1["B"]
+    await _pos_config(ctx, a, "enforce")
+    feeder = PosFeeder(ctx.admin, r1, {a.display: (128.0, 128.0, 25.0), b.display: (128.0, 338.0, 25.0)}, mode="enforce")
+    await feeder.send_once()
+    ctx.background.append(feeder)
+    feeder.start()
+    await ctx.until_info(a, _silent, "enforce: the false position is corrected")
+    feeder.mode = "observe"
+    await ctx.until_info(a, _audible, "observe: the claim stands again")
+    rp = _room_pos(await ctx.info(a))
+    if rp.get("mode") != "observe" or rp.get("mixer_mode") != "enforce" or rp.get("enforce_wanted") is not False:
+        raise Fail("the room reports observe although the mixer allows enforce, because the sim stopped asking", rp)
+    before = _obs(await ctx.info(b)).get("clamped") or 0
+    await asyncio.sleep(1.0)
+    after = _obs(await ctx.info(b)).get("clamped") or 0
+    if after != before:
+        raise Fail("no correction is counted while the sim asks for observe", {"before": before, "after": after})
+    feeder.mode = "enforce"
+    await ctx.until_info(a, _silent, "enforce again: corrected again")
+
+
 SCENARIOS = [
     Scenario("S1", "join/leave/rejoin", "presence, duplicate rows", s1_join_leave_rejoin),
     Scenario("S2", "crash without leave", "hangup frees the slot", s2_crash_without_leave),
@@ -2753,4 +3071,20 @@ SCENARIOS = [
              "peer_pos skew: old sim, new mixer", s53_an_old_sim_changes_nothing),
     Scenario("S54", "a full room of 110: one peer_pos of 110 entries applies whole; 128 apply, 129 are refused",
              "peer_pos size limits at the room cap", s54_a_full_room_of_110),
+    Scenario("S55", "observe mixer: the sim asks for enforce, the claim is counted and nothing is corrected",
+             "peer_pos enforce gate: the mixer's setting wins", s55_a_mixer_in_observe_ignores_the_sims_ask),
+    Scenario("S56", "enforce: a speaker's false position is replaced by the sim's point, in both directions",
+             "peer_pos enforce: speaker corrected", s56_a_false_position_is_corrected_for_the_speaker),
+    Scenario("S57", "enforce: a listener's false position is replaced by the sim's point",
+             "peer_pos enforce: listener corrected", s57_a_false_position_is_corrected_for_the_listener),
+    Scenario("S58", "enforce: a fast mover inside its allowance is not corrected, a walker on the same claim is",
+             "peer_pos enforce: tolerance grows with speed and age", s58_a_fast_mover_inside_its_allowance_is_not_corrected),
+    Scenario("S59", "enforce: a viewer that sends no position is placed by the sim, not mixed flat",
+             "peer_pos enforce: no position sent", s59_a_viewer_with_no_position_is_placed_by_the_sim),
+    Scenario("S60", "enforce, fail open: no sim point is a join grace, then the claim stands; a stale feed does the same",
+             "peer_pos enforce: missing and stale points, open", s60_no_sim_point_fails_open),
+    Scenario("S61", "enforce, fail closed: no sim point is a join grace, then left out; a stale feed silences, resuming restores",
+             "peer_pos enforce: missing and stale points, closed", s61_no_sim_point_fails_closed),
+    Scenario("S62", "enforce is the sim's ask request by request: observe stops the correction, enforce restarts it",
+             "peer_pos enforce: the sim steps back", s62_the_sim_can_step_back_to_observe),
 ]

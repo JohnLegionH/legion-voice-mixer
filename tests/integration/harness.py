@@ -753,10 +753,14 @@ class PosFeeder:
     the frame the harness peers send_geometry in; the wire carries centimetres."""
 
     def __init__(self, admin: Admin, room: int, points: dict, speed_cms: int = 800, tol_cm: int = 500,
-                 period: float = 0.5, seq_base: int | None = None):
+                 period: float = 0.5, seq_base: int | None = None, mode: str = "observe"):
         self._admin = admin
         self._room = room
         self.points = dict(points)
+        #: "observe" or "enforce": what each request asks of the mixer; mutable while running, as the sim's setting is.
+        self.mode = mode
+        #: display -> speed allowance in cm/s, for a participant that moves faster than `speed_cms`.
+        self.speed_by_display: dict = {}
         self._speed = speed_cms
         self._tol = tol_cm
         self._period = period
@@ -767,12 +771,13 @@ class PosFeeder:
         self.last_error: str | None = None
 
     def body(self) -> dict:
-        return {display: [round(x * 100), round(y * 100), round(z * 100), self._speed, self._tol]
+        return {display: [round(x * 100), round(y * 100), round(z * 100), self.speed_by_display.get(display, self._speed),
+                          self._tol]
                 for display, (x, y, z) in self.points.items()}
 
     async def send_once(self) -> dict:
         self._seq += 1
-        self.last_response = await self._admin.peer_pos(self._room, self._seq, self.body())
+        self.last_response = await self._admin.peer_pos(self._room, self._seq, self.body(), mode=self.mode)
         self.sent += 1
         return self.last_response
 
