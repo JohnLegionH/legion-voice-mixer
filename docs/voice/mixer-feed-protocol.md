@@ -1,9 +1,15 @@
 # Mixer Feed Protocol — the C#→mixer visibility interface
 
-**Status:** Design document, with notes on the shipped handler in §3.3.1 and §3.4. It defines the
-sim(C#)→mixer(plugin) interface for the **per-listener visibility matrix**, so both sides agree on
-the seam. It is the counterpart to the viewer→mixer data-channel format documented in
-[`../sldata-extensions.md`].
+**Status:** Version 1.2.0. This is the canonical description of the region-server→mixer interface
+for the **per-listener visibility matrix** and its companions, as the 1.2.0 mixer implements it; the
+region server's own copy of the document describes that side's view and points here for the protocol.
+Sections 1–6 are the original design, with notes on the shipped handler in §3.3.1 and §3.4. Sections
+3.5–3.8, 4.1 and 7 are the 1.2.0 wire protocol: the admin transport, room `create`
+(`vis_authority`, `sim_created`), the join capability, the reply, authority epochs and policy
+generations, `peer_ctl_heartbeat`, and `peer_pos` (`vis_protocol` 3). They were checked against the mixer
+source; statements about what the region server does are marked *region-server behaviour* because that
+code is not in this repository. It is the counterpart to the viewer→mixer data-channel format
+documented in [`../sldata-extensions.md`].
 
 > **Authority.** Where this doc and training disagree, the mixer repo's `docs/` win. Sim-side
 > `path:line` citations refer to the sim source as it stood when each passage was written, so line
@@ -354,11 +360,12 @@ to the `op`/`room`/`excl` contract and do not change §3.2.
   exists to prevent per-listener fan-out (§3.2.1) — one message *per op kind*, never one per listener
   — and that property is preserved.
 
-> **Operational note (verified against `0.7.0-debug`).** An unrecognised `room` number is dropped
-> with a `WARN` in the mixer log (`peer_ctl_batch for unknown room <n> … dropped`) but still returns
-> `{"slvoice":"applied", …}` to the sender. **A wrong room is therefore undetectable from the
-> response** — the sender sees `applied` whether or not the room existed. Confirm room identity out
-> of band (e.g. the same `CalcRoomNumber` the mixer uses); do not treat `applied` as proof of effect.
+> **Operational note (verified against `0.7.0-debug`; superseded in 1.2.0).** In 0.7.0 an unrecognised
+> `room` number was dropped with a `WARN` in the mixer log (`peer_ctl_batch for unknown room <n> …
+> dropped`) but still returned `{"slvoice":"applied", …}`, so a wrong room was undetectable from the
+> response. **In 1.2.0 the reply is `{"slvoice":"error","reason":"unknown_room"}`** (§4.1), and, for a
+> stamped batch, `"status":"unknown_room"`. The warning is still logged. Room identity can still be
+> confirmed out of band (the same `CalcRoomNumber` the mixer uses).
 
 ---
 
@@ -455,6 +462,138 @@ viewer). The participant's own presence is deliberately NOT re-pushed to existin
 windows are closed by their own proofs. `query_session` gains `backlog_resent` (additive; normally 1
 per attachment). Old viewers/sims unaffected.
 
+### 3.5 Admin API transport, result and error latch (1.2.0)
+
+Feed messages (`peer_ctl_batch`, `peer_ctl_heartbeat`, `peer_pos`) reach the plugin through the Janus
+Admin API as an HTTP POST with a JSON body:
+
+```json
+{
+  "janus": "message_plugin",
+  "transaction": "<random string>",
+  "admin_secret": "<admin secret>",
+  "plugin": "janus.plugin.slvoice",
+  "request": { "request": "peer_ctl_batch", "...": "..." }
+}
+```
+
+- Janus reads the secret from the body field `admin_secret` (the `apisecret` field of the normal API is
+  not used) and hands `request` to the plugin's `handle_admin_message`
+  (`vendor/janus-gateway/src/janus.c`, `message_plugin`).
+- The plugin's answer is returned inline, nested under the top-level key `response`:
+  `{"janus":"success","transaction":"…","response":{…}}`. There is no ack or long-poll step.
+- The plugin dispatches on `request.request`: `peer_ctl_heartbeat`, `peer_pos` or `peer_ctl_batch`. Any
+  other value gets `{"slvoice":"error","reason":"unknown_request"}`.
+
+**What a sender can conclude from the result.**
+
+| Result | Meaning |
+|---|---|
+| HTTP 2xx, `"janus":"success"` | Janus delivered the request to the plugin. It does **not** mean the batch was applied; read `response.slvoice` (§4.1). |
+| HTTP 2xx, `"janus":"error"` (wrong `admin_secret`, plugin not found, a plugin without admin support), or a 2xx body that cannot be parsed | Protocol error. |
+| Non-2xx, connection failure, timeout | Transport error. |
+
+*Region-server behaviour (not verifiable from this repository).* The region server applies a per-call
+timeout (`[JanusWebRtcVoice] AdminTimeoutMs`, default 5000). Three consecutive protocol errors on a
+region latch feed emission off for that region until the region server restarts, with one prominent
+log line; any success resets the count, so a single stray error does not disable emission. A plugin
+answer whose inner `slvoice` is `error` (for example `unknown_room`) is a successful *transport* result
+and does not count toward the latch: it is logged and counted only.
+
+### 3.6 Room create: `vis_authority` and `sim_created` (1.2.0)
+
+The region server creates the room before every viewer join; an existing room answers error 486
+("already exists"), which the sender treats as success. Besides the usual room settings, the plugin
+reads these fields from `create` (`janus_slvoice.c`, the `create` arm of the request handler):
+
+```json
+{ "request": "create", "room": 12345, "spatial_audio": true,
+  "vis_authority": true, "sim_created": true }
+```
+
+- `vis_authority`: only a JSON `true` counts; absent means false. It declares that a region server will
+  arm this room's listeners (§7), and is fixed for the room's lifetime. Fail-closed enforcement
+  (`JS_VIS_FAIL_CLOSED`, §7.1) applies only to rooms created with it; in any other room the authority
+  state is not enforced. A static room from the plugin's config file is created without it.
+- `sim_created`: only a JSON `true` counts; absent means false. It says a simulator owns the room, so
+  the join-capability requirement (§3.7) applies to it even when it is not `vis_authority`. That covers
+  avatar-to-avatar rooms and conferences, which receive no visibility batches. A mixer under an older
+  region server (no field) keeps the older rule: a capability is required only in a `vis_authority` room.
+- `spatial_audio` is a boolean; an absent key takes the plugin's default. A room created with it false
+  is a flat mix (no distance cull, falloff or pan).
+
+### 3.7 Join capability (1.2.0)
+
+When the region server and the mixer share a secret, each join carries a capability signed by the
+region server:
+
+```
+join_cap = "v1." + b64url(payload) + "." + b64url(HMAC-SHA256(secret, "v1." + b64url(payload)))
+payload  = "<agent>|<session>|<room>|<epoch>|<generation>|<iat>|<exp>|<nonce>"
+```
+
+It is carried in the `join` request as `join_cap`, with `session_id` (`janus_slvoice.c`, the `join` arm;
+`src/joincap.h`):
+
+```json
+{ "request": "join", "room": 12345, "display": "<agent id>",
+  "jsep": { "type": "offer", "sdp": "..." },
+  "join_cap": "v1....", "session_id": "<viewer session id>" }
+```
+
+- `b64url` is base64 with `+` and `/` replaced by `-` and `_` and no padding. A capability longer than
+  1024 bytes is malformed without being parsed. No field may contain `|`.
+- `agent` must equal the join's `display`, `session` the join's `session_id` and `room` the join's room.
+- `iat` and `exp` are Unix seconds; the region server mints a 60-second lifetime. The mixer accepts a
+  capability from `iat - 120` to `exp + 120` seconds (`SLV_JOINCAP_SKEW_S`) and counts one accepted only
+  by that tolerance.
+- `nonce` is 16 random bytes in lowercase hex, spent on first use. The replay store holds 4096 live
+  nonces per mixer process; when it is full the verdict is `cap_replay_store_full`, because replay
+  cannot be ruled out.
+- `epoch` is the 16-hex-digit authority epoch of the room (§7.1) at minting, or `0000000000000000` when
+  the room has none; `generation` is the room's `policy_generation` at minting, or 0. The generation
+  never refuses a join: the sender allocates a generation before the mixer applies it, so a capability
+  can legitimately be ahead of or behind the room. The mixer counts these races (`cap_epoch_ahead`,
+  `cap_no_epoch`, `cap_generation_ahead`, `cap_generation_behind` in `query_session`) and flags only an
+  `epoch` strictly **lower** than the room's adopted one (`cap_stale_generation`). A room that has
+  adopted no epoch accepts any.
+- The secret is the mixer's `JS_JOIN_CAP_SECRET`. It must match the region server's
+  `[JanusWebRtcVoice] JoinCapabilitySecret` and be a different value from `JS_API_SECRET`, so that a leak
+  of one cannot forge the other. Neither the secret, a capability, its payload nor its nonce is ever logged.
+
+**When the mixer refuses.** The check runs before negotiation, so a refusal leaves nothing to undo. A
+join is refused only when `JS_JOIN_CAP_REQUIRED` is on **and** the room is `vis_authority` or
+`sim_created` (§3.6). Otherwise the verdict is counted and the join proceeds as if no capability had been
+sent. A refusal is error 496 with the verdict as its reason: `cap_missing`, `cap_malformed`,
+`cap_bad_signature`, `cap_wrong_agent`, `cap_wrong_session`, `cap_wrong_room`, `cap_expired`,
+`cap_replayed`, `cap_replay_store_full` or `cap_stale_generation`. With the requirement on and no secret
+set, nothing can be verified, so the requirement is not enforced (the container entrypoint refuses to
+start in that state).
+
+A capability admits one join and grants no audibility. It travels only from the region server to the
+mixer: the region server's own Janus session performs the join, so a viewer never sees it.
+
+Other join errors the region server acts on: 485 (no such room), 486 on create (exists) and 495 (room
+full, at `SLV_MAX_MIX` participants).
+
+### 3.8 Connector join capability endpoint (region-server side)
+
+*Region-server behaviour (not verifiable from this repository).* External connector peers (recorder or
+injector processes) join the mixer themselves, so the region server offers them a capability over HTTP
+when a connector record carries a `CapabilitySecret` of at least 32 characters:
+
+```
+POST /voice/connector/<name>/join-cap
+Authorization: Bearer <CapabilitySecret>
+```
+
+A success returns `200` with `{"display","room","session_id","join_cap","expires","position"}`, where
+`position` is `{"x","y","z"}` in integer centimetres. Every failure before authentication succeeds
+returns an empty `404`, so the endpoint does not reveal which connector names exist; when the region
+server cannot mint after authentication it answers an empty `503`. No handler is registered unless some
+connector record has a `CapabilitySecret`. The connector puts the returned `join_cap` and `session_id` in
+its `join`, which the mixer checks as in §3.7.
+
 ---
 
 ## 4. Mixer side — folding visibility into the existing per-listener map
@@ -497,6 +636,46 @@ to.** See the correction immediately below.
 > was fixed by de-chaining the check in
 > `WebRtcVoiceRegionModule.cs`, not by this feed. The `TaxFree` short-circuit in
 > `LandObject.IsBannedFromLand` remains a third, still-open problem.
+
+### 4.1 The reply to `peer_ctl_batch` (1.2.0)
+
+The plugin's answer is the inner object under `response` (§3.5):
+
+```json
+{ "janus": "success",
+  "response": { "slvoice": "applied", "op": "add", "room": 12345,
+                "entries": 3, "mute_entries": 1, "skipped": 0, "deferred_listeners": 0,
+                "vis_protocol": 3, "mixer_instance": "9f2c61d04b7a83e1" } }
+```
+
+| Field | Meaning |
+|---|---|
+| `slvoice` | `applied` on success. `empty` for a valid batch with no applicable entry. `error` with a `reason` otherwise. |
+| `entries`, `mute_entries` | Listener entries parsed in the exclusion and the mute channel. |
+| `skipped` | Malformed items dropped at parse time (both channels). Greater than zero is real loss. |
+| `deferred_listeners` | Entries kept for listeners that have not joined yet (§3.4(b)); not a fault. |
+| `vis_protocol` | The protocol this mixer speaks: 3 (§7.3 and §7.6). Present on every `peer_ctl_batch`, `peer_ctl_heartbeat` and `peer_pos` reply, including errors. |
+| `mixer_instance` | A random 16-hex-digit value chosen when the plugin starts. A change means the mixer restarted. |
+
+All fields are optional for a sender: a reply with no inner object is "no information". The
+`error` reasons for a batch are `unknown_room` (the room does not exist in this process; nothing was
+applied), `malformed`, `too_big` (over 65536 bytes), and, only while fail-closed is enforced for the room,
+`stale_epoch` and `stale_generation` (§7.2). An
+unknown room is therefore visible from the reply; this replaces the earlier behaviour described in the
+operational note of §3.3.1.
+
+When the batch carries `room_epoch` (§7.2), the reply also carries the per-room authority keys:
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok`; `undeclared_room` (the epoch was processed, but the room was not created with `vis_authority`, so nothing is enforced); `stale_epoch`; or `unknown_room` (also carried as `reason`). |
+| `authority_epoch` | The room's adopted epoch after this message (16 hex digits, zero for none). |
+| `policy_generation` | The highest batch generation the room has applied in this epoch. |
+| `stale_listeners` | Listeners whose delta did not follow on from the mixer's record (§7.2). |
+| `unarmed_listeners` | Listeners the mixer cannot arm: in a batch, those a `replace` could not arm because the room already holds 1024 listener records. (In a heartbeat reply, §7.3, those it holds no current-epoch record for.) |
+| `stale_generation` | `true` when the batch's `policy_generation` was not above the room's (out of order). |
+
+The reply does not change a send's transport result: anomalies are for the sender to log and count.
 
 ---
 
@@ -573,6 +752,236 @@ already covers it:
 **Conclusion:** the visibility feed (§3) and the feeder tick (§2.1) are the same plumbing spatial DSP needs
 for child positions; keep the `slvoice_vis` message extensible (optional per-source fields) and no
 v2 is forced when spatial DSP arrives.
+
+*As shipped in 1.2.0:* child-agent and root-agent positions as the region sees them arrive in a separate
+`peer_pos` request (§7.6, `vis_protocol` 3), which the mixer currently only observes. The per-source
+`pos` field suggested above was not used.
+
+---
+
+## 7. Authority, epochs, heartbeats and positions (`vis_protocol` 2 and 3)
+
+This section is the optional layer on top of §3.3–§3.4. A mixer that has been told a region server is the
+**authority** for a room can silence any listener or source it has not been told to carry, and stop
+carrying audio in that room if the authority goes quiet (*fail-closed*). A region server that does not
+send `room_epoch` leaves every message in §3 behaving exactly as described there, and none of the fields
+below appear. On the region-server side the layer is switched on by `[WebRtcVoice] VisibilityArmingEnabled`
+(default off; it also needs `VisibilityFeederEnabled` and `VisibilityEmitEnabled`). Checked against
+`src/janus_slvoice.c`, `src/visauth.h`, `src/visbatch.h` and `src/possync.h`.
+
+### 7.1 Concepts and mixer settings
+
+- **Epoch** (`room_epoch`): exactly 16 hex digits, not all zero (zero means "none"). The mixer accepts
+  either case and reports lowercase. *Region server:* chosen once each time its feed service starts, from
+  the Unix time in milliseconds shifted left 16 bits with a random low 16 bits, so a restarted feed
+  never reuses an earlier value.
+- **Policy generation** (`policy_generation`): a per-room counter on `peer_ctl_batch`, an integer from 1 to
+  2³²−1, that rises with every batch sent to that room (the first is 1).
+- **Listener generation:** the `policy_generation` of the batch that last set or changed a listener's
+  columns in a room. The mixer keeps one *record* per listener (by agent UUID) per room, holding the epoch
+  that armed it, its listener generation, its columns, a "stale" flag and the time it was last confirmed.
+  Records survive a leave and rejoin. A listener is **armed** when it has a record. At most 1024 records
+  are held per room.
+- **Arming:** a `replace` that names a listener, in either channel, arms it. The region server sends both
+  columns for every listener, empty ones included. Until a listener is armed, a mixer enforcing authority
+  carries nothing for it. A heartbeat never arms.
+- **Adoption** (the mixer's `authority epoch` for a room), applied to every message that carries a
+  `room_epoch`:
+
+  | The message's epoch against the stored one | Result |
+  |---|---|
+  | Nothing stored, or greater | **Adopt**: store it, disarm every record, restart the policy generation at 0. |
+  | Equal | Normal processing. |
+  | Less, and the stored authority is stale (no accepted message within the staleness window, or it said `stopping`) | **Takeover**: the same as adopt. |
+  | Less, while the stored authority is fresh | **`stale_epoch`**: the message is rejected and changes nothing. |
+
+- **Mixer settings** (environment, read when the plugin starts; invalid values are ignored with a warning):
+  - `JS_VIS_FAIL_CLOSED` (default `0`): `1`, `true`, `yes` or `on` enforce authority in rooms created with
+    `vis_authority` (§3.6). With it off (*shadow mode*) the state is kept and counted
+    (`would_silence_*` in `query_session`) and no audio or roster changes.
+  - `JS_VIS_STALE_MS` (default 8000, at most 600000): the staleness window. It cannot be below
+    2 × heartbeat interval + 5000 ms admin timeout + 250 ms tick slip, which is 7250 ms for the region
+    server's 1000 ms heartbeat; a lower value is raised to that with a warning.
+  - `JS_JOIN_CAP_REQUIRED` and `JS_JOIN_CAP_SECRET`: §3.7.
+
+### 7.2 Fields added to `peer_ctl_batch`
+
+When the region server runs with arming, every batch carries, after `room`:
+
+```json
+{ "room_epoch": "0184a3c2d9f1b7e4", "policy_generation": 7,
+  "base": { "<listener uuid>": 6 } }
+```
+
+A batch with `room_epoch` that is not 16 hex digits, or a `policy_generation` outside 1..2³²−1, is
+rejected as `malformed`. `base` appears only on `add` and `remove`; for each named listener it gives the
+listener generation the region server believes the mixer holds. The mixer processes a stamped batch in
+this order:
+
+1. **Epoch** (§7.1). A `stale_epoch` batch changes nothing.
+2. **Generation.** A `policy_generation` not above the room's is out of order: `stale_generation`, the
+   authority records are unchanged, and the reply carries `"stale_generation": true`.
+3. **Per listener named in either channel.** A `replace` arms the listener at this generation, clears its
+   stale flag and stores its columns. An `add` or `remove` is applied to the record only when the
+   listener's record is from the current epoch and `base` equals its listener generation; otherwise the
+   record (if any) is marked **stale**, the listener is returned in `stale_listeners`, and the sender is
+   expected to re-arm it with a `replace`.
+
+Whether a refused or stale part is also *withheld from the mix* depends on enforcement. With fail-closed
+on, in a `vis_authority` room, a `stale_epoch` or `stale_generation` batch is refused whole
+(`{"slvoice":"error","reason":"stale_epoch"}` or `"stale_generation"`) and a stale listener's entries are
+not applied. Otherwise the batch is applied as it was before arming existed, and the reply still reports
+`status`, `stale_listeners` and `unarmed_listeners` so the sender sees the same facts.
+
+### 7.3 `peer_ctl_heartbeat`
+
+Sent through the same admin channel as the batches:
+
+```json
+{ "request": "peer_ctl_heartbeat", "room_epoch": "0184a3c2d9f1b7e4", "interval_ms": 1000,
+  "feed_age_ms": 120,
+  "rooms": { "12345": { "policy_generation": 7, "as_of": 7,
+                        "listeners": { "<listener uuid>": 7, "<listener uuid>": 0 } } } }
+```
+
+- `rooms` lists every room the region currently addresses, with every listener placed there and its
+  listener generation (0 = not armed), empty columns included. A key that is not a positive room number is
+  ignored.
+- `interval_ms` must be a positive integer the staleness window can absorb (§7.1); otherwise the whole
+  heartbeat is answered `{"slvoice":"error","reason":"interval_too_long","stale_ms":<window>}`. A malformed
+  `room_epoch`, `interval_ms` or `rooms` is answered `{"slvoice":"error","reason":"malformed"}`.
+- Each accepted room entry is a sign of life for that room's authority, after the adoption rule of §7.1.
+  The mixer then compares the named listeners with its records: a listener whose generation matches is
+  *confirmed*; one that names another generation is marked stale and returned in `stale_listeners`; one
+  with no current-epoch record is returned in `unarmed_listeners`; and **every armed listener the entry
+  omits is disarmed**.
+- `as_of` is the highest `policy_generation` the sender had successfully sent to that room when it built
+  the heartbeat. A heartbeat built before a batch landed can arrive after it; if `as_of` is below the
+  generation the room has applied in this epoch, the entry counts as a sign of life but its `listeners`
+  map is not evaluated (no confirm, stale or disarm). An entry with no `as_of` is always evaluated.
+- `feed_age_ms` is how old the region's visibility computation was when the body was built. The region
+  server only reports it; the **mixer decides**: an age above the staleness window is answered
+  `status: "feed_stale"` for that room and does *not* refresh the authority, so the room ages out as if
+  the sender had gone quiet. A missing, non-integer or negative age counts as live (an older region
+  server). A `stopping` heartbeat is honoured whatever the age.
+- `"state": "stopping"` on the final heartbeat of a graceful stop marks every record in the room stale at
+  once and lets a lower epoch take the room over without waiting for the window.
+
+The reply:
+
+```json
+{ "janus": "success",
+  "response": { "slvoice": "heartbeat", "vis_protocol": 3, "mixer_instance": "9f2c61d04b7a83e1",
+                "rooms": { "12345": { "status": "ok", "authority_epoch": "0184a3c2d9f1b7e4",
+                                      "policy_generation": 7,
+                                      "unarmed_listeners": [], "stale_listeners": [] } } } }
+```
+
+Per-room `status` is `ok`, `undeclared_room` (the room was not created with `vis_authority`),
+`stale_epoch`, `feed_stale` or `unknown_room` (the room does not exist in this process; its other keys are
+empty). A reply whose `slvoice` is not `heartbeat` is an error reply.
+
+*Region-server behaviour (not verifiable from this repository).* The region server sends heartbeats every
+1000 ms from a timer of its own, independent of the feeder tick, and only after a mixer reply has
+advertised `vis_protocol` 2 or higher. A reply that is not a `heartbeat` response stops them until a later
+reply advertises `vis_protocol` 2 again.
+
+### 7.4 What fail-closed does to the mix
+
+With fail-closed on, in a room created with `vis_authority`, each display stands in one of four rows, and
+a pair is audible only if **both** the listener and the source are in row 4 (`src/visauth.h`):
+
+| Row | Standing | Effect |
+|---|---|---|
+| 1 | No record (unarmed) | Silence |
+| 2 | A record from another epoch | Silence |
+| 3 | Current epoch, marked stale or not confirmed within the staleness window | Silence |
+| 4 | Current epoch, confirmed within the window | Passes, subject to the exclusion and mute sets (§4) |
+
+A record is confirmed by arming, by an accepted delta, and by a heartbeat whose generation matches it.
+Silence is applied in the mix and in the roster, as exclusion is (§4).
+
+### 7.5 How the region server reacts to replies
+
+*Region-server behaviour (not verifiable from this repository).* The region server treats the statuses
+above as follows:
+
+| Reply | Reaction |
+|---|---|
+| Transport failure | Nothing recorded; the next pass sends a snapshot, which re-arms everyone. |
+| `mixer_instance` changes | The mixer restarted. Every listener in every room is disarmed and re-armed. |
+| `status` or `reason` `unknown_room` | That room's listeners are disarmed and retried after a delay that starts at 1 s and doubles to 300 s while the room stays absent. A provision, a room create or an applied reply for the room ends the back-off at once. Logged once per episode. |
+| `stale_epoch` | The same back-off: a newer authority holds the room, so the region server retries rather than escalating. |
+| `stale_listeners`, `unarmed_listeners` | Exactly those listeners are disarmed and re-armed. |
+| `applied` | A `replace` arms each named listener at this generation; an `add` or `remove` advances an already armed one. |
+| Any other status, or a malformed reply | The named listeners are not armed and are retried after the back-off. |
+
+When both the join capability and arming are on, the capability's `epoch` and `generation` come from the
+room's last published authority state (§3.7).
+
+### 7.6 Participant positions (`peer_pos`, `vis_protocol` 3)
+
+A viewer reports its own position to the mixer, and nothing in the feed above says where the region
+actually has that avatar. A region server that sends `peer_pos` tells the mixer each participant's position
+as the region sees it, so the mixer can compare the two. In 1.2.0 the mixer **only observes**: it stores
+the points, compares them with the `sp` a viewer reports, and counts what a correction would have done
+(`visibility.positions` in `query_session`). It changes no audio and no roster. A room that has accepted no
+`peer_pos` is not observed at all.
+
+```json
+{ "request": "peer_pos", "room": 12345, "seq": 1760000000001, "full": true, "mode": "observe",
+  "room_epoch": "0184a3c2d9f1b7e4",
+  "pos": { "<agent uuid>": [x_cm, y_cm, z_cm, speed_cm_s, tolerance_cm] } }
+```
+
+- `x_cm`, `y_cm`, `z_cm` are global centimetres, the frame a viewer reports `sp` in (the position times
+  100); each must fit a 32-bit integer.
+- `speed_cm_s` (at most 200000) is how many centimetres further from the point the participant may be for
+  each second since the mixer received it. `tolerance_cm` (at most 500000) is the difference accepted at
+  the moment of the sample. An entry outside these ranges, or not five numbers, is skipped and counted in
+  `skipped`; the rest of the request still applies. *Region server:* `speed_cm_s` is twice the region's
+  own velocity for the avatar (or the object it sits on, if faster), between `PositionFeedSpeedFloorCmS`
+  and the physics engine's maximum linear speed; `tolerance_cm` is `PositionFeedMarginCm` for a root
+  agent and that margin plus 10 m plus two seconds at `speed_cm_s` for a child agent, because a root
+  region reports a child's position only after about 10 m of movement and at most every 2 s.
+- `full: true` means the entries are the whole room: a participant not listed has left, and the store is
+  emptied first. `full: false` updates only the listed participants. A point older than 6000 ms on the
+  mixer's own clock is stale and is not used.
+- `seq` must rise per room. A request whose `seq` is not above the last accepted one **of the same
+  epoch** is answered `{"slvoice":"error","reason":"stale_seq"}` and ignored. A different epoch replaces
+  the old instance's points.
+- One request may carry at most 128 entries and 65536 bytes; more is rejected whole (`too_big`). The
+  region server sends at most 120 per request (a larger room is split, and only the first request of a
+  full snapshot has `full: true`); a room of 110 is about 8 KB. The store holds 256 participants per room.
+- `room_epoch`, when present, must be 16 hex digits. A request older than a **fresh** adopted epoch is
+  answered `stale_epoch`. A position request only *reads* the room's authority: it never adopts an epoch,
+  advances a generation or arms a listener.
+- `mode` is `observe` or `enforce`. The mixer observes in both cases and counts `enforce` requests; the
+  reply says `"pos_mode": "observe"`.
+
+The reply to an accepted request:
+
+```json
+{ "janus": "success",
+  "response": { "slvoice": "applied", "op": "pos", "room": 12345, "seq": 1760000000001, "full": true,
+                "entries": 3, "skipped": 0, "dropped": 0, "pos_mode": "observe",
+                "vis_protocol": 3, "mixer_instance": "9f2c61d04b7a83e1" } }
+```
+
+`dropped` counts entries the 256-participant store could not hold. The error replies are `{"slvoice":"error",
+"reason":"malformed"|"too_big"|"unknown_room"|"stale_epoch"|"stale_seq"}` (an unknown room is counted in
+the process-wide `visibility.positions` totals, since there is no room to charge).
+
+*Region-server behaviour (not verifiable from this repository).* The region server enables this with
+`[WebRtcVoice] PositionFeedEnabled = true` and sends `peer_pos` only after a mixer reply has advertised
+`vis_protocol` 3 or higher. It learns that from the replies to the `peer_ctl_batch` and
+`peer_ctl_heartbeat` requests it already sends, and follows the latest reply: an applied reply that
+advertises no version means an older mixer, and positions stop. Until then it reads no positions and sends
+nothing, so a mixer that does not know `peer_pos` never receives one. A full snapshot is sent when the room
+is new and at least every `PositionFeedKeepAliveMs`; between them, only participants that are new or have
+moved at least `PositionFeedMoveThresholdCm`. `seq` starts above the time in milliseconds at which the
+region started, so a restarted region is not mistaken for old traffic. `PositionFeedMode = enforce` is
+accepted in its configuration but is sent as `observe`.
 
 ---
 
