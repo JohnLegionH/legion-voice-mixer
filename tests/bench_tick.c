@@ -190,6 +190,10 @@ int main(int argc, char **argv) {
 	int iters = (argc > 3) ? atoi(argv[3]) : 500;
 	/* argv[4]: geometry mode, default "cluster" so prior numbers stay reproducible. */
 	bench_geo mode = (argc > 4 && strcmp(argv[4], "spread") == 0) ? GEO_SPREAD : GEO_CLUSTER;
+	/* argv[5]: sim positions, "off" (default), "observe" or "enforce". argv[6]: percent of participants whose claim is
+	 * 200 m from the sim's point (default 0: every claim honest, the steady state). */
+	const char *posmode = (argc > 5) ? argv[5] : "off";
+	int cheat_pct = (argc > 6) ? atoi(argv[6]) : 0;
 	if(N < 1) N = 1;
 	if(A < 0) A = 0;
 	if(A > N) A = N;
@@ -209,6 +213,30 @@ int main(int argc, char **argv) {
 	janus_slvoice_session **sess = g_malloc0((gsize)N * sizeof(*sess));
 	for(int i = 0; i < N; i++)
 		sess[i] = bench_make_session(room, i, N, mode);
+
+	/* Sim positions: every participant has a point, as in a room whose sim reports them. Observe counts against the claim;
+	 * enforce also decides and applies the decision. The points' receipt time is refreshed before each tick. */
+	if(strcmp(posmode, "off") != 0) {
+		slv_posbatch pb;
+		memset(&pb, 0, sizeof(pb));
+		pb.full = 1;
+		pb.n_entries = N;
+		pb.entries = g_malloc0((gsize)N * sizeof(slv_pos_entry));
+		for(int i = 0; i < N; i++) {
+			g_strlcpy(pb.entries[i].uuid, sess[i]->display, SLV_UUID_LEN);
+			pb.entries[i].x = (int64_t)sess[i]->last_data.sp.x + ((i % 100) < cheat_pct ? 20000 : 0);
+			pb.entries[i].y = (int64_t)sess[i]->last_data.sp.y;
+			pb.entries[i].z = (int64_t)sess[i]->last_data.sp.z;
+			pb.entries[i].speed_cms = 800;
+			pb.entries[i].tol_cm = 500;
+		}
+		int dropped = 0;
+		slv_pos_store_apply(&room->pos_store, &pb, janus_get_monotonic_time(), &dropped);
+		g_free(pb.entries);
+		room->pos_stats.have_batch = 1;
+		room->pos_stats.enforce_wanted = strcmp(posmode, "enforce") == 0;
+		slv_pos_pol.mode = room->pos_stats.enforce_wanted ? SLV_POS_MODE_ENFORCE : SLV_POS_MODE_OBSERVE;
+	}
 
 	/* The A talkers are evenly index-strided, so in spread mode they land on distinct
 	 * grid rows across the region (distributed "crowd chatter"), NOT clustered in one
@@ -242,6 +270,9 @@ int main(int argc, char **argv) {
 		if(it == WARMUP)
 			for(int i = 0; i < N; i++) sess[i]->frames_encoded = 0;
 		gint64 now = janus_get_monotonic_time();
+		for(int q = 0; q < SLV_POS_SLOTS; q++)
+			if(room->pos_store.slot[q].used)
+				room->pos_store.slot[q].recv_us = now;
 		for(int k = 0; k < A; k++) {
 			janus_slvoice_session *ts = sess[talkers[k]];
 			janus_mutex_lock(&ts->mutex);
@@ -276,6 +307,11 @@ int main(int argc, char **argv) {
 		SLV_MAX_MIX, SLV_OPUS_COMPLEXITY, SLV_OPUS_BITRATE);
 	printf("load:  N=%d listeners, A=%d active talkers, iters=%d (+%d warmup), geometry=%s\n",
 		N, A, iters, WARMUP, mode == GEO_SPREAD ? "spread(256x256m grid)" : "cluster(10m ring)");
+	printf("positions: %s%s", posmode, strcmp(posmode, "off") ? "" : "\n");
+	if(strcmp(posmode, "off"))
+		printf(", %d%% of claims 200 m from the sim point; corrected per tick: clamped=%" G_GUINT64_FORMAT " filled=%" G_GUINT64_FORMAT
+			", would_clamp ticks=%" G_GUINT64_FORMAT "\n", cheat_pct, room->pos_stats.clamped_ticks / (guint64)(nsamp + WARMUP),
+			room->pos_stats.filled_ticks / (guint64)(nsamp + WARMUP), room->pos_stats.would_clamp_ticks / (guint64)(nsamp + WARMUP));
 	printf("encodes: %.1f of %d listeners encoded per tick (real Opus packets; silent/culled mixes skipped)\n",
 		enc_per_tick, N);
 	printf("tick wall time (external clock), ms:\n");
