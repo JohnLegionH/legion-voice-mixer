@@ -31,6 +31,9 @@ line per attempt names the reason and the next delay, never a secret, bearer or
 capability. The integration harness's TestPeer turns this off (`rejoin`): its
 scenarios read a single join's outcome.
 
+The region path (RegionOfferPeer, near the end of this file) sends the offer through a region's
+ProvisionVoiceAccountRequest instead; the direct path is unchanged.
+
 The SLData data channel is always opened (so presence flows and
 presence_dropped_dc_closed stays quiet). The connector peers NEVER write to it;
 incoming SLData is DEBUG-logged by field letters only (top-level keys — presence
@@ -43,9 +46,12 @@ exposed once an attempt has created them, for the integration harness
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import json
 import logging
 import time
+import xml.etree.ElementTree as ET
 
 import aiohttp
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
@@ -466,3 +472,307 @@ class ConnectorPeer:
             except Exception as e:
                 self._log.warning("teardown step failed (continuing): %s", describe(e))
         await self._pc.close()
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The offer through a region: ProvisionVoiceAccountRequest
+#
+# A viewer never talks to Janus. It POSTs its WebRTC offer to its region's ProvisionVoiceAccountRequest capability as
+# LLSD XML, and the region runs the admission checks (voice enabled, parcel, estate, channel), picks the mixer room and
+# joins the mixer. This path sends the same request, so a test exercises the region's half of a join as well as the
+# mixer's. The direct-to-Janus path above (ConnectorPeer) is unchanged.
+#
+# The body is the one the region's voice service reads (Addons/os-webrtc-janus/Janus/WebRtcJanusService.cs,
+# ProvisionVoiceAccountRequestBAD): jsep {type: offer, sdp}, voice_server_type "webrtc", channel_type ("local" for the
+# parcel or region room, "multiagent" for a call), channel (the call's session id, under `channel`, not `channel_id`),
+# credentials (the call's credentials) and parcel_local_id (local only). The answer is {jsep, viewer_session, room}; a
+# refusal is {response: "failed", error}, or an HTTP status other than 200 (409 room full). Teardown is
+# {logout: true, viewer_session, voice_server_type} with no channel_type. The viewer's candidates go to the
+# VoiceSignalingRequest capability, {candidate: {completed: true}, viewer_session, voice_server_type}.
+# ---------------------------------------------------------------------------------------------------------------------
+
+VOICE_SERVER_TYPE = "webrtc"
+#: how long one capability POST may take
+REGION_POST_TIMEOUT_S = 30.0
+#: how long an answered offer may take to reach ICE connected
+ICE_CONNECT_TIMEOUT_S = 20.0
+
+
+def llsd_dumps(value) -> bytes:
+    """LLSD XML for a Python value: dict (map), list (array), str, bool, int, float, bytes (binary), None (undef)."""
+    root = ET.Element("llsd")
+    root.append(_llsd_element(value))
+    # An XML parser turns a raw CR (and CRLF) into LF; an SDP's CRLF line ends must arrive as sent, so escape them.
+    return b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8").replace(b"\r", b"&#13;")
+
+
+def _llsd_element(value) -> ET.Element:
+    if value is None:
+        return ET.Element("undef")
+    if isinstance(value, bool):          # before int: bool is an int
+        e = ET.Element("boolean")
+        e.text = "true" if value else "false"
+        return e
+    if isinstance(value, int):
+        e = ET.Element("integer")
+        e.text = str(value)
+        return e
+    if isinstance(value, float):
+        e = ET.Element("real")
+        e.text = repr(value)
+        return e
+    if isinstance(value, str):
+        e = ET.Element("string")
+        e.text = value
+        return e
+    if isinstance(value, (bytes, bytearray)):
+        e = ET.Element("binary")
+        e.text = base64.b64encode(bytes(value)).decode("ascii")
+        return e
+    if isinstance(value, dict):
+        e = ET.Element("map")
+        for k, v in value.items():
+            key = ET.SubElement(e, "key")
+            key.text = str(k)
+            e.append(_llsd_element(v))
+        return e
+    if isinstance(value, (list, tuple)):
+        e = ET.Element("array")
+        for v in value:
+            e.append(_llsd_element(v))
+        return e
+    raise TypeError(f"no LLSD form for {type(value).__name__}")
+
+
+def llsd_loads(data: bytes | str):
+    """A Python value for an LLSD XML document: map -> dict, array -> list, integer -> int, real -> float,
+    boolean -> bool, binary -> bytes, undef -> None; string, uuid, uri and date stay strings."""
+    root = ET.fromstring(data)
+    if root.tag != "llsd" or len(root) != 1:
+        raise ValueError("not an LLSD XML document")
+    return _llsd_value(root[0])
+
+
+def _llsd_value(e: ET.Element):
+    tag, text = e.tag, e.text or ""
+    if tag == "undef":
+        return None
+    if tag == "boolean":
+        return text.strip().lower() in ("true", "1")
+    if tag == "integer":
+        return int(text or 0)
+    if tag == "real":
+        return float(text or 0)
+    if tag in ("string", "uuid", "uri", "date"):
+        return text
+    if tag == "binary":
+        return base64.b64decode(text)
+    if tag == "array":
+        return [_llsd_value(c) for c in e]
+    if tag == "map":
+        out = {}
+        children = list(e)
+        for i in range(0, len(children) - 1, 2):
+            if children[i].tag != "key":
+                raise ValueError("a map entry must start with a key")
+            out[children[i].text or ""] = _llsd_value(children[i + 1])
+        return out
+    raise ValueError(f"unknown LLSD element <{tag}>")
+
+
+def provision_body(jsep: dict, *, channel_type: str = "local", channel: str | None = None,
+                   credentials: str | None = None, parcel_local_id: int | None = None) -> dict:
+    """The ProvisionVoiceAccountRequest body for an offer. `channel` and `credentials` are a call's session id and
+    credentials (channel_type "multiagent"); `parcel_local_id` is for "local". Each is left out when not given, as the
+    viewer leaves it out."""
+    body = {"jsep": {"type": jsep["type"], "sdp": jsep["sdp"]}, "voice_server_type": VOICE_SERVER_TYPE,
+            "channel_type": channel_type}
+    if channel:
+        body["channel"] = channel
+    if credentials:
+        body["credentials"] = credentials
+    if parcel_local_id is not None:
+        body["parcel_local_id"] = int(parcel_local_id)
+    return body
+
+
+def logout_body(viewer_session: str) -> dict:
+    """The teardown body: no channel_type, routed by viewer_session."""
+    return {"logout": True, "viewer_session": viewer_session, "voice_server_type": VOICE_SERVER_TYPE}
+
+
+@dataclasses.dataclass
+class RegionAnswer:
+    """What the region answered a provision request with. `ok` is true only for a 200 that carries a jsep answer and a
+    viewer_session; anything else keeps the status and the reply so a caller can judge it."""
+    status: int
+    reply: dict | None
+    text: str | None
+    jsep: dict | None = None
+    viewer_session: str | None = None
+    room: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == 200 and self.jsep is not None and self.viewer_session is not None
+
+    @property
+    def error(self) -> str | None:
+        if self.ok:
+            return None
+        reply = self.reply or {}
+        return str(reply.get("error") or self.text or f"HTTP {self.status}")
+
+
+async def post_llsd(http: aiohttp.ClientSession, url: str, body: dict, timeout: float = REGION_POST_TIMEOUT_S):
+    """POST a body as LLSD XML. Returns (status, reply as a dict or None, text when the reply was not LLSD).
+    The URL is a capability: it is never put in an exception or a log line here."""
+    headers = {"Content-Type": "application/llsd+xml", "Accept": "application/llsd+xml"}
+    async with http.post(url, data=llsd_dumps(body), headers=headers,
+                         timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+        raw = await resp.read()
+        status = resp.status
+    if not raw.strip():
+        return status, None, None
+    try:
+        reply = llsd_loads(raw)
+    except Exception:
+        return status, None, raw.decode("utf-8", "replace")[:2000]
+    return status, reply if isinstance(reply, dict) else None, None
+
+
+async def provision_via_region(http: aiohttp.ClientSession, url: str, jsep: dict, *, channel_type: str = "local",
+                               channel: str | None = None, credentials: str | None = None,
+                               parcel_local_id: int | None = None,
+                               timeout: float = REGION_POST_TIMEOUT_S) -> RegionAnswer:
+    """Send an offer through a region's ProvisionVoiceAccountRequest and read the jsep answer, the viewer_session and
+    the mixer room back."""
+    body = provision_body(jsep, channel_type=channel_type, channel=channel, credentials=credentials,
+                          parcel_local_id=parcel_local_id)
+    status, reply, text = await post_llsd(http, url, body, timeout)
+    answer = RegionAnswer(status, reply, text)
+    if reply:
+        jsep_in = reply.get("jsep")
+        if isinstance(jsep_in, dict) and jsep_in.get("sdp"):
+            answer.jsep = {"type": jsep_in.get("type", "answer"), "sdp": jsep_in["sdp"]}
+        vs = reply.get("viewer_session")
+        answer.viewer_session = str(vs) if vs else None
+        room = reply.get("room")
+        answer.room = room if isinstance(room, int) else None
+    return answer
+
+
+async def logout_via_region(http: aiohttp.ClientSession, url: str, viewer_session: str,
+                            timeout: float = REGION_POST_TIMEOUT_S) -> int:
+    """End a provisioned voice session through the same capability; returns the HTTP status."""
+    status, _, _ = await post_llsd(http, url, logout_body(viewer_session), timeout)
+    return status
+
+
+async def signal_via_region(http: aiohttp.ClientSession, url: str, viewer_session: str, candidate: dict,
+                            timeout: float = REGION_POST_TIMEOUT_S) -> int:
+    """Send the viewer's candidate (or {"completed": True}) through VoiceSignalingRequest; returns the HTTP status."""
+    body = {"candidate": candidate, "viewer_session": viewer_session, "voice_server_type": VOICE_SERVER_TYPE}
+    status, _, _ = await post_llsd(http, url, body, timeout)
+    return status
+
+
+class RegionOfferError(Exception):
+    """The region refused the offer, or the media did not come up. The message never carries a capability URL."""
+
+
+class RegionOfferPeer:
+    """A peer that joins through a region instead of directly to Janus: one PeerConnection, one offer sent through
+    the region's ProvisionVoiceAccountRequest, the answer applied, then a wait for ICE to connect.
+
+    cfg keys: provision_url (required, the capability URL), signaling_url (VoiceSignalingRequest; optional, when set
+    the end of candidates is signalled as a viewer does), channel_type ("local"), channel, credentials,
+    parcel_local_id, ice_servers (as ConnectorPeer: absent keeps aiortc's STUN default, [] is host candidates only),
+    position_cm (sent on the SLData channel once it opens, as ConnectorPeer does).
+
+    local_track() returns the media to send, or None for a silent sendrecv m-line, as ConnectorPeer.local_track does.
+    """
+
+    def __init__(self, cfg: dict, log: logging.Logger):
+        self._cfg = cfg
+        self._log = log
+        self._pc = _new_peer_connection(cfg)
+        self.viewer_session: str | None = None
+        self.room: int | None = None
+        self.answer: RegionAnswer | None = None
+        self.channel = None
+        self.ice_states: list = []
+        self._http: aiohttp.ClientSession | None = None
+        self._connected = asyncio.Event()
+        self._failed = asyncio.Event()
+
+    def local_track(self):
+        return None
+
+    async def connect(self, timeout: float = ICE_CONNECT_TIMEOUT_S) -> RegionAnswer:
+        """Offer, answer, ICE. Returns the region's answer once ICE is connected. Raises RegionOfferError when the
+        region refused (the answer is on `.answer`) or ICE did not connect in `timeout`."""
+        cfg = self._cfg
+        self._http = aiohttp.ClientSession()
+        pc = self._pc
+        track = self.local_track()
+        if track is None:
+            pc.addTransceiver("audio", direction="sendrecv")
+        else:
+            pc.addTrack(track)
+        channel = pc.createDataChannel("SLData")
+        self.channel = channel
+        position = cfg.get("position_cm")
+        if position is not None:
+            channel.on("open", lambda: channel.send(geometry_message(position)))
+
+        @pc.on("iceconnectionstatechange")
+        def _on_ice() -> None:
+            state = pc.iceConnectionState
+            self.ice_states.append(state)
+            self._log.info("ice connection state: %s", state)
+            if state in ("connected", "completed"):
+                self._connected.set()
+            elif state in ("failed", "closed"):
+                self._failed.set()
+
+        await pc.setLocalDescription(await pc.createOffer())
+        local = pc.localDescription
+        answer = await provision_via_region(
+            self._http, cfg["provision_url"], {"type": local.type, "sdp": local.sdp},
+            channel_type=cfg.get("channel_type", "local"), channel=cfg.get("channel"),
+            credentials=cfg.get("credentials"), parcel_local_id=cfg.get("parcel_local_id"))
+        self.answer = answer
+        if not answer.ok:
+            raise RegionOfferError(f"the region refused the offer: HTTP {answer.status}, {answer.error}")
+        self.viewer_session, self.room = answer.viewer_session, answer.room
+        self._log.info("answer from the region: viewer_session=%s room=%s", self.viewer_session, self.room)
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=answer.jsep["sdp"], type=answer.jsep["type"]))
+        if cfg.get("signaling_url"):
+            status = await signal_via_region(self._http, cfg["signaling_url"], self.viewer_session, {"completed": True})
+            self._log.info("end of candidates signalled: HTTP %d", status)
+        if pc.iceConnectionState in ("connected", "completed"):
+            self._connected.set()
+        waiters = [asyncio.ensure_future(self._connected.wait()), asyncio.ensure_future(self._failed.wait())]
+        try:
+            await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for w in waiters:
+                w.cancel()
+        if not self._connected.is_set():
+            why = "ICE failed" if self._failed.is_set() else f"ICE did not connect within {timeout:.0f} s"
+            raise RegionOfferError(f"{why} (states: {','.join(self.ice_states) or 'none'})")
+        return answer
+
+    async def hangup(self) -> int | None:
+        """Logout through the region (when provisioned), then close. Returns the logout's HTTP status, or None."""
+        status = None
+        try:
+            if self.viewer_session and self._http is not None:
+                status = await logout_via_region(self._http, self._cfg["provision_url"], self.viewer_session)
+                self._log.info("logout through the region: HTTP %d", status)
+        finally:
+            await self._pc.close()
+            if self._http is not None:
+                await self._http.close()
+        return status
