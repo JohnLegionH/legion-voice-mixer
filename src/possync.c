@@ -312,6 +312,10 @@ slv_vis_knob_status slv_pos_grace_ms_from_env(const char *v, int64_t *out) {
 	return SLV_VIS_KNOB_OK;
 }
 
+slv_pos_mode slv_pos_mode_guard(slv_pos_mode requested, int join_cap_required) {
+	return (requested == SLV_POS_MODE_ENFORCE && join_cap_required) ? SLV_POS_MODE_ENFORCE : SLV_POS_MODE_OBSERVE;
+}
+
 int slv_pos_enforcing(const slv_pos_policy *pol, const slv_pos_room_stats *rs) {
 	return pol->mode == SLV_POS_MODE_ENFORCE && rs->have_batch && rs->enforce_wanted;
 }

@@ -386,6 +386,7 @@ static volatile gint slv_join_cap_seen;        /* joins that carried a capabilit
 static volatile gint slv_pos_malformed_total, slv_pos_toobig_total, slv_pos_unknown_room_total;
 /* JS_POS_MODE, JS_POS_FAIL and JS_POS_JOIN_GRACE_MS, read once at load (janus_slvoice_pos_load_knobs). The defaults
  * observe only, so a mixer with the knobs unset never changes what anyone hears. */
+static gboolean slv_pos_enforce_blocked = FALSE;   /* JS_POS_MODE=enforce was set but the join capability is not required */
 static slv_pos_policy slv_pos_pol = { SLV_POS_MODE_OBSERVE, SLV_POS_FAIL_OPEN, SLV_POS_JOIN_GRACE_MS_DEFAULT };
 static volatile gint slv_join_cap_accepted;    /* verified, in context, fresh, unspent, current generation */
 static volatile gint slv_join_cap_enforced;    /* joins actually refused (knob on, declared room) */
@@ -1392,6 +1393,15 @@ static void janus_slvoice_pos_load_knobs(void) {
 	if(slv_pos_grace_ms_from_env(grace_env, &pol.join_grace_ms) == SLV_VIS_KNOB_INVALID)
 		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_POS_JOIN_GRACE_MS='%s' (want an integer 0-%d); using %d ms\n",
 			JANUS_SLVOICE_PACKAGE, grace_env, SLV_POS_JOIN_GRACE_MS_MAX, SLV_POS_JOIN_GRACE_MS_DEFAULT);
+	int join_required = 0;
+	slv_vis_fail_closed_from_env(getenv("JS_JOIN_CAP_REQUIRED"), &join_required);
+	if(slv_pos_mode_guard(pol.mode, join_required) != pol.mode) {
+		JANUS_LOG(LOG_WARN, "[%s] JS_POS_MODE=enforce needs JS_JOIN_CAP_REQUIRED=1: positions are matched to the agent id a "
+			"viewer joined as, and without the join capability a viewer can join as another agent. Staying in observe\n",
+			JANUS_SLVOICE_PACKAGE);
+		pol.mode = SLV_POS_MODE_OBSERVE;
+		slv_pos_enforce_blocked = TRUE;
+	}
 	slv_pos_pol = pol;
 	if(pol.mode == SLV_POS_MODE_ENFORCE)
 		JANUS_LOG(LOG_INFO, "[%s] Sim positions: enforce ALLOWED (JS_POS_MODE=enforce): a room is corrected only while its sim's "
@@ -2006,6 +2016,7 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		/* "mode" is what this room does now; "mixer_mode" is JS_POS_MODE and "enforce_wanted" the sim's latest ask. */
 		json_object_set_new(pj, "mode", json_string(slv_pos_enforcing(&slv_pos_pol, prs) ? "enforce" : "observe"));
 		json_object_set_new(pj, "mixer_mode", json_string(slv_pos_pol.mode == SLV_POS_MODE_ENFORCE ? "enforce" : "observe"));
+		json_object_set_new(pj, "enforce_blocked", slv_pos_enforce_blocked ? json_true() : json_false());
 		json_object_set_new(pj, "enforce_wanted", prs->enforce_wanted ? json_true() : json_false());
 		json_object_set_new(pj, "fail", json_string(slv_pos_pol.fail == SLV_POS_FAIL_CLOSED ? "closed" : "open"));
 		json_object_set_new(pj, "join_grace_ms", json_integer((json_int_t)slv_pos_pol.join_grace_ms));

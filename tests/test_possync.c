@@ -576,6 +576,13 @@ static void test_knobs(void) {
 	CHECK(slv_pos_grace_ms_from_env("5s", &ms) == SLV_VIS_KNOB_INVALID && ms == SLV_POS_JOIN_GRACE_MS_DEFAULT, "trailing text: invalid");
 }
 
+static void test_enforce_needs_the_join_check(void) {
+	CHECK(slv_pos_mode_guard(SLV_POS_MODE_ENFORCE, 1) == SLV_POS_MODE_ENFORCE, "enforce stays enforce when the join capability is required");
+	CHECK(slv_pos_mode_guard(SLV_POS_MODE_ENFORCE, 0) == SLV_POS_MODE_OBSERVE, "enforce without the join capability required observes");
+	CHECK(slv_pos_mode_guard(SLV_POS_MODE_OBSERVE, 1) == SLV_POS_MODE_OBSERVE, "observe stays observe");
+	CHECK(slv_pos_mode_guard(SLV_POS_MODE_OBSERVE, 0) == SLV_POS_MODE_OBSERVE, "observe stays observe with no join check");
+}
+
 int main(void) {
 	test_valid();
 	test_envelope();
@@ -598,6 +605,7 @@ int main(void) {
 	test_effective_mode();
 	test_batch_records_the_requested_mode();
 	test_knobs();
+	test_enforce_needs_the_join_check();
 	printf("test_possync: %d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

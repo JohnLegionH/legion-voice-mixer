@@ -230,6 +230,11 @@ slv_vis_knob_status slv_pos_fail_from_env(const char *v, slv_pos_fail *out);
 /*! \brief JS_POS_JOIN_GRACE_MS: an integer 0..SLV_POS_JOIN_GRACE_MS_MAX; unset or invalid gives the default. */
 slv_vis_knob_status slv_pos_grace_ms_from_env(const char *v, int64_t *out);
 
+/*! \brief The mode the mixer may run in: enforce only while the join capability is required (JS_JOIN_CAP_REQUIRED). Positions
+ * are matched to the agent id a viewer joined as, so without that check a viewer can join as someone else and the comparison
+ * proves nothing. Anything else observes. */
+slv_pos_mode slv_pos_mode_guard(slv_pos_mode requested, int join_cap_required);
+
 /*! \brief Whether a room is enforced now: the mixer allows it, the room has accepted a request, and the latest one asked
  * for "enforce". The sim returning to observe therefore takes effect with its next request. */
 int slv_pos_enforcing(const slv_pos_policy *pol, const slv_pos_room_stats *rs);
