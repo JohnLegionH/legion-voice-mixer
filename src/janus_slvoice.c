@@ -208,7 +208,7 @@
 
 /* ---- Spatial constants — DEFAULTS ONLY ---------------
  * Viewer geometry (sp/sh/lp/lh) arrives scaled ×100 — an int of value×100 — so a
- * stored coordinate is centimetres (docs/voice/phase3b-design-brief.md "Resolved:
+ * stored coordinate is centimetres (docs/voice/spatial-audio-design-brief.md "Resolved:
  * the geometry unit"; viewer llvoicewebrtc.cpp:1239-1266). The DSP works in that
  * ×100 stored unit.
  *

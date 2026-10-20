@@ -293,9 +293,9 @@ run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER= JS_TURN_PORT= JS_TURN_TYPE= JS_T
 check "TURN: no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha256sum "$CONF/janus.jcfg" | cut -d" " -f1)" = "$NO_TURN_SUM" ]'
 
 # ---- visibility authority knobs. Environment only: they must not change any generated config. ----
-# tests/golden/phase0-knobs-off holds what the pre-knob image's own entrypoint generated (an earlier image, run with
+# tests/golden/defaults-knobs-off holds what the pre-knob image's own entrypoint generated (an earlier image, run with
 # JS_PUBLIC_IP=203.0.113.7 and this file's run_ep environment), plus that image's janus.plugin.slvoice.jcfg.
-GOLDEN0="$HERE/golden/phase0-knobs-off"
+GOLDEN0="$HERE/golden/defaults-knobs-off"
 VISSTUB="$WORK/janus-stub-vis"
 printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\n' > "$VISSTUB"
 chmod +x "$VISSTUB"
@@ -312,7 +312,7 @@ run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB"
 check "visibility knobs: knobs unset -> Janus runs with JS_VIS_FAIL_CLOSED=0 and JS_VIS_STALE_MS=8000 exported" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000"'
 check "visibility knobs: knobs unset -> the banner says fail-closed DISABLED (shadow mode)" 'has "INFO: vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)"'
 if [ "$IMAGE_TPL" = yes ]; then
-	check "visibility knobs: knobs unset -> janus.jcfg, both transport configs and effective-config.json byte-identical to the pre-knob entrypoint's (tests/golden/phase0-knobs-off)" 'golden0'
+	check "visibility knobs: knobs unset -> janus.jcfg, both transport configs and effective-config.json byte-identical to the pre-knob entrypoint's (tests/golden/defaults-knobs-off)" 'golden0'
 	check "visibility knobs: the image's janus.plugin.slvoice.jcfg is byte-identical to the pre-knob image's" 'cmp -s /opt/janus/share/janus-templates/janus.plugin.slvoice.jcfg "$GOLDEN0/janus.plugin.slvoice.jcfg"'
 else
 	echo "skip visibility knobs golden config comparison (needs the image's own templates)"

@@ -13,7 +13,7 @@
  * is immaterial here), returns the horizontal azimuth to the source in the
  * listener's head frame:
  *   0 = directly ahead, positive = to the listener's RIGHT.
- * Sign per the panning conventions in docs/voice/phase3b-design-brief.md (a source to the right
+ * Sign per the panning conventions in docs/voice/spatial-audio-design-brief.md (a source to the right
  * is louder in the right channel), so a positive azimuth pans right.
  *
  * Coordinate convention (SL/OpenSim): X east, Y north, Z up,

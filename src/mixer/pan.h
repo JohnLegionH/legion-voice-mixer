@@ -10,7 +10,7 @@
  * \details  Pure math for amplitude panning: given the horizontal azimuth of a
  * source in the listener's head frame (radians; 0 = ahead, positive = to the
  * listener's RIGHT — the sign produced by \ref mixer/azimuth.h and pinned in the
- * panning conventions of docs/voice/phase3b-design-brief.md), returns the per-channel linear
+ * panning conventions of docs/voice/spatial-audio-design-brief.md), returns the per-channel linear
  * gains for a constant-power pan.
  *
  * Pan law: the pan SIGNAL is sin(azimuth), not azimuth itself, so

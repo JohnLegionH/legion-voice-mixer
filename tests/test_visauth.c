@@ -5,7 +5,7 @@
 /*! \file    tests/test_visauth.c
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Unit tests for Phase 0 slice 0.3, the mixer's visibility authority
+ * \brief    Unit tests for the mixer's visibility authority
  *
  * \details  Reaches the plugin's statics by #including janus_slvoice.c, like test_room_lifecycle, and is linked the
  * same way. Sources carry a real Opus tone through the jitter buffer (primed as tests/bench_tick.c does), so "audible"
