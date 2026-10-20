@@ -390,7 +390,7 @@ same resilient helper:
   mutes" and is handled exactly as before (skew-safe). On `add`/`remove` the key is emitted only
   when non-empty, so a pure-ban delta is byte-for-byte the pre-mute wire.
 - An **old mixer** silently ignores the unknown `mute` key; a **new mixer** treats an absent `mute`
-  as "no mutes." (Sim `02ce1b9b10`; mixer parse/keep+grey `0d6d0d0`.)
+  as "no mutes." (Mixer parse/keep+grey `0d6d0d0`.)
 
 **(b) Join-window deferral + replay (mixer `27977c8`).** An `excl` or `mute` entry whose listener is
 not yet a participant is **no longer dropped** (§3.3.1): the mixer keeps it in a per-room deferred
@@ -494,8 +494,8 @@ to.** See the correction immediately below.
 > The estate-channel ban also had a second, independent half on the sim side that this feed never touched: the
 > provisioning ban/restrict check was chained as the `else` of the `UseEstateVoiceChan`
 > room-selection branch, so setting the estate-channel flag skipped it entirely. That half
-> was fixed by de-chaining the check in commit `ec3ad9b2f2`
-> (`WebRtcVoiceRegionModule.cs`), not by this feed. The `TaxFree` short-circuit in
+> was fixed by de-chaining the check in
+> `WebRtcVoiceRegionModule.cs`, not by this feed. The `TaxFree` short-circuit in
 > `LandObject.IsBannedFromLand` remains a third, still-open problem.
 
 ---

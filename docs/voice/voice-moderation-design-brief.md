@@ -1,12 +1,13 @@
 # Design Brief — Voice Moderation
 
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
 **Status:** First stage complete and VERIFIED end to end (2026-08-22) — see the resolution at
 the end, including the viewer requirement: the feature needs a Firestorm master-tracking
 build, not any release as of 7.2.4. Open Question 1 unanswered; Open Question 2 partially
 answered by the verification run.
 **Date:** 2026-08-21.
-**Basis:** recon 2026-08-21 against `tranquillity-develop` at `392c0efc1d` (*test(voice):
-engine coverage for the TaxFree ban path*) and the Firestorm viewer source (read-only
+**Basis:** recon 2026-08-21 against the sim tree at that date and the Firestorm viewer source (read-only
 reference); SL viewer release notes 26.1.0 and 26.2.0.
 **Target:** parity with the voice moderation LL shipped in viewer 26.1, Dec 2025.
 
@@ -260,10 +261,10 @@ and irrelevant to the running viewer, which did not contain the feature at all.
 the source — they render unconditionally — yet were absent from the observed menu. That is only
 possible if the running binary is not built from that source. Git dates it — the three SHAs
 in this paragraph are phoenix-firestorm commits, not this repo: the Mention entries
-were added 2025-11-21 (`2a6b5cbde5`) and nearby-voice moderation was transplanted 2026-02-12
-(`621009dc42`). A menu without the Mention entries predates the moderation transplant.
+were added 2025-11-21  and nearby-voice moderation was transplanted 2026-02-12
+. A menu without the Mention entries predates the moderation transplant.
 Independently confirmed by the floater showing a Voice Morphing dropdown, removed 2026-03-04
-(`9e2585cbc0`).
+.
 
 **The viewer requirement, stated precisely:** the feature is NOT in any Firestorm release as of
 7.2.4 (80712, built 2026-06-01, parity with LL 26.1.1). It requires a build tracking Firestorm
@@ -317,8 +318,7 @@ never set, because nothing sets it. The menu therefore only ever offered "Mute",
 individually-muted agent could not be released through the UI at all — the server implements the
 `unmute` operand correctly and nothing sent it.
 
-Worked around viewer-side (phoenix-firestorm, branch `fix/voice-webrtc-fixes`, commit
-`3c48a93f7a`) by giving the two menu items distinct parameters and showing both
+Worked around viewer-side (phoenix-firestorm, branch `fix/voice-webrtc-fixes`) by giving the two menu items distinct parameters and showing both
 unconditionally, so the operator chooses and the server authorises. That makes unmute
 reachable. It does not close the parity gap: clicking Unmute on an unmuted agent is a no-op, a
 second moderator cannot see the first's actions, and no participant list anywhere shows

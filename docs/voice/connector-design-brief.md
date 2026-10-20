@@ -1,5 +1,7 @@
 # Design Brief — Voice Connectors
 
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
 **Status:** DECIDED 2026-08-31 (see Amendment 2).
 **Date:** 2026-08-21.
 **Basis:** recon 2026-08-21 against `legion-voice-mixer @ b4672ff`.
@@ -224,7 +226,7 @@ carry an explicit obligation — and if so, what enforces it?
 **AMENDMENT 2 — all remaining questions DECIDED (2026-08-31)**
 
 **Basis:** a ground-truth check against
-`tranquillity-develop @ 6d012a40d2` / `legion-voice-mixer @ 0eb38f1`. Q1 was decided by
+the sim tree at that date / `legion-voice-mixer @ 0eb38f1`. Q1 was decided by
 Amendment 1; this amendment closes Q2–Q6 and the §Scope gate.
 
 **D1 — Authorisation (Q3): the ini-declared policy record is the gate.** `[VoiceConnector.<name>]`

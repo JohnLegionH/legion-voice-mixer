@@ -1,16 +1,16 @@
 # Design Brief — Per-Room Visibility Emission
 
-**Status:** IMPLEMENTED 2026-08-27. The S1–S5 build plan (§8) is complete: S1/S1b
-(`3c95ddea0e`/`7b08786d19`), S2 (`98465dc662`), S3a/S3b (`ef119f2a90`/`e35463a088`), and S4
-(`33fc3b412e`) have shipped; S5 is the documentation step. NOTE — the shipped S4 DIVERGED
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
+**Status:** IMPLEMENTED 2026-08-27. The S1–S5 build plan (§8) is complete: S1/S1b,
+S2, S3a/S3b and S4 have shipped; S5 is the documentation step. NOTE — the shipped S4 DIVERGED
 from §8's plan: it did NOT add a `PeerCtlSendResult.NotApplied` enum and changed no
 `VisibilityBatchSender` flow; instead it kept the 3-value result, put classification in the sink, and
 surfaced counts via a read-only stats property (same observability, smaller blast radius). M1 (mixer
 version bump) remains optional. The seven open questions are resolved in §7; §8 is the build plan.
 *Originally decided 2026-08-26, before implementation.*
 **Date:** 2026-08-26.
-**Basis:** `tranquillity-develop` at *docs(voice): file the per-parcel visibility delivery gap,
-split #13 by status* (branch `feature/voice-visibility-matrix`); `legion-voice-mixer` at
+**Basis:** the sim tree at that date; `legion-voice-mixer` at
 *fix(voice): clear stale exclusions on leave, error on unknown room and request* (plugin
 `janus.plugin.slvoice` 0.9.0 — the version string was not bumped by that commit, so "0.9.0"
 alone does not identify whether the `unknown_room` reply is present; see §5).
