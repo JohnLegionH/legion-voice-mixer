@@ -1,5 +1,7 @@
 # WebRTC Voice — Current Architecture (os-webrtc-janus)
 
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
 **Purpose.** Read-only inventory of the WebRTC/Janus voice implementation as it exists in
 this tree: the region-side capability module, the service-dispatch layer, the two provisioning
 topologies (region-local Janus vs. Robust grid service), the Janus API surface actually used,
@@ -12,9 +14,7 @@ per-listener gaps) are not covered here.
 
 | | |
 |---|---|
-| Tree | `tranquillity-develop` |
-| Branch | `feature/membership-tiers` |
-| Commit | `0bdeb0bf08cb1f5c9921f28b0293a5d82eba9cea` (`0bdeb0bf08`) |
+| Tree | the sim tree at survey time |
 | Commit date | 2026-08-12 17:57:42 -0500 |
 | Working tree | only untracked `Docs/voice/` at survey time |
 
@@ -300,7 +300,7 @@ disables (`ServiceModule:79`–`:84`).
 | `APIToken` | `:76` | `""` | Required. |
 | `JanusGatewayAdminURI` | `:77` | `""` | Required. |
 | `AdminAPIToken` | `:78` | `""` | Required. |
-| `PluginName` | `:79` | `"janus.plugin.audiobridge"` | Janus plugin (mixer) to attach handles to. Added by `feature/voice-plugin-select` (commit `1fb6371`); default preserves the original hardcoded behaviour. Set to `janus.plugin.slvoice` to select the Legion mixer. See §6. |
+| `PluginName` | `:79` | `"janus.plugin.audiobridge"` | Janus plugin (mixer) to attach handles to. Added by the plugin-select change; default preserves the original hardcoded behaviour. Set to `janus.plugin.slvoice` to select the Legion mixer. See §6. |
 | `MessageDetails` | `:80` | `false` | Janus wire logging (separate from `[WebRtcVoice]` one). |
 
 Any of the four required fields blank → the Janus service disables itself
@@ -336,7 +336,7 @@ Goal: point the OpenSim side at a **different Janus plugin name** (not
   (`Activate:88`, `Detach:126`). So if the new plugin speaks the same `join`/`leave`/`create`
   vocabulary, changing this one string (or making it config-driven) is the whole diff.
 
-> **DONE (commit `1fb6371`, branch `feature/voice-plugin-select`).** This seam is
+> **DONE (the plugin-select change).** This seam is
 > now config-driven: `WebRtcJanusService` reads the `[JanusWebRtcVoice] PluginName`
 > key (default `janus.plugin.audiobridge`, §5), logs the selected plugin at INFO,
 > and passes it to `JanusAudioBridge(JanusSession, string)` → the name-agnostic
@@ -393,8 +393,8 @@ These are the vocabulary-bound sites that would also change (class · method · 
 byte-identical to `upstream/develop` (`OpenSim-NGC/OpenSim-Tranquillity`):
 `git diff --quiet upstream/develop -- 'Addons/os-webrtc-janus/**/*.cs'` reports **IDENTICAL**.
 (`upstream/master` does not contain the addon at all — the addon lives only on the NGC
-`develop` line.) The files entered this tree via `2ecb8a9b96` *"Plugin Support + Ported LibOMV
-via GH Nuget (#172)"* (2026-06-10), the last commit to touch `JanusMessages.cs`.
+`develop` line.) The files entered this tree via the *"Plugin Support + Ported LibOMV
+via GH Nuget (#172)"* change (2026-06-10), the last commit to touch `JanusMessages.cs`.
 
 **The "OSD.FromLong fix" — subsumed / non-existent as a surviving patch.** The literal
 `OSD.FromLong` appears in **no** commit that touches this addon (`git log --all -S 'OSD.FromLong'
@@ -412,8 +412,8 @@ integration superseded. So: the upstream libOMV integration subsumed the need fo
 `OSD.FromLong`-style patch; `OSDToLong` remains as defensive belt-and-suspenders and matches
 upstream exactly — there is nothing local to carry forward or reconcile here.
 
-> **FIXED — the stale `:131` comment marked a real defect (commit `be94487`,
-> branch `fix/janus-osdlong-session-id`).** `OSDToLong` (`:136`) switched on the
+> **FIXED — the stale `:131` comment marked a real defect (the OSDLong
+> session-id fix).** `OSDToLong` (`:136`) switched on the
 > OSD type with cases only for `Integer`/`Binary`/`Array` — it had **no case for
 > `OSDType.Long`**, the type the ported-libOMV parser returns for any number
 > exceeding int32. Such ids fell through to the initialized `long ret = 0`, so

@@ -32,8 +32,7 @@ rewritten.
 (`:125`); `docs/voice/mixer-feed-protocol.md` §6 (`:420`–`:436`).
 Bare section numbers elsewhere in this document (§3.3, §5, §6, §7.1) refer to
 `docs/voice/webrtc-voice-spec.md`.
-**Verified against:** `legion-voice-mixer @ c03de3a`, `tranquillity-develop @
-f8fcb34653`, the Firestorm viewer source (read-only reference).
+**Verified against:** `legion-voice-mixer @ c03de3a`, the sim tree at that date, the Firestorm viewer source (read-only reference).
 
 ## Purpose
 

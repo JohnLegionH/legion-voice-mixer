@@ -153,10 +153,10 @@ check "secrets set -> api_secret written" '[ "$(cfg janus.jcfg api_secret)" = "a
 check "secrets set -> admin_secret written" '[ "$(cfg janus.jcfg admin_secret)" = "admin_secret = \"test-admin-secret\"" ]'
 
 # ---- nat_1_1_mapping verdict (judged on the FINAL mapping) ----
-run_ep JS_PUBLIC_IP=192.168.0.225
-check "RFC1918 only -> ERROR no public address, with remediation" 'has "ERROR: nat_1_1_mapping=192.168.0.225 has no public address: off-LAN viewers will fail ICE" && has "ERROR: remediation:"'
+run_ep JS_PUBLIC_IP=10.0.0.225
+check "RFC1918 only -> ERROR no public address, with remediation" 'has "ERROR: nat_1_1_mapping=10.0.0.225 has no public address: off-LAN viewers will fail ICE" && has "ERROR: remediation:"'
 check "RFC1918 only -> no per-address private WARNING" '! has "is private/loopback"'
-check "RFC1918 -> still starts, mapping unchanged" '[ "$RC" -eq 0 ] && [ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"192.168.0.225\"" ]'
+check "RFC1918 -> still starts, mapping unchanged" '[ "$RC" -eq 0 ] && [ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"10.0.0.225\"" ]'
 
 for ip in 10.1.2.3 172.16.0.1 172.31.255.254 127.0.0.1 169.254.1.1; do
 	run_ep JS_PUBLIC_IP=$ip
@@ -170,12 +170,12 @@ for ip in 203.0.113.7 172.32.0.1 172.15.0.1 11.0.0.1; do
 done
 
 # ---- JS_NAT_EXTRA_IPS ----
-run_ep JS_PUBLIC_IP=192.168.0.225 JS_NAT_EXTRA_IPS=203.0.113.7
-check "extra IP -> mapping has both addresses" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"192.168.0.225,203.0.113.7\"" ]'
+run_ep JS_PUBLIC_IP=10.0.0.225 JS_NAT_EXTRA_IPS=203.0.113.7
+check "extra IP -> mapping has both addresses" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"10.0.0.225,203.0.113.7\"" ]'
 check "extra public IP -> no private WARNING, no ERROR, INFO names the public address" '! has "is private/loopback" && ! has "ERROR:" && has "includes public address(es) 203.0.113.7"'
 
-run_ep JS_PUBLIC_IP=192.168.0.225 "JS_NAT_EXTRA_IPS= 203.0.113.7 , 198.51.100.9,203.0.113.7,192.168.0.225"
-check "extra list -> spaces trimmed, duplicates dropped" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"192.168.0.225,203.0.113.7,198.51.100.9\"" ]'
+run_ep JS_PUBLIC_IP=10.0.0.225 "JS_NAT_EXTRA_IPS= 203.0.113.7 , 198.51.100.9,203.0.113.7,10.0.0.225"
+check "extra list -> spaces trimmed, duplicates dropped" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"10.0.0.225,203.0.113.7,198.51.100.9\"" ]'
 
 run_ep JS_NAT_EXTRA_IPS=203.0.113.7
 check "extra IP without public address -> mapping is the extra alone" '[ "$RC" -eq 0 ] && [ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"203.0.113.7\"" ] && ! has "neither JS_PUBLIC_IP"'
@@ -189,24 +189,24 @@ check "address discovery: literal JS_PUBLIC_IP -> passes through untouched" '[ "
 check "address discovery: literal JS_PUBLIC_IP -> no lookup at all" '[ ! -e "$WORK/calls.literal" ] && ! has "discovery source" && ! has "discovering the public address"'
 check "address discovery: literal -> state file: no sources, public verdict" 'hasstate "\"sources\":[]" && hasstate "\"literal_ips\":[\"203.0.113.7\"]" && hasstate "\"verdict\":\"public\""'
 
-run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=203.0.113.7 STUB_DNS=192.168.0.225 STUB_CONTAINER=192.168.0.225
-check "address discovery: hostname -> every source logged with its answer" 'has "INFO: discovery source stun (stun.l.google.com:19302) -> 203.0.113.7 (public)" && has "INFO: discovery source dns (resolver 1.1.1.1) -> 192.168.0.225 (private)" && has "INFO: discovery source container (container resolver) -> 192.168.0.225 (private)"'
+run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=203.0.113.7 STUB_DNS=10.0.0.225 STUB_CONTAINER=10.0.0.225
+check "address discovery: hostname -> every source logged with its answer" 'has "INFO: discovery source stun (stun.l.google.com:19302) -> 203.0.113.7 (public)" && has "INFO: discovery source dns (resolver 1.1.1.1) -> 10.0.0.225 (private)" && has "INFO: discovery source container (container resolver) -> 10.0.0.225 (private)"'
 check "address discovery: STUN public + DNS private -> public wins" 'has "INFO: discovery winner: stun -> 203.0.113.7" && [ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"203.0.113.7\"" ] && hasstate "\"winner\":{\"source\":\"stun\",\"address\":\"203.0.113.7\"}"'
 check "address discovery: STUN public + DNS private -> no ERROR, no private WARNING" '! has "ERROR:" && ! has "is private/loopback"'
 
 # The home-hosted shape: a literal LAN address plus a DDNS name that hairpins to it.
-run_ep JS_PUBLIC_IP=192.168.0.225 JS_PUBLIC_HOST=voice.example.test STUB_STUN=203.0.113.7 STUB_DNS=192.168.0.225 STUB_CONTAINER=192.168.0.225
-check "address discovery: literal + hostname -> discovered public first, literal kept" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"203.0.113.7,192.168.0.225\"" ] && has "INFO: nat_1_1_mapping=203.0.113.7,192.168.0.225 includes public address(es) 203.0.113.7"'
-check "address discovery: one ADDRESS_RESOLUTION log line, and the state file is valid JSON" '[ "$(count "ADDRESS_RESOLUTION {")" -eq 1 ] && json_ok "$CONF/state/public-address.json" && hasstate "\"nat_1_1_mapping\":[\"203.0.113.7\",\"192.168.0.225\"]" && hasstate "\"event\":\"start\""'
+run_ep JS_PUBLIC_IP=10.0.0.225 JS_PUBLIC_HOST=voice.example.test STUB_STUN=203.0.113.7 STUB_DNS=10.0.0.225 STUB_CONTAINER=10.0.0.225
+check "address discovery: literal + hostname -> discovered public first, literal kept" '[ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"203.0.113.7,10.0.0.225\"" ] && has "INFO: nat_1_1_mapping=203.0.113.7,10.0.0.225 includes public address(es) 203.0.113.7"'
+check "address discovery: one ADDRESS_RESOLUTION log line, and the state file is valid JSON" '[ "$(count "ADDRESS_RESOLUTION {")" -eq 1 ] && json_ok "$CONF/state/public-address.json" && hasstate "\"nat_1_1_mapping\":[\"203.0.113.7\",\"10.0.0.225\"]" && hasstate "\"event\":\"start\""'
 
-run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN= STUB_DNS=203.0.113.9 STUB_CONTAINER=192.168.0.225
+run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN= STUB_DNS=203.0.113.9 STUB_CONTAINER=10.0.0.225
 check "address discovery: STUN unavailable -> logged as no answer" 'has "INFO: discovery source stun (stun.l.google.com:19302) -> no answer" && hasstate "{\"name\":\"stun\",\"via\":\"stun.l.google.com:19302\",\"status\":\"no_answer\",\"address\":null,\"class\":null}"'
 check "address discovery: STUN unavailable -> DNS fallback used, logged as such" 'has "INFO: discovery winner: dns -> 203.0.113.9 (fallback: stun gave no answer)" && [ "$(cfg janus.jcfg nat_1_1_mapping)" = "nat_1_1_mapping = \"203.0.113.9\"" ]'
 
-run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=10.0.0.5 STUB_DNS=192.168.0.225 STUB_CONTAINER=192.168.0.225
+run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=10.0.0.5 STUB_DNS=10.0.0.225 STUB_CONTAINER=10.0.0.225
 check "address discovery: every source private -> ERROR verdict, still starts" '[ "$RC" -eq 0 ] && has "ERROR: nat_1_1_mapping=10.0.0.5 has no public address" && has "ERROR: remediation:" && hasstate "\"verdict\":\"no_public\""'
 
-run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=100.64.12.34 STUB_DNS= STUB_CONTAINER=192.168.0.225
+run_ep JS_PUBLIC_HOST=voice.example.test STUB_STUN=100.64.12.34 STUB_DNS= STUB_CONTAINER=10.0.0.225
 check "address discovery: CGNAT address -> CGNAT verdict and TURN warning" 'has "WARNING: nat_1_1_mapping address 100.64.12.34 is in 100.64.0.0/10: this is carrier-grade NAT (CGNAT)" && has "a TURN server is required" && hasstate "\"verdict\":\"cgnat\"" && ! has "has no public address"'
 run_ep JS_PUBLIC_IP=100.127.255.254
 check "address discovery: literal 100.127.255.254 -> CGNAT verdict" 'hasstate "\"verdict\":\"cgnat\"" && has "carrier-grade NAT"'
@@ -249,7 +249,7 @@ check "address discovery: change seen once -> no action" '[ "$(addr_change_step 
 check "address discovery: change seen twice -> action" '[ "$(addr_change_step 203.0.113.7 198.51.100.4 1 198.51.100.4)" = "198.51.100.4 2 change" ]'
 check "address discovery: failed lookup -> never a change, streak broken" '[ "$(addr_change_step 203.0.113.7 198.51.100.4 1 "")" = "- 0 none" ]'
 check "address discovery: two different new addresses -> no action" '[ "$(addr_change_step 203.0.113.7 198.51.100.4 1 198.51.100.5)" = "198.51.100.5 1 none" ]'
-check "address discovery: private answer while running public -> not a change" '[ "$(addr_change_step 203.0.113.7 - 0 192.168.0.225)" = "- 0 none" ]'
+check "address discovery: private answer while running public -> not a change" '[ "$(addr_change_step 203.0.113.7 - 0 10.0.0.225)" = "- 0 none" ]'
 check "address discovery: same address as running -> no action" '[ "$(addr_change_step 203.0.113.7 198.51.100.4 1 203.0.113.7)" = "- 0 none" ]'
 
 printf '198.51.100.4\n' > "$WORK/stun.seq"
@@ -293,9 +293,9 @@ run_ep JS_PUBLIC_IP=203.0.113.7 JS_TURN_SERVER= JS_TURN_PORT= JS_TURN_TYPE= JS_T
 check "TURN: no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha256sum "$CONF/janus.jcfg" | cut -d" " -f1)" = "$NO_TURN_SUM" ]'
 
 # ---- visibility authority knobs. Environment only: they must not change any generated config. ----
-# tests/golden/phase0-knobs-off holds what the pre-knob image's own entrypoint generated (image c7b57f567f48, run with
+# tests/golden/defaults-knobs-off holds what the pre-knob image's own entrypoint generated (an earlier image, run with
 # JS_PUBLIC_IP=203.0.113.7 and this file's run_ep environment), plus that image's janus.plugin.slvoice.jcfg.
-GOLDEN0="$HERE/golden/phase0-knobs-off"
+GOLDEN0="$HERE/golden/defaults-knobs-off"
 VISSTUB="$WORK/janus-stub-vis"
 printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\n' > "$VISSTUB"
 chmod +x "$VISSTUB"
@@ -312,7 +312,7 @@ run_ep JS_PUBLIC_IP=203.0.113.7 JANUS_BIN="$VISSTUB"
 check "visibility knobs: knobs unset -> Janus runs with JS_VIS_FAIL_CLOSED=0 and JS_VIS_STALE_MS=8000 exported" '[ "$RC" -eq 0 ] && has "STUB-ENV JS_VIS_FAIL_CLOSED=0 JS_VIS_STALE_MS=8000"'
 check "visibility knobs: knobs unset -> the banner says fail-closed DISABLED (shadow mode)" 'has "INFO: vis_fail_closed=0 vis_stale_ms=8000: fail-closed DISABLED (shadow mode)"'
 if [ "$IMAGE_TPL" = yes ]; then
-	check "visibility knobs: knobs unset -> janus.jcfg, both transport configs and effective-config.json byte-identical to the pre-knob entrypoint's (tests/golden/phase0-knobs-off)" 'golden0'
+	check "visibility knobs: knobs unset -> janus.jcfg, both transport configs and effective-config.json byte-identical to the pre-knob entrypoint's (tests/golden/defaults-knobs-off)" 'golden0'
 	check "visibility knobs: the image's janus.plugin.slvoice.jcfg is byte-identical to the pre-knob image's" 'cmp -s /opt/janus/share/janus-templates/janus.plugin.slvoice.jcfg "$GOLDEN0/janus.plugin.slvoice.jcfg"'
 else
 	echo "skip visibility knobs golden config comparison (needs the image's own templates)"
@@ -445,8 +445,8 @@ check "no JS_JOIN_MEDIA_TIMEOUT_S -> 30 printed" 'has "INFO: empty_room_grace_s=
 run_ep JS_JOIN_MEDIA_TIMEOUT_S=10
 check "JS_JOIN_MEDIA_TIMEOUT_S=10 -> 10 printed" 'has "join_media_timeout_s=10"'
 
-run_ep JS_ADMIN_BIND=192.168.0.225
-check "JS_ADMIN_BIND=192.168.0.225 -> INFO names it, no WARN" 'has "INFO: admin API bind=192.168.0.225 port=14225" && ! has "reachable on all interfaces"'
+run_ep JS_ADMIN_BIND=10.0.0.225
+check "JS_ADMIN_BIND=10.0.0.225 -> INFO names it, no WARN" 'has "INFO: admin API bind=10.0.0.225 port=14225" && ! has "reachable on all interfaces"'
 
 run_ep JS_WS_ENABLED=false
 check "JS_WS_ENABLED=false -> ws = false" '[ "$(cfg janus.transport.websockets.jcfg ws)" = "ws = false" ] && has "INFO: websockets transport enabled=false"'

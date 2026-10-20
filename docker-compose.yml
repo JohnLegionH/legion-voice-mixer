@@ -47,7 +47,8 @@ services:
     # pre-6m publish (docs/docker-notes.md → "Configuration compatibility rule").
     # JS_ADMIN_BIND = the host address the Admin API is published on; unset means
     # all interfaces (the entrypoint WARNs). To narrow, set it to the address in
-    # the sim's JanusGatewayAdminURI (e.g. 192.168.0.225). JS_WS_ENABLED=false
+    # the sim's JanusGatewayAdminURI (e.g. 192.0.2.10, a documentation address: put
+    # this host's own address there). JS_WS_ENABLED=false
     # stops Janus loading the WebSockets transport (the WS mapping then answers
     # nothing; delete that line to unpublish it too).
     ports:
@@ -91,6 +92,14 @@ services:
     # or with no policy, voice stays down after that restart. See
     # docs/docker-notes.md, "External access".
     restart: unless-stopped
+
+    # Bounds the container log: Docker's json-file driver keeps everything by default,
+    # so a busy mixer would fill the disk. Three files of 10 MB are kept.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     # ── Advanced config override (optional) ──────────────────────────────────
     # Drop complete Janus *.jcfg files here to override the env-generated config.

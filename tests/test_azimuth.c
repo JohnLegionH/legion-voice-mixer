@@ -9,7 +9,7 @@
  *
  * \details  Plain C, links only libm. Built and run by `make test`. Expected
  * values are derived from the geometry and the conventions pinned in
- * docs/voice/phase3b-design-brief.md Amendment 4 — NOT from what the code
+ * the spatial design brief (docs/voice/spatial-audio-design-brief.md, panning conventions) — NOT from what the code
  * produces. Verification of the stereo pan is numeric (no listening tests are
  * available), so these ARE the acceptance criteria. Exit status is non-zero on
  * any failure so `make test` / the Docker build fails loudly.

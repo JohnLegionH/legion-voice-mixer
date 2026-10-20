@@ -14,7 +14,7 @@
  * can be unit-tested by \c #include alone. They operate on \ref slv_vec3
  * (region-local coordinates); the routines are unit-agnostic — the caller keeps
  * the scale consistent (geometry is stored ×100, see
- * docs/voice/phase3b-design-brief.md "Resolved: the geometry unit").
+ * docs/voice/spatial-audio-design-brief.md "Resolved: the geometry unit").
  */
 
 #ifndef SLV_VEC3_H

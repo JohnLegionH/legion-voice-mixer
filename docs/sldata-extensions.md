@@ -196,7 +196,7 @@ a normal viewer hears itself without any special client:
 Default is **off**. The runtime `{"echo":true}`/`{"echo":false}` toggle still
 works regardless of this setting.
 
-## What's implemented (1.1.0) and what is not
+## What's implemented (1.2.0) and what is not
 
 **Mixer→client SLData:** every ~100 ms (spec §9) the plugin pushes the per-peer
 batch `{ "<uuid>": {"p":<level*128>,"v":<VAD>} }`.

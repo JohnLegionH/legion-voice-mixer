@@ -1,5 +1,7 @@
 # Spatial WebRTC Voice Service — Feature Specification
 
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
 **Status:** Draft for review; amended 2026-09-14, and again 2026-09-19 for fail-closed enforcement (see the status block below)
 **Scope:** A server-side WebRTC voice service (mixer plugin + region/grid integration) implementing the published Second Life WebRTC voice protocol, for OpenSimulator-derived grids. Designed to run unchanged from a single-region standalone to a large multi-mixer grid. *[The large multi-mixer end is DESCOPED 2026-09-14: the scale tier is not needed for the target deployment.]*
 

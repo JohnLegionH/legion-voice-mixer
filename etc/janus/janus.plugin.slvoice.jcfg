@@ -15,10 +15,10 @@ general: {
 	# overrides this. See docs/sldata-extensions.md (echo_autostart).
 	#echo_autostart = false
 
-	# ---- Spatial DSP tuning (Amendment 8) --------------------------------------
-	# Process-wide overrides for the Phase 3b spatial constants. All are OPTIONAL:
+	# ---- Spatial audio tuning ---------------------------------------------------
+	# Process-wide overrides for the spatial audio constants. All are OPTIONAL:
 	# an absent key uses the compiled default shown, so leaving this whole section
-	# out is byte-identical to a stock build. Distances are in METRES (the plugin
+	# out gives the same settings as the compiled defaults. Distances are in METRES (the plugin
 	# converts to its internal unit once at load). The five are validated together
 	# and applied all-or-nothing — if any value is invalid the plugin logs the
 	# offending constraint and keeps ALL defaults. Constraints: every distance > 0;
@@ -27,7 +27,7 @@ general: {
 	#spatial_reference_distance_m = 10.0   # full volume within this radius (metres)
 	#spatial_cutoff_distance_m    = 60.0   # a source beyond this is culled (metres)
 	#spatial_readd_distance_m     = 58.0   # hysteresis re-add; must be < cutoff (metres)
-	#spatial_leash_distance_m     = 50.0   # §7.1 camera-leash radius (metres)
+	#spatial_leash_distance_m     = 50.0   # camera-leash radius (metres)
 	#spatial_falloff_exp          = 2.0    # attenuation shaping exponent (dimensionless, > 0)
 }
 

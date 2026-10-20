@@ -1,12 +1,13 @@
 # Voice configuration register (sim side)
 
+> Design notes from development. The current region-server specification is in OpenSim-NGC's Docs/voice.
+
 The sim-side counterpart of the mixer's "Configuration compatibility rule" and
 "Knob register" (`legion-voice-mixer/docs/docker-notes.md`), for the ini keys the
-`os-webrtc-janus` addon reads. Written 2026-09-14 from the tree at
-`feature/ais-v3` `c8bc0a7cfa`; every file:line below was checked by grep. The live
-column is a production `OpenSim.ini` on that date.
-Updated 2026-09-14 for the change that flipped the visibility and plugin defaults (`3283c939f1`); the RM, JS, Ex and Ini line numbers were re-checked at
-that commit.
+`os-webrtc-janus` addon reads. Written 2026-09-14 from the sim tree of that date; every file:line below was checked by grep. The live
+column is one deployment's `OpenSim.ini` on that date.
+Updated 2026-09-14 for the change that flipped the visibility and plugin defaults; the RM, JS, Ex and Ini line numbers were re-checked after
+that change.
 
 ## Configuration compatibility rule
 
@@ -38,22 +39,22 @@ File legend (all under `Addons/os-webrtc-janus/`):
 - **Ex** = `os-webrtc-janus.ini.example`
 - **Ini** = `os-webrtc-janus.ini` (the shipped file)
 
-Since `3283c939f1` the shipped `os-webrtc-janus.ini` carries four of these keys: `StunServers`,
+Since 2026-09-14 the shipped `os-webrtc-janus.ini` carries four of these keys: `StunServers`,
 `VisibilityFeederEnabled`, `VisibilityEmitEnabled` and `PluginName`. It carries none of the others.
 
 | Key | Section | Default (read at) | Example / shipped ini | Live | Since | Before the key existed |
 |---|---|---|---|---|---|---|
-| `RequestTimeoutMs` | `[JanusWebRtcVoice]` | 5000 = `JanusSession.DefaultRequestTimeoutMs` (JS:130; ≤0 falls back to 5000) | Ex:62, commented `5000`; Ini absent | unset → 5000 | `3ca74633df` 2026-09-13 | No timeout: after the ack a request waited on its completion source forever. **Pre-rule exception, retained deliberately** (below). |
-| `RefusalCacheSeconds` | `[WebRtcVoice]` | 5 = `ProvisionRefusalCache.DefaultSeconds` (RM:125, SM:89; negative → 0 = off) | absent | unset → 5 | `1b88989e9f` 2026-09-13 | No cache: every viewer retry re-ran the estate/parcel checks and the provision. **Pre-rule exception, retained deliberately** (below). |
-| `VisibilityTickMs` | `[WebRtcVoice]` | 250 (RM:128) | absent | 250 | `e044ee1670` 2026-08-16 (visibility feeder) | Feature did not exist; no periodic visibility work. **Pre-rule exception, retained deliberately** (below). |
-| `VisibilityEmitEnabled` | `[WebRtcVoice]` | **true** since `3283c939f1` = `DefaultVisibilityEmitEnabled` (RM:84; read RM:90, called RM:129). **Before that commit:** false. | Ex:33 `true`; Ini:27 `true` | true | `fc1454ea3e` 2026-08-16 (peer_ctl_batch sender); default flipped in `3283c939f1` 2026-09-14 | The feeder computed the matrix but nothing was sent to the mixer; the `false` default reproduced that until the flip. **Pre-rule exception, retained deliberately** (below). |
-| `VisibilityFeederEnabled` | `[WebRtcVoice]` | **true** since `3283c939f1` = `DefaultVisibilityFeederEnabled` (RM:83; read RM:87, called RM:127). **Before that commit:** false. | Ex:32 `true`; Ini:26 `true` | true | `e044ee1670` 2026-08-16; default flipped in `3283c939f1` 2026-09-14 | No feeder thread; the `false` default reproduced that until the flip. **Pre-rule exception, retained deliberately** (below). |
-| `AllowNpcVoice` | `[WebRtcVoice]` | false (SM:86 enforced; VCM:90 read for disclosure) | Ex:41, commented `false`; Ini absent | unset → false | `7240797fc8` 2026-08-31 | No NPC guard: NPC presences provisioned voice like avatars. **Pre-rule exception, retained deliberately** (below). |
-| `VoiceRangeMetres` | `[WebRtcVoice]` | 20 = `DefaultVoiceRangeMetres` (VCM:91) | Ex:44, commented `20`; Ini absent | unset → 20 | `d95754509d` 2026-08-31 | Feature did not exist; the value only sizes the new connector proximity notice. |
-| `StunServers` | `[WebRtcVoice]` | empty (RM:126); empty = the addon adds no `stun-servers` feature | Ex:26 and Ini:20, active `stun:stun.l.google.com:19302` (Ini since `3283c939f1`) | `stun:stun.l.google.com:19302` | `5e0f289fc1` 2026-08-15 | The addon advertised nothing. The core's own `StunServers` (`GridInfo.cs:519`, since `fc607035c8`) could already advertise `stun-servers`. The empty code default still reproduces the addon's prior behaviour; only the shipped files changed. |
-| `PluginName` | `[JanusWebRtcVoice]` | **`janus.plugin.slvoice`** since `3283c939f1` = `DefaultPluginName` (JS:55; read JS:59, called JS:120). **Before that commit:** `janus.plugin.audiobridge`. | Ex:58 and Ini:41, `janus.plugin.slvoice` (since `3283c939f1`) | `janus.plugin.slvoice` | `ade2b29f6b` 2026-08-13; default changed in `3283c939f1` 2026-09-14 | Hard-coded `janus.plugin.audiobridge` (`JanusAudioBridge.cs:42` at the parent); the audiobridge default reproduced that until the change. **Pre-rule exception, retained deliberately** (below). |
+| `RequestTimeoutMs` | `[JanusWebRtcVoice]` | 5000 = `JanusSession.DefaultRequestTimeoutMs` (JS:130; ≤0 falls back to 5000) | Ex:62, commented `5000`; Ini absent | unset → 5000 | 2026-09-13 | No timeout: after the ack a request waited on its completion source forever. **Pre-rule exception, retained deliberately** (below). |
+| `RefusalCacheSeconds` | `[WebRtcVoice]` | 5 = `ProvisionRefusalCache.DefaultSeconds` (RM:125, SM:89; negative → 0 = off) | absent | unset → 5 | 2026-09-13 | No cache: every viewer retry re-ran the estate/parcel checks and the provision. **Pre-rule exception, retained deliberately** (below). |
+| `VisibilityTickMs` | `[WebRtcVoice]` | 250 (RM:128) | absent | 250 | 2026-08-16 (visibility feeder) | Feature did not exist; no periodic visibility work. **Pre-rule exception, retained deliberately** (below). |
+| `VisibilityEmitEnabled` | `[WebRtcVoice]` | **true** since 2026-09-14 = `DefaultVisibilityEmitEnabled` (RM:84; read RM:90, called RM:129). **Before that change:** false. | Ex:33 `true`; Ini:27 `true` | true | 2026-08-16 (peer_ctl_batch sender); default flipped in the 2026-09-14 change 2026-09-14 | The feeder computed the matrix but nothing was sent to the mixer; the `false` default reproduced that until the flip. **Pre-rule exception, retained deliberately** (below). |
+| `VisibilityFeederEnabled` | `[WebRtcVoice]` | **true** since 2026-09-14 = `DefaultVisibilityFeederEnabled` (RM:83; read RM:87, called RM:127). **Before that change:** false. | Ex:32 `true`; Ini:26 `true` | true | 2026-08-16; default flipped in the 2026-09-14 change 2026-09-14 | No feeder thread; the `false` default reproduced that until the flip. **Pre-rule exception, retained deliberately** (below). |
+| `AllowNpcVoice` | `[WebRtcVoice]` | false (SM:86 enforced; VCM:90 read for disclosure) | Ex:41, commented `false`; Ini absent | unset → false | 2026-08-31 | No NPC guard: NPC presences provisioned voice like avatars. **Pre-rule exception, retained deliberately** (below). |
+| `VoiceRangeMetres` | `[WebRtcVoice]` | 20 = `DefaultVoiceRangeMetres` (VCM:91) | Ex:44, commented `20`; Ini absent | unset → 20 | 2026-08-31 | Feature did not exist; the value only sizes the new connector proximity notice. |
+| `StunServers` | `[WebRtcVoice]` | empty (RM:126); empty = the addon adds no `stun-servers` feature | Ex:26 and Ini:20, active `stun:stun.l.google.com:19302` (Ini since 2026-09-14) | `stun:stun.l.google.com:19302` | 2026-08-15 | The addon advertised nothing. The core's own `StunServers` (`GridInfo.cs:519`, since `fc607035c8`) could already advertise `stun-servers`. The empty code default still reproduces the addon's prior behaviour; only the shipped files changed. |
+| `PluginName` | `[JanusWebRtcVoice]` | **`janus.plugin.slvoice`** since 2026-09-14 = `DefaultPluginName` (JS:55; read JS:59, called JS:120). **Before that change:** `janus.plugin.audiobridge`. | Ex:58 and Ini:41, `janus.plugin.slvoice` (since 2026-09-14) | `janus.plugin.slvoice` | 2026-08-13; default changed in the 2026-09-14 change 2026-09-14 | Hard-coded `janus.plugin.audiobridge` (`JanusAudioBridge.cs:42` at the parent); the audiobridge default reproduced that until the change. **Pre-rule exception, retained deliberately** (below). |
 | `CapabilitySecret` | `[VoiceConnector.<name>]` | unset = no join-capability endpoint for the record (`VoiceConnector/VoiceConnectorRegistry.cs:163`); under 32 characters = WARN and treated as unset (`:166-171`); VCM:209-213 registers the handler only when some record has one | absent | unset | 2026-09-16 (connector join capability) | No endpoint existed. Unset reproduces that exactly: no handler registered, payloads and logs unchanged. Setting it serves `POST /voice/connector/<name>/join-cap` on the region HTTP server with `Authorization: Bearer <secret>`. When the peer and the region are on different hosts the bearer crosses the network, so use TLS or a private network. **A connector that must work on an empty region needs this set** : fetching the capability is what makes the sim ensure the connector's room exists, and the sim creates a room for nobody else — without a secret the connector can only join a room some viewer has already provisioned, and its arming waits out the `unknown_room` backoff until one does. |
-| `AdminTimeoutMs` | `[JanusWebRtcVoice]` | 5000 (RM:141) | absent | unset → 5000 | `fc1454ea3e` 2026-08-16 (first read in SM, moved to RM in `de7d4ad801`) | No admin sends existed. It bounds the peer_ctl_batch emission, which is on by default since `3283c939f1`. |
+| `AdminTimeoutMs` | `[JanusWebRtcVoice]` | 5000 (RM:141) | absent | unset → 5000 | 2026-08-16 (first read in SM, later moved to RM) | No admin sends existed. It bounds the peer_ctl_batch emission, which is on by default since 2026-09-14. |
 
 ### Pre-rule exceptions, retained deliberately
 
@@ -82,9 +83,9 @@ Since `3283c939f1` the shipped `os-webrtc-janus.ini` carries four of these keys:
     pass that did not exist before.
   - *Why accepted:* 250 ms is the rate the visibility design was measured at. When the
     key was added the tick was inert, because `VisibilityFeederEnabled` defaulted to
-    false. Since `3283c939f1` the feeder runs by default, so the tick runs too (see the
+    false. Since 2026-09-14 the feeder runs by default, so the tick runs too (see the
     `VisibilityFeederEnabled` exception below).
-- **`PluginName` (`janus.plugin.slvoice`, since `3283c939f1`).**
+- **`PluginName` (`janus.plugin.slvoice`, since 2026-09-14).**
   - *What changed:* an install that never set the key attached voice handles to the
     stock `janus.plugin.audiobridge`. It now attaches to the Legion mixer. The id is
     `JANUS_SLVOICE_PACKAGE` in legion-voice-mixer `src/janus_slvoice.c`.
@@ -92,7 +93,7 @@ Since `3283c939f1` the shipped `os-webrtc-janus.ini` carries four of these keys:
     AudioBridge and appeared to work, with none of the mixer's spatial mix, visibility
     or moderation. `PluginName = janus.plugin.audiobridge` restores
     the old behaviour.
-- **`VisibilityFeederEnabled` and `VisibilityEmitEnabled` (true, since `3283c939f1`).**
+- **`VisibilityFeederEnabled` and `VisibilityEmitEnabled` (true, since 2026-09-14).**
   - *What changed:* an install that never set them ran no feeder and sent the mixer no
     permission state. It now runs the 250 ms feeder in each region and sends
     `peer_ctl_batch` over the Janus admin API. When `JanusGatewayAdminURI` or
@@ -130,7 +131,7 @@ Since `3283c939f1` the shipped `os-webrtc-janus.ini` carries four of these keys:
   and the core's `StunServers` (`[Startup]` etc., `Scene.cs:1328-1331`) add
   `stun-servers` to SimulatorFeatures. Which one wins when both are set is not
   established. Live sets only the addon key.
-- **The shipped ini lacked most of these keys before `3283c939f1`**. Since
-  `3283c939f1`, both `os-webrtc-janus.ini` and the example carry `StunServers`,
+- **The shipped ini lacked most of these keys before 2026-09-14**. Since
+  the 2026-09-14 change, both `os-webrtc-janus.ini` and the example carry `StunServers`,
   `VisibilityFeederEnabled`, `VisibilityEmitEnabled` and `PluginName`. Neither carries
   `VisibilityTickMs` or `AdminTimeoutMs`.

@@ -5,7 +5,7 @@
 /*! \file    visauth.h
  * \author   Legion Voice Mixer project
  * \copyright GNU General Public License v3
- * \brief    Phase 0 visibility authority: epoch parsing, the epoch adoption rule, the listener rule rows,
+ * \brief    Visibility authority: epoch parsing, the epoch adoption rule, the listener rule rows,
  *           and the two knobs.
  *
  * \details  Header-only and libc-only, like roster.h, so both the plugin and the dependency-free
