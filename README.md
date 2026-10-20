@@ -16,6 +16,8 @@ addon and a drop-in alternative to the stock `janus.plugin.audiobridge`.
 >   as Admin API `peer_ctl_batch` messages; an excluded source disappears from
 >   both audio and roster.
 > - **Room lifecycle:** empty rooms are destroyed after `JS_EMPTY_ROOM_GRACE_S`.
+> - **Room size:** a room admits 50 participants by default; `JS_ROOM_SIZE` sets it from 2 to 110, and a join beyond it
+>   is refused as room full. Larger rooms need more CPU per tick (`docs/RELEASES.md`, "Room size and CPU").
 > - **Not implemented:** HRTF/ITD.
 > - **Diagnostic:** echo-to-self (`SLV_ECHO_AUTOSTART` or `{"echo":true}`).
 >

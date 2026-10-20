@@ -296,6 +296,11 @@ check "TURN: no TURN, knobs present but empty -> the same janus.jcfg" '[ "$(sha2
 # tests/golden/defaults-knobs-off holds what the pre-knob image's own entrypoint generated (an earlier image, run with
 # JS_PUBLIC_IP=203.0.113.7 and this file's run_ep environment), plus that image's janus.plugin.slvoice.jcfg.
 GOLDEN0="$HERE/golden/defaults-knobs-off"
+ENVSTUB="$WORK/janus-stub-roomsize"
+printf '#!/bin/sh
+echo "STUB-ROOM-SIZE ${JS_ROOM_SIZE-<unset>}"
+' > "$ENVSTUB"
+chmod +x "$ENVSTUB"
 VISSTUB="$WORK/janus-stub-vis"
 printf '#!/bin/sh\necho "STUB-JANUS-RAN $*"\necho "STUB-ENV JS_VIS_FAIL_CLOSED=${JS_VIS_FAIL_CLOSED-<unset>} JS_VIS_STALE_MS=${JS_VIS_STALE_MS-<unset>}"\n' > "$VISSTUB"
 chmod +x "$VISSTUB"
@@ -444,6 +449,28 @@ check "no JS_JOIN_MEDIA_TIMEOUT_S -> 30 printed" 'has "INFO: empty_room_grace_s=
 
 run_ep JS_JOIN_MEDIA_TIMEOUT_S=10
 check "JS_JOIN_MEDIA_TIMEOUT_S=10 -> 10 printed" 'has "join_media_timeout_s=10"'
+
+# ---- Room size: default 50, 2 to 110, anything else is a WARNING and 50 ----
+check "no JS_ROOM_SIZE -> 50 printed, no WARNING, in the effective config" 'has "INFO: room_size=50 (JS_ROOM_SIZE" && ! has "JS_ROOM_SIZE=" && grep -Fq "\"JS_ROOM_SIZE\":\"50\"" "$CONF/state/effective-config.json"'
+
+run_ep JS_ROOM_SIZE=64 JANUS_BIN="$ENVSTUB"
+check "JS_ROOM_SIZE=64 -> 64 printed, exported to Janus, in the effective config" 'has "INFO: room_size=64 (JS_ROOM_SIZE" && has "STUB-ROOM-SIZE 64" && grep -Fq "\"JS_ROOM_SIZE\":\"64\"" "$CONF/state/effective-config.json"'
+
+run_ep JS_ROOM_SIZE=2
+check "JS_ROOM_SIZE=2 (the lower bound) -> 2, no WARNING" 'has "INFO: room_size=2 (JS_ROOM_SIZE" && ! has "WARNING: JS_ROOM_SIZE"'
+
+run_ep JS_ROOM_SIZE=110
+check "JS_ROOM_SIZE=110 (the upper bound) -> 110, no WARNING" 'has "INFO: room_size=110 (JS_ROOM_SIZE" && ! has "WARNING: JS_ROOM_SIZE"'
+
+for val in 1 0 111 5000 abc 50x -5 ""; do
+	run_ep JS_ROOM_SIZE="$val" JANUS_BIN="$ENVSTUB"
+	if [ -n "$val" ]; then
+		want="WARNING: JS_ROOM_SIZE='$val' is not a whole number from 2 to 110; using 50"
+		check "JS_ROOM_SIZE='$val' -> WARNING, and 50" 'has "$want" && has "INFO: room_size=50 (JS_ROOM_SIZE" && has "STUB-ROOM-SIZE 50" && grep -Fq "\"JS_ROOM_SIZE\":\"50\"" "$CONF/state/effective-config.json"'
+	else
+		check "JS_ROOM_SIZE empty -> the default 50, no WARNING" 'has "INFO: room_size=50 (JS_ROOM_SIZE" && ! has "WARNING: JS_ROOM_SIZE"'
+	fi
+done
 
 run_ep JS_ADMIN_BIND=10.0.0.225
 check "JS_ADMIN_BIND=10.0.0.225 -> INFO names it, no WARN" 'has "INFO: admin API bind=10.0.0.225 port=14225" && ! has "reachable on all interfaces"'

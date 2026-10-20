@@ -80,6 +80,7 @@ over the whole config dir by default (that was the old model).
 | `JS_WS_PORT` | `janus.transport.websockets.jcfg` → `ws_port` (used when `JS_WS_ENABLED=true`) | `8188` |
 | `JS_EMPTY_ROOM_GRACE_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a non-permanent room empty this many seconds is destroyed; `0` disables; an invalid value is ignored with a WARN | `60` |
 | `JS_JOIN_MEDIA_TIMEOUT_S` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: a participant whose PeerConnection is not up this many seconds after joining is reaped from its room, as a hangup leaves; `0` disables; an invalid value is ignored with a WARN | `30` |
+| `JS_ROOM_SIZE` | no jcfg key — exported by the entrypoint, read by the slvoice plugin at init: the most participants one room admits; a join beyond it is refused as room full (error 495); a whole number from 2 to 110 (the most the plugin is built for), and the value in force is shown in the start-up lines, on the self-check board and as `room_capacity` in the Admin API `handle_info` reply; an invalid value logs a WARNING and uses the default | `50` |
 
 The entrypoint also forces `http = true` and `admin_http = true`, and sets `ws`
 from `JS_WS_ENABLED`.
@@ -678,6 +679,7 @@ its knobs have no "before".
 | `JS_NAT_EXTRA_IPS` | *(unset)* | `nat_1_1_mapping` held only the single public address | `b96e7b3` |
 | `ALLOW_INSECURE_DEV` | `false` | no secret check: blank secrets started. The `false` default *is* the fail-closed-secrets behaviour change | `b96e7b3` |
 | `JS_JOIN_MEDIA_TIMEOUT_S` | `30` | a joined participant whose PeerConnection never came up stayed in the room — holding a mix slot and blocking the room's grace destroy — until its Janus session ended, which the sim's long-poll could postpone indefinitely. **Deliberate behaviour change**: such a participant is now reaped after 30 s; `0` restores the old behaviour | `3618e9a` (released in 1.1.0) |
+| `JS_ROOM_SIZE` | `50` | a room admitted 64 participants (0.7.0), fixed in the build. **Deliberate behaviour change**: a join beyond 50 is refused as room full; up to 110 can be set. Measured tick cost is in `docs/RELEASES.md` ("Room size and CPU") | 1.2.0 |
 | `JS_PUBLIC_IP_DISCOVERY` | `auto` | `JS_PUBLIC_HOST` was resolved once by the container resolver and overrode `JS_PUBLIC_IP`; that is `static`. **Deliberate behaviour change**: `auto` puts the STUN-discovered public address first, and keeps a literal `JS_PUBLIC_IP`. A hairpinned DDNS name then no longer yields a private-only mapping. `static` restores the old resolution, but keeps the literal | `9831943` |
 | `JS_STUN_SERVER` | `stun.l.google.com:19302` | no STUN query (the container made no outbound STUN request) | `9831943` |
 | `JS_PUBLIC_IP_DNS_RESOLVER` | `1.1.1.1` | no external DNS query (the container resolver only) | `9831943` |
@@ -812,6 +814,9 @@ operator knobs.
     for as long as its Janus session lived. This default deliberately changes behaviour: it is the fix.
     `JS_JOIN_MEDIA_TIMEOUT_S=0` restores the old behaviour. A participant that had media and lost it is
     unaffected (the hangup path).
+- **`JS_ROOM_SIZE`, first released in 1.2.0**
+  - **The room limit is 50 participants by default** (it was 64 in 0.7.0). A join beyond it is refused as room
+    full (error 495). `JS_ROOM_SIZE` sets it from 2 to 110; an invalid value logs a WARNING and uses 50.
 - **`b96e7b3` and its follow-up hotfix `8d56823`**
   - **Blank `JS_API_SECRET` or `JS_ADMIN_SECRET` now refuses to start.**
     `[entrypoint] FATAL: … empty; refusing to start. Set JS_API_SECRET=<the sim's

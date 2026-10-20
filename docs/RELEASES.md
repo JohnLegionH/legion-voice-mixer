@@ -42,7 +42,8 @@ Changes a 0.7.0 operator will see with the defaults:
 - **Empty rooms are removed** after `JS_EMPTY_ROOM_GRACE_S` seconds (default `60`; `0` keeps rooms until restart).
 - **A participant whose PeerConnection never comes up is removed** `JS_JOIN_MEDIA_TIMEOUT_S` seconds after joining
   (default `30`; `0` restores the old behaviour).
-- **The room limit is 110 participants** (it was 64). A join beyond it is refused.
+- **The room limit is 50 participants by default** (it was 64 in 0.7.0). `JS_ROOM_SIZE` sets it up to 110, the most the
+  plugin is built for. A join beyond the limit is refused as room full.
 - **Quiet but audible mixes are sent.** Encode-skip now applies only to an empty or exactly-zero mix; there is no
   level floor, so a talker at speech level beyond about 33 m under the default curve is heard. Encode CPU rises a
   little for listeners whose only in-range talker used to fall below the old floor.
@@ -59,13 +60,38 @@ Changes a 0.7.0 operator will see with the defaults:
 Nothing else changes with the default configuration: with none of the new options set, the generated Janus
 configuration has the same settings as the previous release's.
 
+### Room size and CPU
+
+Every room mixes on its own thread, and each 20 ms tick encodes one Opus frame per listener, so a tick's cost grows with
+the number of participants. The room limit is therefore a setting (`JS_ROOM_SIZE`, default 50, 2 to 110) rather than a
+fixed number.
+
+Measured with the tick benchmark (`make bench_tick`, one thread, 1000 timed ticks per run, five runs per cell; the table
+gives the median over the runs). Machine: Intel Core i7-12700KF, run in a Docker Desktop Linux container on Windows 11
+with no CPU limit. The tick budget is 20 ms. Every listener is encoded on every tick in this benchmark, so the one in
+ten case saves only the mixing work.
+
+| Participants | All talking, p50 | All talking, p95 | One in ten talking, p50 | One in ten talking, p95 |
+|---|---|---|---|---|
+| 32 | 11.15 ms | 12.16 ms | 9.88 ms | 10.88 ms |
+| 50 | 17.75 ms | 19.37 ms | 15.71 ms | 17.35 ms |
+| 64 | 23.41 ms | 25.20 ms | 20.45 ms | 22.62 ms |
+| 80 | 30.37 ms | 32.94 ms | 26.04 ms | 29.13 ms |
+| 96 | 37.16 ms | 40.11 ms | 31.29 ms | 34.31 ms |
+| 110 | 43.42 ms | 47.08 ms | 36.62 ms | 39.95 ms |
+
+Above about 50 participants a room overran the 20 ms tick on that machine. At 50 the all-talking p95 was within 1 ms
+of the budget (one of the five runs was 20.18 ms), so it is at the edge. A server's per-core speed is often lower than
+that desktop's, so a server may need a smaller room size than 50; check the tick histogram in the Admin API
+`handle_info` reply (`overruns`, `ge20ms`) under real load before raising it.
+
 ### Spatial audio
 
 - Distance cull with hysteresis, distance attenuation and constant-power stereo panning from the geometry the viewer
   sends, with a camera-position leash. The five constants are settable in `etc/janus/janus.plugin.slvoice.jcfg`
   (all optional, validated together).
 - Per-source mute and gain, a join-time room capacity check, and an echo delay ring allocated only when echo is used.
-- Opus encoder tuning and the participant cap can be overridden at build time. A tick benchmark (`tests/bench_tick.c`)
+- Opus encoder tuning and the largest room size can be overridden at build time. A tick benchmark (`tests/bench_tick.c`)
   is included.
 
 ### Visibility and moderation

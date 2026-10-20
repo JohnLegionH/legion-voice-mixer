@@ -94,6 +94,7 @@ DEFAULTS = {
     "JS_STUN_SERVER": "stun.l.google.com:19302",
     "JS_SELFCHECK_TIMEOUT_S": "20",
     "JS_SELFCHECK_INBOUND_MAX_AGE_H": "168",
+    "JS_ROOM_SIZE": "50",
 }
 
 TITLES = {
@@ -1021,6 +1022,7 @@ def load_config(environ):
         "admin_base": values["JS_ADMIN_BASEPATH"],
         "admin_bind": values["JS_ADMIN_BIND"],
         "admin_secret": environ.get("JS_ADMIN_SECRET") or "",
+        "room_size": values["JS_ROOM_SIZE"],
         "timeout": positive("JS_SELFCHECK_TIMEOUT_S", 20.0),
         "inbound_max_age_h": positive("JS_SELFCHECK_INBOUND_MAX_AGE_H", 168.0),
         "state_file": environ.get("SLV_ADDR_STATE_FILE") or "/run/legion-voice/public-address.json",
@@ -1064,13 +1066,15 @@ def exit_code_for(results):
     return 0
 
 
-def build_report(results, mode, when, duration, bound, candidates=None, candidates_file=None):
+def build_report(results, mode, when, duration, bound, candidates=None, candidates_file=None, room_size=None):
     counts = dict((status.lower(), sum(1 for r in results if r["status"] == status))
                   for status in (PASS, WARN, FAIL, INCONCLUSIVE))
     checks = [dict((k, v) for k, v in r.items() if not k.startswith("_")) for r in results]
     report = {"schema": 1, "tool": "legion-voice-selfcheck", "mode": mode, "time": when,
               "duration_s": round(duration, 1), "timeout_s": bound, "verdict": worst_status(results),
               "summary": counts, "exit_code": exit_code_for(results), "checks": checks}
+    if room_size is not None:
+        report["room_size"] = room_size
     if candidates is not None:
         report["candidates"] = {"available": candidates.get("available"), "reason": candidates.get("reason"),
                                 "handles": len(candidates.get("handles") or []), "totals": candidates.get("totals"),
@@ -1090,6 +1094,8 @@ def render_block(report, report_file):
             lines.append("[selfcheck]     remediation: %s" % check["remediation"])
         for note in check["notes"]:
             lines.append("[selfcheck]     note: %s" % note)
+    if report.get("room_size"):
+        lines.append("[selfcheck] INFO room size: %s participants per room (JS_ROOM_SIZE; 2 to 110)" % report["room_size"])
     if report.get("candidates"):
         lines.append("[selfcheck] INFO candidates (from Admin API handle_info): %s; JSON %s"
                      % (report["candidates"]["summary"], report["candidates"]["file"]))
@@ -1173,7 +1179,7 @@ def main(argv=None, environ=None, runner=None, out=None, collector=None):
     candidates = collector(cfg, budget)
     write_json(cfg["candidates_file"], candidates)
     report = build_report(results, "startup" if flags["startup"] else "on-demand", when, time.monotonic() - started,
-                          bound, candidates, cfg["candidates_file"])
+                          bound, candidates, cfg["candidates_file"], cfg["room_size"])
     error = write_json(cfg["report_file"], report)
     text = json.dumps(report, indent=2) + "\n" if flags["json"] else render_block(report, cfg["report_file"])
     out.write(text)   # one write, so the block is not interleaved with other log output

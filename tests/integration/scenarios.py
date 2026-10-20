@@ -2600,15 +2600,22 @@ async def s53_an_old_sim_changes_nothing(ctx: Ctx) -> None:
             raise Fail("the room reports no positions and counts nothing", rp)
 
 
-async def s54_a_full_room_of_110(ctx: Ctx) -> None:
-    """A room at its cap of 110 participants and one peer_pos naming all of them: 110 entries (about 9 KB) apply whole, every
-    participant is observed against a fresh point, 128 entries still apply and 129 are refused whole (too_big).
+async def s54_a_full_room(ctx: Ctx) -> None:
+    """A room filled to its configured size (JS_ROOM_SIZE, 50 by default; pass --room-size when the mixer was started with
+    another value) accepts every one of those joins and refuses the next with error_code 495. The room reports its size as
+    room_capacity. One peer_pos naming every participant then applies whole, every participant is observed against a fresh
+    point, 128 entries still apply and 129 are refused whole (too_big).
 
-    Needs a wide scratch mixer: every join with an offer binds ports from the RTP range even when no media follows, so it
-    wants a JS_RTP_PORT_RANGE of several hundred ports and a JS_JOIN_MEDIA_TIMEOUT_S of 120 (the first joins must outlive the
-    last). On a mixer with the usual 20 ports it skips. The 110 long-polls need their own connection pool: the shared session
-    allows 100 connections."""
+    Run it twice: against a mixer at the default size, and against a scratch mixer started with JS_ROOM_SIZE=110 (the most an
+    operator can set). Needs a wide scratch mixer: every join with an offer binds ports from the RTP range even when no media
+    follows, so it wants a JS_RTP_PORT_RANGE of several hundred ports and a JS_JOIN_MEDIA_TIMEOUT_S of 120 (the first joins must
+    outlive the last). On a mixer with the usual 20 ports it skips. The long-polls need their own connection pool: the shared
+    session allows 100 connections."""
     import aiohttp
+
+    size = ctx.cfg.room_size
+    if not 2 <= size <= 110:
+        raise Skip(f"--room-size {size} is outside the range a mixer accepts (2 to 110)")
 
     class _CloseSession:
         def __init__(self, session):
@@ -2619,37 +2626,48 @@ async def s54_a_full_room_of_110(ctx: Ctx) -> None:
 
     r = ctx.new_room()
     peers: list = []
-    offer = await NoMediaPeer.make_offer()   # one offer for every join: making 110 would dominate the run
+    offer = await NoMediaPeer.make_offer()   # one offer for every join: making one per join would dominate the run
     pool = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0))
     try:
-        for start in range(0, 110, 10):
+        for start in range(0, size, 10):
             peers += await asyncio.gather(*(ctx.join_without_media(f"P{n}", r, offer_sdp=offer, http=pool)
-                                            for n in range(start, start + 10)))
+                                            for n in range(start, min(start + 10, size))))
     except RuntimeError as e:
         if "490" in str(e):
-            raise Skip(f"only {len(peers)} of 110 participants could join: Janus ran out of RTP ports. A scratch mixer for this "
+            raise Skip(f"only {len(peers)} of {size} participants could join: Janus ran out of RTP ports. A scratch mixer for this "
                        "scenario needs a JS_RTP_PORT_RANGE of several hundred ports (a join with an offer binds ports even "
-                       "when no media follows), and a JS_JOIN_MEDIA_TIMEOUT_S above the time 110 joins take")
+                       f"when no media follows), and a JS_JOIN_MEDIA_TIMEOUT_S above the time {size} joins take")
         raise
     finally:
         ctx.background.append(_CloseSession(pool))   # after the peers, which stop on it
-    await ctx.until_participants(r, lambda rows: len(rows) == 110, "110 participants in the room", timeout=20.0)
+    await ctx.until_participants(r, lambda rows: len(rows) == size, f"{size} participants in the room", timeout=20.0)
+
+    info = await ctx.info(peers[0]) or {}
+    if "room_capacity" in info and info.get("room_capacity") != size:
+        raise Fail(f"the room reports its size ({size}) as room_capacity; is --room-size the value the mixer was started with?",
+                   {"room_capacity": info.get("room_capacity"), "room_participants": info.get("room_participants")})
+
+    extra = await ctx.join_without_media("PX", r, offer_sdp=offer, http=pool, expect_join=False)
+    reply = extra.join_reply or {}
+    if reply.get("audiobridge") == "joined" or reply.get("error_code") != 495:
+        raise Fail(f"join number {size + 1} is refused with error_code 495 (room full)", reply)
+    await ctx.until_participants(r, lambda rows: len(rows) == size, f"the refused join left the room at {size}", timeout=10.0)
 
     feeder = PosFeeder(ctx.admin, r, {p.display: (100.0 + (n % 11) * 5.0, 100.0 + (n // 11) * 5.0, 25.0) for n, p in enumerate(peers)})
     reply = await feeder.send_once()
-    if (reply.get("slvoice") != "applied" or reply.get("entries") != 110 or reply.get("skipped") != 0
+    if (reply.get("slvoice") != "applied" or reply.get("entries") != size or reply.get("skipped") != 0
             or reply.get("dropped") != 0 or reply.get("vis_protocol") != 3):
-        raise Fail("110 entries apply whole", reply)
-    for probe in (peers[0], peers[55], peers[109]):
+        raise Fail(f"{size} entries apply whole", reply)
+    for probe in (peers[0], peers[size // 2], peers[size - 1]):
         await until(lambda probe=probe: ctx.admin.handle_info(probe),
                     lambda i: i is not None and _obs(i).get("state") == "fresh" and (_obs(i).get("ticks_observed") or 0) > 0,
                     f"{probe.name} observed against a fresh sim point", POLL_TIMEOUT, show=pick)
     rp = _room_pos(await ctx.admin.handle_info(peers[0]))
-    if rp.get("store_size") != 110 or rp.get("entries_applied") != 110 or rp.get("no_sim_now") != 0:
-        raise Fail("the room holds 110 points and every participant has one", rp)
+    if rp.get("store_size") != size or rp.get("entries_applied") != size or rp.get("no_sim_now") != 0:
+        raise Fail(f"the room holds {size} points and every participant has one", rp)
 
     padded = {p.display: [0, 0, 0, 800, 500] for p in peers}
-    for _ in range(18):
+    for _ in range(128 - size):
         padded[new_display()] = [0, 0, 0, 800, 500]
     reply = await ctx.admin.peer_pos(r, feeder._seq + 1, padded)
     if reply.get("slvoice") != "applied" or reply.get("entries") != 128:
@@ -2751,6 +2769,7 @@ SCENARIOS = [
              "peer_pos observe: would-use-sim", s52_a_viewer_with_no_position_would_use_the_sim),
     Scenario("S53", "an old sim (no peer_pos): behaviour as before, nothing observed, vis_protocol 3 advertised",
              "peer_pos skew: old sim, new mixer", s53_an_old_sim_changes_nothing),
-    Scenario("S54", "a full room of 110: one peer_pos of 110 entries applies whole; 128 apply, 129 are refused",
-             "peer_pos size limits at the room cap", s54_a_full_room_of_110),
+    Scenario("S54", "a full room at the configured size (50 by default, 110 at most): the next join is refused; one peer_pos "
+             "naming everyone applies whole; 128 apply, 129 are refused",
+             "room size enforced at join; peer_pos size limits at the room cap", s54_a_full_room),
 ]

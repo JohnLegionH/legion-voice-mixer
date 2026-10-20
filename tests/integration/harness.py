@@ -117,6 +117,9 @@ class Config:
     #: S31 needs a mixer deliberately started under the clamp; 0 = it skips, because a correctly configured
     #: mixer cannot show the clamp.
     stale_ms_started_with: int = 0
+    #: The JS_ROOM_SIZE this mixer was STARTED with (50 is the default when the variable is not set). S54 fills a room to
+    #: exactly this size and checks that one more join is refused.
+    room_size: int = 50
     #: Turn Skip into Fail. Only for the "behaviour absent" proof runs against an older image, where
     #: a scenario that merely skips proves nothing. Never for a reporting run.
     prove_fail: bool = False

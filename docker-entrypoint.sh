@@ -73,6 +73,10 @@ export JS_EMPTY_ROOM_GRACE_S
 # it (0 disables). Read by the plugin from the process environment, so exported like the grace.
 : "${JS_JOIN_MEDIA_TIMEOUT_S:=30}"
 export JS_JOIN_MEDIA_TIMEOUT_S
+# Participants one room admits. The plugin reads it from the process environment and checks the range
+# itself; the value is also checked here (below) so the start-up lines and the self-check show the
+# effective size. 110 is the most the image's plugin is built for.
+: "${JS_ROOM_SIZE:=50}"
 # The visibility authority knobs, read by the plugin
 # from the process environment. 0 is shadow mode: the plugin tracks and counts arming, epochs and staleness, and audio
 # is unchanged. 1 silences unarmed or stale listeners in rooms the sim declared (vis_authority). Do not set 1 unless
@@ -167,6 +171,16 @@ if [ "$JS_SELFCHECK_INBOUND_MAX_AGE_H" -eq 0 ]; then
 	echo "[entrypoint] WARNING: JS_SELFCHECK_INBOUND_MAX_AGE_H=0 is not a usable age; using 168" >&2
 	JS_SELFCHECK_INBOUND_MAX_AGE_H=168
 fi
+# The room size: a whole number from 2 to 110 (the most the plugin is built for), else 50 with a WARNING.
+case "$JS_ROOM_SIZE" in
+	''|*[!0-9]*) room_size_ok=0 ;;
+	*) if [ "${#JS_ROOM_SIZE}" -le 3 ] && [ "$JS_ROOM_SIZE" -ge 2 ] && [ "$JS_ROOM_SIZE" -le 110 ]; then room_size_ok=1; else room_size_ok=0; fi ;;
+esac
+if [ "$room_size_ok" -eq 0 ]; then
+	echo "[entrypoint] WARNING: JS_ROOM_SIZE='${JS_ROOM_SIZE}' is not a whole number from 2 to 110; using 50" >&2
+	JS_ROOM_SIZE=50
+fi
+export JS_ROOM_SIZE
 JS_ICE_DIAG_HISTORY=$(uint_or_default JS_ICE_DIAG_HISTORY "$JS_ICE_DIAG_HISTORY" 200)
 if [ "${#JS_ICE_DIAG_HISTORY}" -gt 5 ] || [ "$JS_ICE_DIAG_HISTORY" -gt 10000 ]; then
 	echo "[entrypoint] WARNING: JS_ICE_DIAG_HISTORY=${JS_ICE_DIAG_HISTORY} is above 10000; using 10000" >&2
@@ -223,6 +237,7 @@ case "$TURN_MODE" in
 	*)    echo "[entrypoint] INFO: turn=${TURN_MODE} server=${JS_TURN_SERVER:-<none>} port=${TURN_PORT} type=${TURN_TYPE} user=$(secret_state "$JS_TURN_USER") pwd=$(secret_state "$JS_TURN_PWD")" ;;
 esac
 echo "[entrypoint] INFO: empty_room_grace_s=${JS_EMPTY_ROOM_GRACE_S} join_media_timeout_s=${JS_JOIN_MEDIA_TIMEOUT_S}"
+echo "[entrypoint] INFO: room_size=${JS_ROOM_SIZE} (JS_ROOM_SIZE, 2 to 110; a join beyond it is refused as room full)"
 case "$(printf '%s' "$JS_VIS_FAIL_CLOSED" | tr '[:upper:]' '[:lower:]')" in
 	1|true|yes|on) vis_mode="fail-closed ENABLED" ;;
 	*)             vis_mode="fail-closed DISABLED (shadow mode)" ;;
@@ -569,11 +584,11 @@ addr_write_state "$ADDR_JSON" "[entrypoint]"
 # values but not the defaults assigned above. No secrets go in this file.
 : "${SLV_EFFECTIVE_CONFIG:=/run/legion-voice/effective-config.json}"
 slv_json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-EFFECTIVE_JSON=$(printf '{"JS_RTP_PORT_RANGE":"%s","JS_HTTP_PORT":"%s","JS_HTTP_BASEPATH":"%s","JS_ADMIN_PORT":"%s","JS_ADMIN_BASEPATH":"%s","JS_ADMIN_BIND":"%s","JS_STUN_SERVER":"%s","JS_SELFCHECK_TIMEOUT_S":"%s","JS_SELFCHECK_INBOUND_MAX_AGE_H":"%s"}' \
+EFFECTIVE_JSON=$(printf '{"JS_RTP_PORT_RANGE":"%s","JS_HTTP_PORT":"%s","JS_HTTP_BASEPATH":"%s","JS_ADMIN_PORT":"%s","JS_ADMIN_BASEPATH":"%s","JS_ADMIN_BIND":"%s","JS_STUN_SERVER":"%s","JS_SELFCHECK_TIMEOUT_S":"%s","JS_SELFCHECK_INBOUND_MAX_AGE_H":"%s","JS_ROOM_SIZE":"%s"}' \
 	"$(slv_json_escape "$JS_RTP_PORT_RANGE")" "$(slv_json_escape "$JS_HTTP_PORT")" "$(slv_json_escape "$JS_HTTP_BASEPATH")" \
 	"$(slv_json_escape "$JS_ADMIN_PORT")" "$(slv_json_escape "$JS_ADMIN_BASEPATH")" "$(slv_json_escape "$JS_ADMIN_BIND")" \
 	"$(slv_json_escape "$JS_STUN_SERVER")" "$(slv_json_escape "$JS_SELFCHECK_TIMEOUT_S")" \
-	"$(slv_json_escape "$JS_SELFCHECK_INBOUND_MAX_AGE_H")")
+	"$(slv_json_escape "$JS_SELFCHECK_INBOUND_MAX_AGE_H")" "$(slv_json_escape "$JS_ROOM_SIZE")")
 slv_write_file "$SLV_EFFECTIVE_CONFIG" "$EFFECTIVE_JSON" "[entrypoint]"
 
 set_kv "$HTTP_JCFG" http            true
