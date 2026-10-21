@@ -566,11 +566,12 @@ FAKE_CANDIDATES = {"schema": 1, "time": "now", "available": True, "reason": None
 
 
 class Report(Base):
-    def run_main(self, statuses, argv=("--json",), candidates=None):
+    def run_main(self, statuses, argv=("--json",), candidates=None, extra_env=None):
         out = io.StringIO()
-        env = {"SLV_SELFCHECK_FILE": os.path.join(self.dir, "run", "selfcheck.json"),
+        env = ({"SLV_SELFCHECK_FILE": os.path.join(self.dir, "run", "selfcheck.json"),
                "SLV_SELFCHECK_CANDIDATES_FILE": os.path.join(self.dir, "run", "candidates.json"),
-               "SLV_EFFECTIVE_CONFIG": os.path.join(self.dir, "none.json")}
+               "SLV_EFFECTIVE_CONFIG": os.path.join(self.dir, "none.json")})
+        env.update(extra_env or {})
         ids = ["C1", "C2a", "C2b", "C3", "C4", "C5", "C6"]
         runner = lambda cfg, budget, startup: [fake_result(ids[i], s) for i, s in enumerate(statuses)]
         code = selfcheck.main(list(argv), env, runner, out, lambda cfg, budget: candidates or FAKE_CANDIDATES)
@@ -602,6 +603,21 @@ class Report(Base):
                             for l in lines), lines)
         self.assertIn("===== END legion-voice self-check: worst INCONCLUSIVE; 1 PASS, 1 WARN, 0 FAIL, 1 INCONCLUSIVE; "
                       "exit 2", lines[-1])
+
+    def test_room_size_is_on_the_board_and_in_the_json(self):
+        code, text, _ = self.run_main([PASS], argv=())
+        self.assertIn("[selfcheck] INFO room size: 50 participants per room (JS_ROOM_SIZE; 2 to 110)", text.split("\n"))
+        self.assertEqual(json.loads(self.run_main([PASS])[1])["room_size"], "50")
+        code, text, _ = self.run_main([PASS], argv=(), extra_env={"JS_ROOM_SIZE": "110"})
+        self.assertIn("[selfcheck] INFO room size: 110 participants per room (JS_ROOM_SIZE; 2 to 110)", text.split("\n"))
+
+    def test_room_size_comes_from_the_effective_config(self):
+        path = os.path.join(self.dir, "effective.json")
+        with open(path, "w") as handle:
+            json.dump({"JS_ROOM_SIZE": "64"}, handle)
+        code, text, _ = self.run_main([PASS], argv=(), extra_env={"SLV_EFFECTIVE_CONFIG": path})
+        self.assertEqual(code, 0)
+        self.assertIn("[selfcheck] INFO room size: 64 participants per room (JS_ROOM_SIZE; 2 to 110)", text.split("\n"))
 
     def test_candidates_mode(self):
         code, text, env = self.run_main([], argv=("--candidates", "--json"))

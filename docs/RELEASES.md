@@ -42,7 +42,11 @@ Changes a 0.7.0 operator will see with the defaults:
 - **Empty rooms are removed** after `JS_EMPTY_ROOM_GRACE_S` seconds (default `60`; `0` keeps rooms until restart).
 - **A participant whose PeerConnection never comes up is removed** `JS_JOIN_MEDIA_TIMEOUT_S` seconds after joining
   (default `30`; `0` restores the old behaviour).
-- **The room limit is 110 participants** (it was 64). A join beyond it is refused.
+- **The room limit is 50 participants by default** (it was 64 in 0.7.0). `JS_ROOM_SIZE` sets it up to 110, the most the
+  plugin is built for. A join beyond the limit is refused as room full.
+- **The Opus encoder complexity default is 5** (0.7.0 used 9, set in `src/janus_slvoice.c`). The encoder does less work
+  per listener, so a tick takes about 35% less CPU at 50 to 80 participants (table below); the audio is encoded with a
+  cheaper search at the same 64 kbit/s bitrate. It is a build-time setting (`-DSLV_OPUS_COMPLEXITY=N`), not a runtime one.
 - **Quiet but audible mixes are sent.** Encode-skip now applies only to an empty or exactly-zero mix; there is no
   level floor, so a talker at speech level beyond about 33 m under the default curve is heard. Encode CPU rises a
   little for listeners whose only in-range talker used to fall below the old floor.
@@ -59,13 +63,39 @@ Changes a 0.7.0 operator will see with the defaults:
 Nothing else changes with the default configuration: with none of the new options set, the generated Janus
 configuration has the same settings as the previous release's.
 
+### Room size and CPU
+
+Every room mixes on its own thread, and each 20 ms tick encodes one Opus frame per listener, so a tick's cost grows with
+the number of participants. The room limit is therefore a setting (`JS_ROOM_SIZE`, default 50, 2 to 110) rather than a
+fixed number.
+
+Measured with the tick benchmark (`make bench_tick`, one thread, 300 timed ticks per run after 10 warm-up ticks, three runs
+per cell; the table gives the median over the runs), built once per encoder complexity at the default 64 kbit/s bitrate.
+Machine: Intel Core i7-12700KF, run in a Docker Desktop Linux container on Windows 11 with no CPU limit. The tick budget
+is 20 ms. Every listener is encoded on every tick in this benchmark, so the one in ten case saves only the mixing work.
+
+| Complexity | Participants | All talking, p50 | All talking, p95 | One in ten talking, p50 | One in ten talking, p95 |
+|---|---|---|---|---|---|
+| 9 (0.7.0) | 50 | 17.51 ms | 18.74 ms | 15.70 ms | 19.28 ms |
+| 9 (0.7.0) | 64 | 23.10 ms | 24.72 ms | 20.15 ms | 24.21 ms |
+| 9 (0.7.0) | 80 | 29.67 ms | 31.47 ms | 25.48 ms | 30.57 ms |
+| 5 (default) | 50 | 11.27 ms | 11.91 ms | 9.39 ms | 12.04 ms |
+| 5 (default) | 64 | 14.84 ms | 15.53 ms | 12.29 ms | 15.37 ms |
+| 5 (default) | 80 | 19.78 ms | 21.39 ms | 15.73 ms | 19.82 ms |
+
+At the default complexity of 5, 64 participants fit within the 20 ms tick with headroom (p95 15.53 ms all talking,
+15.37 ms one in ten); 80 do not (p95 21.39 ms all talking; 19.82 ms with one in ten talking, which is only just inside). At
+complexity 9, 50 was at the edge (p95 18.74 ms all talking) and 64 overran. The room size default stays at 50 to leave
+room for cores slower than that desktop's. Check the tick histogram in the Admin API `handle_info` reply (`overruns`,
+`ge20ms`) under real load before raising `JS_ROOM_SIZE`.
+
 ### Spatial audio
 
 - Distance cull with hysteresis, distance attenuation and constant-power stereo panning from the geometry the viewer
   sends, with a camera-position leash. The five constants are settable in `etc/janus/janus.plugin.slvoice.jcfg`
   (all optional, validated together).
 - Per-source mute and gain, a join-time room capacity check, and an echo delay ring allocated only when echo is used.
-- Opus encoder tuning and the participant cap can be overridden at build time. A tick benchmark (`tests/bench_tick.c`)
+- Opus encoder tuning (complexity default 5) and the largest room size can be overridden at build time. A tick benchmark (`tests/bench_tick.c`)
   is included.
 
 ### Visibility and moderation

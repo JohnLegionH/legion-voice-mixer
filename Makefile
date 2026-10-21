@@ -102,6 +102,8 @@ TEST_LIFECYCLE_SRCS := tests/test_room_lifecycle.c src/sldata.c src/visbatch.c s
 TEST_VISAUTH_BIN  := tests/test_visauth
 TEST_VISAUTH_SRCS := tests/test_visauth.c src/sldata.c src/visbatch.c src/possync.c src/deferred.c src/joincap.c src/mixer/mix.c
 # test_joincap: the join capability (src/joincap.c). Links OpenSSL and libc only.
+TEST_ROOMSIZE_BIN := tests/test_roomsize
+TEST_ROOMSIZE_SRCS := tests/test_roomsize.c
 TEST_JOINCAP_BIN  := tests/test_joincap
 TEST_JOINCAP_SRCS := tests/test_joincap.c src/joincap.c
 TEST_SSL_CFLAGS   := -std=gnu11 -Wall -Wextra -g $(shell $(PKGCONFIG) --cflags openssl 2>/dev/null)
@@ -134,7 +136,7 @@ $(TARGET): $(OBJS)
 
 # Build and run ALL unit tests. `make test` is a required gate: it is also run
 # during the Docker image build (see Dockerfile), so a failure fails the image.
-test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN)
+test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(TEST_ROOMSIZE_BIN)
 	./$(TEST_SLDATA_BIN)
 	./$(TEST_MIX_BIN)
 	./$(TEST_VISBATCH_BIN)
@@ -147,6 +149,11 @@ test: $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN
 	./$(TEST_REDACT_BIN)
 	./$(TEST_VISAUTH_BIN)
 	./$(TEST_JOINCAP_BIN)
+	./$(TEST_ROOMSIZE_BIN)
+
+# test_roomsize: the runtime room size parser (header-only roomsize.h; libc only).
+$(TEST_ROOMSIZE_BIN): $(TEST_ROOMSIZE_SRCS) src/roomsize.h
+	$(CC) -std=gnu11 -Wall -Wextra -g -o $@ $(TEST_ROOMSIZE_SRCS)
 
 $(TEST_JOINCAP_BIN): $(TEST_JOINCAP_SRCS) src/joincap.h
 	$(CC) $(TEST_SSL_CFLAGS) -o $@ $(TEST_JOINCAP_SRCS) $(TEST_SSL_LIBS)
@@ -202,4 +209,4 @@ install: $(TARGET)
 	install -m 0644 $(TARGET) $(DESTDIR)$(PLUGINDIR)/$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(BENCH_TICK_BIN)
+	rm -f $(OBJS) $(TARGET) $(TEST_SLDATA_BIN) $(TEST_MIX_BIN) $(TEST_VISBATCH_BIN) $(TEST_POSSYNC_BIN) $(TEST_DEFERRED_BIN) $(TEST_ROSTER_BIN) $(TEST_AZIMUTH_BIN) $(TEST_PAN_BIN) $(TEST_LIFECYCLE_BIN) $(TEST_REDACT_BIN) $(TEST_VISAUTH_BIN) $(TEST_JOINCAP_BIN) $(TEST_ROOMSIZE_BIN) $(BENCH_TICK_BIN)

@@ -95,6 +95,7 @@
 #include "visauth.h"     /* epochs, the listener rule rows and the knobs (unit-tested) */
 #include "possync.h"     /* vis_protocol 3: sim-reported participant positions, observed only (unit-tested) */
 #include "joincap.h"     /* The sim-issued join capability (unit-tested) */
+#include "roomsize.h"    /* JS_ROOM_SIZE: the runtime room size (unit-tested) */
 #include "mixer/mix.h"   /* pure N-minus-one mixing math (unit-tested) */
 #include "mixer/vec3.h"  /* pure 3D vector math (geometry snapshot / leash) */
 #include "mixer/azimuth.h" /* horizontal azimuth of a source (pan input) */
@@ -180,22 +181,23 @@
  * (PEER_GAIN_CONVERSION_FACTOR in llvoicewebrtc.cpp), so linear = ug/220. */
 #define SLV_GAIN_FACTOR     220.0
 #define SLV_GAIN_MAX        4.0     /* clamp recovered per-source gain (sanity) */
-/* Max participants folded into one tick's mix, AND the room admission ceiling
- * (enforced at join — see the ROOM_FULL check). One number governs both: the mix
- * arrays are sized to it, so admitting past it is exactly what the old silent tick-
- * time truncation did. 110 matches Second Life's per-region limit; the measurement
- * shows it fits under realistic spread geometry,
- * though NOT under all-audible clustering. Overridable with -DSLV_MAX_MIX=N for
- * measurement builds; raising it exposes the O(N) encode and O(N^2) setup costs. */
+/* Max participants folded into one tick's mix: the compiled ceiling for the room size, which
+ * is set at run time with JS_ROOM_SIZE (default 50, see slv_room_size and the ROOM_FULL check).
+ * The mix arrays are sized to this, so the room size can never exceed it: admitting past it is
+ * exactly what the old silent tick-time truncation did. 110 matches Second Life's per-region
+ * limit. Rooms above about 50 can overrun the 20 ms tick (docs/RELEASES.md, "Room size and
+ * CPU"). Overridable with -DSLV_MAX_MIX=N for measurement builds; raising it exposes the O(N)
+ * encode and O(N^2) setup costs. */
 #ifndef SLV_MAX_MIX
 #define SLV_MAX_MIX         110
 #endif
 /* Opus encoder tuning for the per-listener mix. Both are overridable at build time
  * (-DSLV_OPUS_COMPLEXITY=N / -DSLV_OPUS_BITRATE=N) for measurement builds that sweep
- * encode cost, mirroring SLV_MAX_MIX; production values are unchanged. Complexity is
- * the dominant CPU lever of the two. */
+ * encode cost, mirroring SLV_MAX_MIX. Complexity is the dominant CPU lever of the two.
+ * Default complexity is 5: the per-listener encode is most of a tick's cost, and 5 is
+ * what WebRTC uses for voice on phones. Releases up to 0.7.0 used 9. */
 #ifndef SLV_OPUS_COMPLEXITY
-#define SLV_OPUS_COMPLEXITY 9        /* 0..10; 10 is max. */
+#define SLV_OPUS_COMPLEXITY 5        /* 0..10; 10 is max. */
 #endif
 /* NUMERIC-ONLY: OPUS_SET_BITRATE also accepts the sentinels OPUS_AUTO and
  * OPUS_BITRATE_MAX, which this integer define does NOT carry — do not expect them
@@ -357,6 +359,9 @@ static guint slv_empty_room_grace_s = SLV_EMPTY_ROOM_GRACE_S;
 /* Join-media timeout in seconds (SLV_JOIN_MEDIA_TIMEOUT_S, env JS_JOIN_MEDIA_TIMEOUT_S, parsed in
  * janus_slvoice_init). 0 disables the reap. */
 static guint slv_join_media_timeout_s = SLV_JOIN_MEDIA_TIMEOUT_S;
+/* Participants one room admits (env JS_ROOM_SIZE, parsed in janus_slvoice_init). Always between
+ * SLV_ROOM_SIZE_MIN and SLV_MAX_MIX; the mix arrays stay sized to SLV_MAX_MIX. */
+static int slv_room_size = SLV_ROOM_SIZE_DEFAULT > SLV_MAX_MIX ? SLV_MAX_MIX : SLV_ROOM_SIZE_DEFAULT;
 
 /* JS_VIS_FAIL_CLOSED and JS_VIS_STALE_MS, parsed by
  * janus_slvoice_vis_load_knobs from init. With fail-closed off (the default, "shadow mode") the authority state below is
@@ -1571,6 +1576,15 @@ int janus_slvoice_init(janus_callbacks *callback, const char *config_path) {
 		JANUS_LOG(LOG_INFO, "[%s] Join-media reap DISABLED (JS_JOIN_MEDIA_TIMEOUT_S=0): a participant without media stays until its session ends\n",
 			JANUS_SLVOICE_PACKAGE);
 
+	/* Room size from the process env: a whole number from SLV_ROOM_SIZE_MIN to the compiled maximum
+	 * SLV_MAX_MIX. Anything else is ignored with a WARN and the default stands. */
+	const char *rs_env = getenv("JS_ROOM_SIZE");
+	if(slv_room_size_parse(rs_env, SLV_MAX_MIX, &slv_room_size) == SLV_ROOM_SIZE_INVALID)
+		JANUS_LOG(LOG_WARN, "[%s] Ignoring invalid JS_ROOM_SIZE='%s' (want a whole number from %d to %d); using %d\n",
+			JANUS_SLVOICE_PACKAGE, rs_env, SLV_ROOM_SIZE_MIN, SLV_MAX_MIX, slv_room_size);
+	JANUS_LOG(LOG_INFO, "[%s] Room size: a room admits %d participants (JS_ROOM_SIZE; compiled maximum %d)\n",
+		JANUS_SLVOICE_PACKAGE, slv_room_size, SLV_MAX_MIX);
+
 	/* JS_VIS_FAIL_CLOSED, JS_VIS_STALE_MS and mixer_instance. */
 	janus_slvoice_vis_load_knobs();
 	/* JS_JOIN_CAP_REQUIRED and JS_JOIN_CAP_SECRET. */
@@ -1852,13 +1866,14 @@ json_t *janus_slvoice_query_session(janus_plugin_session *handle) {
 		json_object_set_new(info, "mix_sources", json_integer(active_others));
 		/* Room-level occupancy vs the join-time cap. DISTINCT from mix_memberships /
 		 * mix_sources above (those are per-session mix counts): room_participants is
-		 * this room's total membership, room_capacity is SLV_MAX_MIX, the ceiling the
+		 * this room's total membership, room_capacity is the room size (JS_ROOM_SIZE), the ceiling the
 		 * join path rejects past (ROOM_FULL). Diagnostic only — lets a poller see how
 		 * close a room is to full proactively, rather than learning it reactively when a
 		 * provision is rejected. Reuses the g_hash_table_size already read under this
 		 * same qroom->mutex hold; no new lock, no effect on admission/tick/audio. */
 		json_object_set_new(info, "room_participants", json_integer((json_int_t)g_hash_table_size(qroom->participants)));
-		json_object_set_new(info, "room_capacity", json_integer(SLV_MAX_MIX));
+		json_object_set_new(info, "room_capacity", json_integer(slv_room_size));
+		json_object_set_new(info, "room_capacity_max", json_integer(SLV_MAX_MIX));
 		json_t *hist = json_object();
 		json_object_set_new(hist, "lt5ms", json_integer((json_int_t)qroom->tick_hist[0]));
 		json_object_set_new(hist, "5to10ms", json_integer((json_int_t)qroom->tick_hist[1]));
@@ -3391,11 +3406,11 @@ static void *janus_slvoice_handler(void *data) {
 			janus_mutex_lock(&room->mutex);
 			guint room_pop = g_hash_table_size(room->participants);
 			janus_mutex_unlock(&room->mutex);
-			if(room_pop >= SLV_MAX_MIX) {
+			if(room_pop >= (guint)slv_room_size) {
 				janus_refcount_decrease(&room->ref);
 				error_code = JANUS_SLVOICE_ERROR_ROOM_FULL;
 				g_snprintf(error_cause, 512, "Room %"PRIu64" is at capacity (%u/%d)",
-					room_id, room_pop, SLV_MAX_MIX);
+					room_id, room_pop, slv_room_size);
 				goto respond;
 			}
 			char *answer_sdp = NULL;

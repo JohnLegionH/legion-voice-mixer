@@ -70,6 +70,10 @@ def parse_args(argv):
     p.add_argument("--stale-ms-started-with", type=int, default=0,
                    help="S31: the JS_VIS_STALE_MS this mixer was STARTED with, when that is "
                         "below the minimum staleness window, so S31 can check the clamp took effect. Without it S31 skips")
+    p.add_argument("--room-size", type=int, default=50,
+                   help="S54: the JS_ROOM_SIZE this mixer was STARTED with (default 50, the mixer's default). S54 fills a room to "
+                        "this size and checks that one more join is refused; run it once with the default and once against a "
+                        "scratch mixer started with JS_ROOM_SIZE=110")
     p.add_argument("--prove-fail", action="store_true",
                    help="report a SKIP as a FAIL. Only for the 'behaviour absent' proof runs against "
                         "an older image, where a scenario that merely skips proves nothing. Never for a "
@@ -121,6 +125,7 @@ async def main_async(args) -> int:
         join_cap_secret=(read_secret_file(args.join_cap_secret_file) if args.join_cap_secret_file
                          else args.join_cap_secret),
         stale_ms_started_with=args.stale_ms_started_with,
+        room_size=args.room_size,
         prove_fail=args.prove_fail,
         media_address=args.media_address,
     )
