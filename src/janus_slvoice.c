@@ -193,10 +193,11 @@
 #endif
 /* Opus encoder tuning for the per-listener mix. Both are overridable at build time
  * (-DSLV_OPUS_COMPLEXITY=N / -DSLV_OPUS_BITRATE=N) for measurement builds that sweep
- * encode cost, mirroring SLV_MAX_MIX; production values are unchanged. Complexity is
- * the dominant CPU lever of the two. */
+ * encode cost, mirroring SLV_MAX_MIX. Complexity is the dominant CPU lever of the two.
+ * Default complexity is 5: the per-listener encode is most of a tick's cost, and 5 is
+ * what WebRTC uses for voice on phones. Releases up to 0.7.0 used 9. */
 #ifndef SLV_OPUS_COMPLEXITY
-#define SLV_OPUS_COMPLEXITY 9        /* 0..10; 10 is max. */
+#define SLV_OPUS_COMPLEXITY 5        /* 0..10; 10 is max. */
 #endif
 /* NUMERIC-ONLY: OPUS_SET_BITRATE also accepts the sentinels OPUS_AUTO and
  * OPUS_BITRATE_MAX, which this integer define does NOT carry — do not expect them
